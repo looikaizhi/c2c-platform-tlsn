@@ -1,6 +1,24 @@
 import { Plugin } from './types';
 
 export const plugins: Record<string, Plugin> = {
+    alipay: {
+        name: 'Alipay Login Account',
+        description: 'Prove Alipay merchant logonName and masterCustomerId',
+        logo: '💰',
+        file: '/plugins/alipay.js',
+        parseResult: (json) => {
+            return json.results[json.results.length - 1].value
+        },
+    },
+    binance: {
+        name: 'Binance KYC Status',
+        description: 'Prove your Binance KYC status with selective disclosure',
+        logo: 'BNB',
+        file: '/plugins/binance.js',
+        parseResult: (json) => {
+            return json.results[json.results.length - 1].value;
+        },
+    },
     twitter: {
         name: 'Twitter Profile',
         description: 'Prove your Twitter profile information with cryptographic verification',
