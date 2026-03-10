@@ -15,7 +15,7 @@ export interface CrateLogFilter {
     name: string;
 }
 
-export type Body = JsonValue;
+export type Body = string;
 
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
 

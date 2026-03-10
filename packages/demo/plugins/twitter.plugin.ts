@@ -75,11 +75,11 @@ async function onClick() {
         {
             verifierUrl: VERIFIER_URL,
             proxyUrl: PROXY_URL_BASE + 'api.x.com',
-            maxRecvData: 4000,
-            maxSentData: 2000,
+            maxRecvData: 10000,
+            maxSentData: 6000,
             handlers: [
                 { type: 'SENT', part: 'START_LINE', action: 'REVEAL' },
-                { type: 'RECV', part: 'START_LINE', action: 'REVEAL' },
+                { type: 'RECV', part: 'ALL', action: 'REVEAL' },
                 {
                     type: 'RECV',
                     part: 'HEADERS',
@@ -128,6 +128,7 @@ function main() {
         );
 
         if (header) {
+            console.log(header)
             const cookie = header.requestHeaders.find((h: any) => h.name === 'Cookie')?.value;
             const csrfToken = header.requestHeaders.find((h: any) => h.name === 'x-csrf-token')?.value;
             const transactionId = header.requestHeaders.find((h: any) => h.name === 'x-client-transaction-id')?.value;

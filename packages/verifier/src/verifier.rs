@@ -146,6 +146,7 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     info!("============================================");
 
     info!("Sent data: {:?}", bytes_to_redacted_string(&sent, "█")?);
+    info!("Sent data: {}", bytes_to_redacted_string(&sent, "█")?);
     info!(
         "Received data: {:?}",
         bytes_to_redacted_string(&received, "█")?

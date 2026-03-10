@@ -50,6 +50,35 @@ browser.webRequest.onBeforeRequest.addListener(
     const managedWindow = windowManager.getWindowByTabId(details.tabId);
 
     if (managedWindow && details.tabId !== undefined) {
+      const url = new URL(details.url);
+
+      const staticExtensions = [
+        '.js',
+        '.css',
+        '.png',
+        '.jpg',
+        '.gif',
+        '.svg',
+        '.woff',
+        '.woff2',
+      ];
+      const isStatic = staticExtensions.some((ext) =>
+        url.pathname.endsWith(ext),
+      );
+
+      const ignoreDomains = ['monitor', 'track', 'analytics', 'log', 'dwcookie'];
+      const shouldIgnore = ignoreDomains.some((domain) =>
+        url.hostname.includes(domain),
+      );
+
+      if (isStatic || shouldIgnore) {
+        return;
+      }
+
+      if (details.type !== 'xmlhttprequest') {
+        return;
+      }
+
       const request: InterceptedRequest = {
         id: `${details.requestId}`,
         method: details.method,
@@ -67,7 +96,10 @@ browser.webRequest.onBeforeRequest.addListener(
       windowManager.addRequest(managedWindow.id, request);
     }
   },
-  { urls: ['<all_urls>'] },
+  {
+    urls: ['<all_urls>'],
+    types: ['xmlhttprequest'],
+  },
   ['requestBody', 'extraHeaders'],
 );
 
