@@ -175,6 +175,9 @@ export class SessionManager {
         if (includeVerifierTranscript) {
           sessionData[VERIFIER_TRANSCRIPT_SESSION_FLAG] = 'true';
         }
+        // Inject policy version for R.15 governance — proverOptions takes precedence over pluginConfig
+        sessionData['__tlsn_policy_version'] =
+          proverOptions.policyVersion ?? this.currentConfig?.policyVersion ?? 'unspecified';
 
         // ── Phase A: MPC-TLS 连接 ──────────────────────────────
         const t_conn = performance.now();

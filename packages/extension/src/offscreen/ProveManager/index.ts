@@ -43,6 +43,10 @@ type ClientMessage =
 type ServerMessage =
   | { type: 'session_registered'; sessionId: string }
   | {
+      type: 'transcript_ready';
+      transcriptCommitments: TranscriptCommitmentSummary[];
+    }
+  | {
       type: 'session_completed';
       results: HandlerResult[];
       transcriptCommitments?: TranscriptCommitmentSummary[];
@@ -183,6 +187,18 @@ export class ProveManager {
                 session.verifierServerMs = data.verifierServerMs;
                 session.responseReceived = true;
               }
+              break;
+            }
+
+            case 'transcript_ready': {
+              logger.debug(
+                '[ProveManager] transcript_ready received for prover:',
+                proverId,
+                'commitments:',
+                data.transcriptCommitments.length,
+              );
+              // Server signals MPC-TLS is complete. reveal_config was already
+              // sent before prover.reveal(), so no action needed here.
               break;
             }
 
