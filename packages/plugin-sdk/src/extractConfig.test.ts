@@ -154,4 +154,57 @@ describe('extractConfig', () => {
 
   // Note: The regex-based extractConfig cannot handle array fields like requests and urls.
   // For full config extraction including permissions, use Host.getPluginConfig() which uses QuickJS sandbox.
+
+  it('should extract policyVersion when present', async () => {
+    const code = `
+      const config = {
+        name: 'Compliance Plugin',
+        description: 'Plugin with policy version',
+        policyVersion: 'v1.0.0',
+      };
+
+      function main() { return null; }
+      export default { main, config };
+    `;
+
+    const result = await extractConfig(code);
+
+    expect(result).not.toBeNull();
+    expect(result?.policyVersion).toBe('v1.0.0');
+  });
+
+  it('should return undefined policyVersion when absent', async () => {
+    const code = `
+      const config = {
+        name: 'Legacy Plugin',
+        description: 'Plugin without policy version',
+      };
+
+      function main() { return null; }
+      export default { main, config };
+    `;
+
+    const result = await extractConfig(code);
+
+    expect(result).not.toBeNull();
+    expect(result?.policyVersion).toBeUndefined();
+  });
+
+  it('should extract policyVersion with double-quoted semver string', async () => {
+    const code = `
+      const config = {
+        name: "Semver Plugin",
+        description: "Uses semver policy version",
+        policyVersion: "v2.3.1",
+      };
+
+      function main() { return null; }
+      export default { main, config };
+    `;
+
+    const result = await extractConfig(code);
+
+    expect(result).not.toBeNull();
+    expect(result?.policyVersion).toBe('v2.3.1');
+  });
 });

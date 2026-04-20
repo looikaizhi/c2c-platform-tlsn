@@ -877,6 +877,12 @@ export async function extractConfig(code: string): Promise<PluginConfig | null> 
       config.author = authorMatch[1];
     }
 
+    // Try to extract optional policyVersion
+    const policyVersionMatch = code.match(/policyVersion\s*:\s*['"`]([^'"`]+)['"`]/);
+    if (policyVersionMatch) {
+      config.policyVersion = policyVersionMatch[1];
+    }
+
     return config;
   } catch (error) {
     logger.error('[extractConfig] Failed to extract plugin config:', error);

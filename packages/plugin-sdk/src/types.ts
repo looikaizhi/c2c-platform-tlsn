@@ -381,6 +381,11 @@ export interface ProveOptions {
     includeVerifierTranscript?: boolean;
     runSelfCheck?: boolean;
   };
+  /**
+   * Policy version override for this specific prove() call.
+   * Takes precedence over pluginConfig.policyVersion when provided.
+   */
+  policyVersion?: string;
 }
 
 /**
@@ -435,4 +440,79 @@ export interface PluginConfig {
    * Empty array or undefined means no openWindow() calls allowed.
    */
   urls?: string[];
+
+  /**
+   * Policy version for R.15 governance. Format: "v{major}.{minor}.{patch}".
+   * When set, this value is cryptographically locked into the verifier ECDSA signature.
+   */
+  policyVersion?: string;
+}
+
+// ─── Travel Rule / Compliance Types ──────────────────────────────────────────
+
+/**
+ * Semantic labels for handler outputs per FATF R.16 Travel Rule.
+ * Allows exchanges to parse structured fields without understanding internal formats.
+ */
+export type TravelRuleFieldLabel =
+  | 'originator.accountId'
+  | 'originator.name'
+  | 'originator.amount'
+  | 'originator.currency'
+  | 'originator.timestamp'
+  | 'beneficiary.accountId'
+  | 'beneficiary.name'
+  | 'beneficiary.amount'
+  | 'transaction.id'
+  | 'transaction.status'
+  | string; // custom labels, backward-compatible
+
+/**
+ * Standardized proof export format for R.11 archival (5-year retention).
+ * Returned by GET /proof/{sessionId} on the verifier server.
+ * Version-locked so exchanges can reliably parse historical proofs.
+ */
+export interface ProofExportV1 {
+  /** Discriminator – always "ProofExportV1" */
+  formatVersion: 'ProofExportV1';
+  /** UUID of the verification session */
+  attestationId: string;
+  /** On-chain transaction hash (null until PATCH /proof/{id}/tx is called) */
+  txHash: string | null;
+  /** Policy version from plugin config, e.g. "v1.0.0" */
+  policyVersion: string;
+  /** ISO 8601 timestamp of verification */
+  timestamp: string;
+  /** TLS server hostname, e.g. "wise.com" */
+  serverName: string;
+  /** Verifier server semver */
+  verifierVersion: string;
+  /**
+   * Structured fields extracted from revealed transcript, keyed by TravelRuleFieldLabel.
+   * Only handlers with a label appear here.
+   */
+  travelRuleFields: {
+    [label: string]: { value: string; commitmentIndex: number };
+  };
+  /** Account ownership checks performed by the verifier */
+  accountChecks: Array<{
+    fieldLabel: string;
+    direction: 'SENT' | 'RECV';
+    expectedHash: string;
+    passed: boolean;
+  }>;
+  /** Order-binding hash echoed from sessionData, or null */
+  orderBindingHash: string | null;
+  /** keccak256 of all commitment hash bytes, hex without 0x */
+  commitmentsHash: string;
+  /** 65-byte ECDSA signature r+s+v, hex without 0x */
+  verifierSignature: string;
+  /** 0x-prefixed Ethereum address of the verifier */
+  verifierAddress: string;
+  /** Chain ID used for signing */
+  chainId: number;
+  /** Redacted transcript — bytes outside revealed ranges replaced with 0x00 */
+  redactedTranscript: { sent: string; recv: string };
+  /** Transcript commitment summaries, aligned with handler results */
+  transcriptCommitments: TranscriptCommitmentSummary[];
 }
