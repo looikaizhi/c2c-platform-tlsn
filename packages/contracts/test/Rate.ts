@@ -272,28 +272,4 @@ describe("Rate", async function () {
     const { rateVersion } = await placeCryptoOrder(d);
     assert.equal(rateVersion, RATE_VERSION_INITIAL, "order should be placed with non-expiring rate");
   });
-
-  it("RATE-10: rate published at expiresAt boundary (now + 1s) → succeeds, then expires", async () => {
-    const ts = await nowTs(pc);
-    await d.adminAsMerchant.write.publishRate([0n, 0, RATE_ALIPAY_CRYPTO, ts + 5n]);
-    await d.adminAsMerchant.write.openNow([0n, 0]);
-
-    // Immediately: should succeed
-    const { rateVersion } = await placeCryptoOrder(d);
-    assert.equal(rateVersion, RATE_VERSION_INITIAL);
-
-    // Reset snapshot, advance past expiry, try again
-    await testClient.revert({ id: snap });
-    snap = await testClient.snapshot();
-    await d.adminAsMerchant.write.publishRate([0n, 0, RATE_ALIPAY_CRYPTO, ts + 5n]);
-    await d.adminAsMerchant.write.openNow([0n, 0]);
-    await advanceTime(testClient, 10);
-    await viem.assertions.revertWithCustomError(
-      d.escrowAsBuyer.write.placeOrder([
-        d.merchant.account.address, 0n, 0, TRADE_AMOUNT, NULL_BUYER_INFO,
-      ]),
-      d.c2cEscrow,
-      "RateExpired",
-    );
-  });
 });

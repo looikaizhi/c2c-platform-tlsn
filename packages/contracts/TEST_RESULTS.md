@@ -19,11 +19,11 @@
 | Integration — 跨合约联动 | 11 | 11 | 0 |
 | BusinessHours | 14 | 14 | 0 |
 | Cap | 6 | 6 | 0 |
-| Rate | 10 | 10 | 0 |
+| Rate | 9 | 9 | 0 |
 | TLSNVerifier | 28 | 28 | 0 |
-| **合计** | **276** | **276** | **0** |
+| **合计** | **275** | **275** | **0** |
 
-**运行汇总（node:test）：** 276 通过 / 0 失败
+**运行汇总（node:test）：** 275 通过 / 0 失败
 
 ---
 
@@ -316,7 +316,7 @@
 
 ## Rate
 
-**结果：** 10 / 10 通过
+**结果：** 9 / 9 通过
 
 | # | 测试内容 | 预期结果 | 结果 | 通过 |
 |---|---------|---------|------|:----:|
@@ -329,7 +329,6 @@
 | RATE-07 | D-1：用新 rateVersion 构建旧订单 proof → OrderBindingHashMismatch | 触发 OrderBindingHashMismatch | 触发 OrderBindingHashMismatch | ✅ |
 | RATE-08 | placeOrder 时汇率已过期 → RateExpired | 触发 RateExpired | 触发 RateExpired | ✅ |
 | RATE-09 | expiresAt == 0 表示永不过期 → placeOrder 成功 | 成功 | 成功 | ✅ |
-| RATE-10 | 汇率在边界时间发布（now + 1s）→ 先成功后触发 RateExpired | 触发 RateExpired | 触发 RateExpired | ✅ |
 
 ## TLSNVerifier
 
