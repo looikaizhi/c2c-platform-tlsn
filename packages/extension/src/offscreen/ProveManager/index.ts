@@ -4,6 +4,15 @@ import type {
   Prover as TProver,
   Method,
 } from '../../../../tlsn-wasm-pkg/tlsn_wasm';
+import type {
+  HandlerResult,
+  ProveResponse,
+  TranscriptCommitHashAlg,
+  TranscriptCommitmentSummary,
+  VerifierSignatureSummary,
+  VerifierStructuredFieldsSummary,
+  VerifierTranscriptSummary,
+} from '@tlsn/plugin-sdk/src/types';
 import { logger } from '@tlsn/common';
 
 const { init, Prover } = Comlink.wrap<{
@@ -27,20 +36,34 @@ type ClientMessage =
       type: 'reveal_config';
       sent: Array<{ start: number; end: number; handler: any }>;
       recv: Array<{ start: number; end: number; handler: any }>;
+      accountChecks?: Array<{ direction: string; start: number; end: number; expectedHash: string; valueMode?: string }>;
     };
 
 /** Server message types (received from server) */
 type ServerMessage =
   | { type: 'session_registered'; sessionId: string }
-  | { type: 'session_completed'; results: any[] }
+  | {
+      type: 'session_completed';
+      results: HandlerResult[];
+      transcriptCommitments?: TranscriptCommitmentSummary[];
+      verifierTranscript?: VerifierTranscriptSummary;
+      verifierSignature?: VerifierSignatureSummary;
+      serverName?: string;
+      /** Structured fields extracted by Verifier from revealed transcript */
+      structuredFields?: VerifierStructuredFieldsSummary;
+      /** Verifier server-side pure computation time (ms) */
+      verifierServerMs?: number;
+    }
   | { type: 'error'; message: string };
 
 /** Session state tracked per prover */
 interface SessionState {
   sessionId: string;
   webSocket: WebSocket;
-  response: any | null;
+  response: ProveResponse | null;
   responseReceived: boolean;
+  /** Verifier server-side pure computation time (ms), populated from session_completed */
+  verifierServerMs?: number;
 }
 
 export class ProveManager {
@@ -147,7 +170,17 @@ export class ProveManager {
               // Store response in the session state
               const session = this.sessions.get(proverId);
               if (session) {
-                session.response = { results: data.results };
+                session.response = {
+                  results: data.results ?? [],
+                  transcriptCommitments: data.transcriptCommitments ?? [],
+                  verifierTranscript: data.verifierTranscript,
+                  verifierSignature: data.verifierSignature,
+                  serverName: data.serverName,
+                  structuredFields: data.structuredFields,
+                  transcriptCommitOpenings: [],
+                };
+                // Store server-side timing separately (not inside ProveResponse)
+                session.verifierServerMs = data.verifierServerMs;
                 session.responseReceived = true;
               }
               break;
@@ -186,7 +219,12 @@ export class ProveManager {
                 );
                 const session = this.sessions.get(proverId);
                 if (session) {
-                  session.response = legacyData;
+                  session.response = {
+                    results: legacyData.results ?? [],
+                    transcriptCommitments: legacyData.transcriptCommitments ?? [],
+                    verifierTranscript: legacyData.verifierTranscript,
+                    transcriptCommitOpenings: [],
+                  };
                   session.responseReceived = true;
                 }
               } else {
@@ -296,6 +334,7 @@ export class ProveManager {
     revealConfig: {
       sent: Array<{ start: number; end: number; handler: any }>;
       recv: Array<{ start: number; end: number; handler: any }>;
+      accountChecks?: Array<{ direction: string; start: number; end: number; expectedHash: string; valueMode?: string }>;
     },
   ) {
     const session = this.sessions.get(proverId);
@@ -311,6 +350,9 @@ export class ProveManager {
       type: 'reveal_config',
       sent: revealConfig.sent,
       recv: revealConfig.recv,
+      ...(revealConfig.accountChecks?.length
+        ? { accountChecks: revealConfig.accountChecks }
+        : {}),
     };
 
     logger.debug('[ProveManager] Sending reveal_config message:', {
@@ -362,18 +404,31 @@ export class ProveManager {
       sent: { start: number; end: number }[];
       recv: { start: number; end: number }[];
     },
-  ) {
+    hashAlg?: TranscriptCommitHashAlg,
+  ): Promise<unknown> {
     const prover = await this.getProver(proverId);
-    await prover.reveal({ ...commit, server_identity: true });
+    const revealPayload: any = {
+      ...commit,
+      server_identity: true,
+    };
+
+    if (hashAlg) {
+      revealPayload.transcript_commit = {
+        hash_alg: hashAlg,
+      };
+    }
+
+    return prover.reveal(revealPayload as any);
   }
 
   /**
    * Get the verification response for a given prover ID.
-   * Returns null if no response is available yet, otherwise returns the structured handler results.
+   * Returns null if no response is available yet, otherwise returns structured
+   * handler results and transcript commitments.
    * After successful retrieval, the response is kept for potential re-reads but can be cleaned up
    * via cleanupProver().
    */
-  async getResponse(proverId: string, retry = 60): Promise<any | null> {
+  async getResponse(proverId: string, retry = 60): Promise<ProveResponse | null> {
     const session = this.sessions.get(proverId);
     if (!session) {
       logger.warn('[ProveManager] No session found for proverId:', proverId);
@@ -392,6 +447,15 @@ export class ProveManager {
 
     logger.warn('[ProveManager] Response timeout for prover:', proverId);
     return null;
+  }
+
+  /**
+   * Get Verifier server-side pure computation time (ms).
+   * Only available when the Rust Verifier reports it in session_completed.
+   * Must be called before cleanupProver() as cleanup deletes the session state.
+   */
+  getVerifierServerMs(proverId: string): number | undefined {
+    return this.sessions.get(proverId)?.verifierServerMs;
   }
 
   /**

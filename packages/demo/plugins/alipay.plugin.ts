@@ -6,72 +6,43 @@ const VERIFIER_URL = VITE_VERIFIER_URL;
 // @ts-ignore
 const PROXY_URL_BASE = VITE_PROXY_URL;
 
+// Sentinel constants injected at runtime by the demo frontend before execCode().
+// Each sentinel has a unique last digit so replace() calls are independent.
+const ORDER_BINDING_HASH = '0x0000000000000000000000000000000000000000000000000000000000000001';
+const MERCHANT_NAME_HASH = '0x0000000000000000000000000000000000000000000000000000000000000002';
+const MERCHANT_ID_HASH   = '0x0000000000000000000000000000000000000000000000000000000000000003';
+const PAYEE_NAME_HASH    = '0x0000000000000000000000000000000000000000000000000000000000000004';
+const PAYEE_ID_HASH      = '0x0000000000000000000000000000000000000000000000000000000000000005';
+
 const HOST = 'mbillexprod.alipay.com';
-const PATH = '/enterprise/fundReportQuery.json';
+const PATH = '/enterprise/fundReportDetailQuery.json';
 const FULL_URL = `https://${HOST}${PATH}`;
 const LANDING_URL = 'https://b.alipay.com/page/mbillexprod/fund/business/operate/detail';
 const METHOD = 'POST'
 
-function decodeRawBody(rawParts: { bytes?: any }[] | null | undefined) {
-    if (!rawParts?.length) return null;
+// Following 0xtsukino's approach from issue #263
+function getJsonBody(request: any) {
+    if (!request.requestBody?.raw?.[0]?.bytes) return null;
 
-    const chunks: string[] = [];
+    // Convert number array to string
+    const bytes = request.requestBody.raw[0].bytes;
+    const text = String.fromCharCode(...bytes);
 
-    for (const part of rawParts) {
-        if (!Array.isArray(part?.bytes) || part.bytes.length === 0) {
-            continue;
-        }
-
-        chunks.push(part.bytes.map((byte: number) => String.fromCharCode(byte)).join(''));
+    try {
+        return JSON.parse(text);
+    } catch {
+        return text;
     }
-
-    const decoded = chunks.join('');
-    console.log("decoded: ", decoded)
-    return decoded || null;
 }
 
-function encodeFormBody(formData: Record<string, any> | null | undefined) {
-    if (!formData) return null;
-
-    const params = new URLSearchParams(formData);
-    // console.log('[alipay] encodeFormBody entries:', Object.entries(formData));
-    // console.log(params.toString());
-    // for (const [key, value] of Object.entries(formData)) {
-    //     if (key === '') continue;
-    //     if (Array.isArray(value)) {
-    //         for (const item of value) {
-    //             if (item !== undefined && item !== null) {
-    //                 params.append(key, String(item));
-    //             }
-    //         }
-    //         continue;
-    //     }
-
-    //     if (value !== undefined && value !== null) {
-    //         params.append(key, String(value));
-    //     }
-    // }
-
-    const encoded = params.toString().replaceAll('%20', '+');
-    console.log(encoded);
-    return encoded || null;
-}
-
-function extractRequestBody(
-    requestBody:
-        | {
-            formData?: Record<string, any>;
-            raw?: { bytes?: any }[];
-        }
-        | null
-        | undefined
-) {
-    return decodeRawBody(requestBody?.raw) || encodeFormBody(requestBody?.formData);
+function getFormBody(request: any) {
+    if (!request.requestBody?.formData) return null;
+    return request.requestBody.formData;
 }
 
 const config = {
-    name: 'Alipay Login Account',
-    description: 'Verify Alipay merchant logonName and masterCustomerId (selective disclosure).',
+    name: 'Alipay Payment Detail',
+    description: 'Verify Alipay payment transaction details: payer, payee, amount, status, and timestamp (selective disclosure of bizInfo fields).',
     requests: [
         {
             method: METHOD,
@@ -82,11 +53,7 @@ const config = {
     ],
     urls: [
         'https://b.alipay.com/page/mbillexprod/fund/business/operate/detail',
-        'https://www.alipay.com/',
-        'https://mbillexprod.alipay.com/enterprise/fundReportQuery.json',
-        'https://authea179.alipay.com/login/loginResultDispatch.htm',
-        'https://enterpriseportal.alipay.com/*',
-        'https://uemprod.alipay.com/*'
+        'https://b.alipay.com/page/mbillexprod/fund/business/detail',
     ],
 };
 
@@ -149,42 +116,78 @@ async function onClick() {
             cookieLen: cachedCookie.length,
         });
 
-        const body = 'gmtDateBegin=2026-03-05+00%3A00%3A00&gmtDateEnd=2026-03-06+00%3A00%3A00&userId=2088542815888498&status=ALL&pageSize=50&pageNum=1&sortTarget=gmtCreate&sortType=0&bizType=ALL&_input_charset=gbk';
-        const body1 = 'gmtDateBegin=2026-03-04+00%3A00%3A00&gmtDateEnd=2026-03-05+00%3A00%3A00&userId=2088542815888498&status=ALL&pageSize=50&pageNum=1&sortTarget=gmtCreate&sortType=0&bizType=ALL&_input_charset=gbk';
+        // Hardcoded fallback (kept for reference, not used)
+        const formParams = 'gmtDateBegin=2026-03-27+00%3A00%3A00&gmtDateEnd=2026-03-28+00%3A00%3A00&userId=2088542815888498&status=ALL&pageSize=50&pageNum=1&sortTarget=gmtCreate&sortType=0&bizType=ALL&_input_charset=gbk';
+
+        // Append captured request body to URL query string instead of body,
+        // because WASM Body=JsonValue wraps string body in JSON quotes.
+        const baseUrl = String(cachedRequestUrl);
+        const urlWithParams = baseUrl + (baseUrl.includes('?') ? '&' : '?') + cachedRequestBody;
+        console.log('[alipay] urlWithParams:', urlWithParams);
         const resp = await prove(
             {
-                url: cachedRequestUrl,
+                url: urlWithParams,
                 method: METHOD,
                 headers: headers,
-                body: body,
             },
             {
                 verifierUrl: VERIFIER_URL,
                 proxyUrl: PROXY_URL_BASE + HOST,
                 maxRecvData: 20000,
                 maxSentData: 10000,
+                transcriptCommitHashAlg: 'Keccak256',
+                sessionData: {
+                    __tlsn_order_binding_hash: ORDER_BINDING_HASH,
+                    __tlsn_merchant_name_hash: MERCHANT_NAME_HASH,
+                    __tlsn_merchant_id_hash:   MERCHANT_ID_HASH,
+                    __tlsn_payee_name_hash:    PAYEE_NAME_HASH,
+                    __tlsn_payee_id_hash:      PAYEE_ID_HASH,
+                },
+                accountCheckFields: [
+                    // handlers[4] = payeeName       → verify against payeeNameHash
+                    { handlerIndex: 4, sessionDataKey: '__tlsn_payee_name_hash', valueMode: 'json_value' },
+                    // handlers[5] = payeeLoginEmail → verify against payeeIdHash
+                    { handlerIndex: 5, sessionDataKey: '__tlsn_payee_id_hash',   valueMode: 'json_value' },
+                ],
                 handlers: [
-                    { type: 'SENT', part: 'ALL', action: 'REVEAL' },
-                    { type: 'RECV', part: 'ALL', action: 'REVEAL' },
-                    // {
-                    //     type: 'RECV',
-                    //     part: 'HEADERS',
-                    //     action: 'REVEAL',
-                    //     params: { key: 'date' },
-                    // },
-                    // {
-                    //     type: 'RECV',
-                    //     part: 'BODY',
-                    //     action: 'REVEAL',
-                    //     params: { type: 'json', path: 'data.logonName', hideKey: true },
-                    // },
-                    // {
-                    //     type: 'RECV',
-                    //     part: 'BODY',
-                    //     action: 'REVEAL',
-                    //     params: { type: 'json', path: 'data.masterCustomerId', hideKey: true },
-                    // },
+                    // Reveal the URL
+                    { type: 'SENT', part: 'START_LINE', action: 'PEDERSEN'},
+                    // Reveal response status start line
+                    { type: 'RECV', part: 'START_LINE', action: 'PEDERSEN', hideKey: true },
+                    // Selectively reveal key bizInfo fields from result.bizInfo.*
+                    // (Note: Parser only supports top-level JSON paths; nested paths not yet supported,
+                    //  so we use regex patterns to match specific fields within the JSON body.)
+                    //
+                    // Disclosed fields for C2C payment proof:
+                    //   orderId        – 订单号 (unique order identifier)
+                    //   gmtSuccess     – 完成支付时间 (payment completion timestamp)
+                    //   payeeName      – 被转账人名 (receiver display name)
+                    //   payeeLoginEmail – 被转账人email (receiver login email)
+                    //   payAmount      – 支付金额 CNY (transferred amount)
+                    //   bizType        – 业务类型 ("TRANSFER" = 转账，排除充值等其他操作)
+                    //   status         – 订单状态 ("SUCCESS" = completed)
+                    // part:'ALL' + params.regex is the correct path for regex matching
+                    // (extractBodyRanges only supports type:'json'; regex lives in extractAllRanges)
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN', 
+                        params: { type: 'regex', regex: '"orderId"\\s*:\\s*"[^"]*"' } },
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                        params: { type: 'regex', regex: '"gmtSuccess"\\s*:\\s*"[^"]*"' } },
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                        params: { type: 'regex', regex: '"payeeName"\\s*:\\s*"[^"]*"' } },
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                        params: { type: 'regex', regex: '"payeeLoginEmail"\\s*:\\s*"[^"]*"' } },
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                        params: { type: 'regex', regex: '"payAmount"\\s*:\\s*"[^"]*"' } },
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                        params: { type: 'regex', regex: '"bizType"\\s*:\\s*"[^"]*"' } },
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                        params: { type: 'regex', regex: '"status"\\s*:\\s*"[A-Z_]+"' } },
                 ] as unknown as import('@tlsn/plugin-sdk/src/types').Handler[],
+                transcriptCommitDebug: {
+                    exposeOpenings: true,
+                    //includeVerifierTranscript: true,
+                    runSelfCheck: false,
+                }
             }
         );
 
@@ -327,7 +330,22 @@ function main() {
             });
 
             if (request) {
-                const requestBody = extractRequestBody(request.requestBody);
+                // Debug: log the full requestBody structure
+                console.log('[alipay] request found, requestBody keys:', request.requestBody ? Object.keys(request.requestBody) : 'null');
+                console.log('[alipay] requestBody.raw:', JSON.stringify(request.requestBody?.raw));
+                console.log('[alipay] requestBody.formData:', JSON.stringify(request.requestBody?.formData));
+
+                // Try 0xtsukino's getJsonBody approach first, then formData
+                const jsonBody = getJsonBody(request);
+                const formBody = getFormBody(request);
+                console.log('[alipay] getJsonBody result:', JSON.stringify(jsonBody));
+                console.log('[alipay] getFormBody result:', JSON.stringify(formBody));
+
+                const requestBody = jsonBody
+                    ? (typeof jsonBody === 'string' ? jsonBody : JSON.stringify(jsonBody))
+                    : formBody
+                        ? new URLSearchParams(formBody).toString().replaceAll('%20', '+')
+                        : null;
 
                 if (request.url && !cachedRequestUrl) {
                     setState('requestUrl', request.url);
@@ -336,8 +354,6 @@ function main() {
                 if (requestBody && !cachedRequestBody) {
                     setState('requestBody', requestBody);
                     console.log('[alipay] request body found: ', requestBody);
-                    console.log('[alipay] requestBody raw:', request.requestBody?.raw);
-                    console.log('[alipay] requestBody formData:', request.requestBody?.formData);
                 }
             }
         }
@@ -415,7 +431,7 @@ function main() {
                                 fontSize: '16px',
                             },
                         },
-                        ['Alipay Login Account']
+                        ['Alipay Payment Detail']
                     ),
                     button(
                         {
@@ -448,7 +464,7 @@ function main() {
                             },
                         },
                         [
-                            'Open the Alipay detail page, then wait for the account request to appear.',
+                            'Open an Alipay transaction detail page, then wait for the payment detail request to appear.',
                         ]
                     ),
                     (headerDetected || !!cachedRequestUrl) ? div(

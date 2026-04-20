@@ -19,58 +19,15 @@ export const plugins: Record<string, Plugin> = {
             return json.results[json.results.length - 1].value;
         },
     },
-    hongleongbank: {
-        name: 'Hong Leong Bank',
-        description: 'Prove your Hong Leong Bank account balance.',
-        logo: 'HLB',
-        file: '/plugins/hongleongBank.js',
-        parseResult: (json) => {
-            return json.results[json.results.length - 1].value;
-        },
-    },
     wise: {
         name: 'Wise Transfer',
         description: 'Prove your Wise transfer response.',
         logo: 'WISE',
         file: '/plugins/wise.js',
-        parseResult: (json) => {
-            return json.results[json.results.length - 1].value;
-        },
-    },
-    twitter: {
-        name: 'Twitter Profile',
-        description: 'Prove your Twitter profile information with cryptographic verification',
-        logo: '𝕏',
-        file: '/plugins/twitter.js',
-        parseResult: (json) => {
-            return json.results[json.results.length - 1].value;
-        },
-    },
-    swissbank: {
-        name: 'Swiss Bank',
-        description: 'Verify your Swiss bank account balance securely and privately. (Login: admin / admin)',
-        logo: '🏦',
-        file: '/plugins/swissbank.js',
-        parseResult: (json) => {
-            return json.results[json.results.length - 1].value;
-        },
-    },
-    spotify: {
-        name: 'Spotify',
-        description: 'Prove your Spotify listening history and music preferences',
-        logo: '🎵',
-        file: '/plugins/spotify.js',
-        parseResult: (json) => {
-            return json.results[json.results.length - 1].value;
-        },
-    },
-    duolingo: {
-        name: 'Duolingo',
-        description: 'Prove your Duolingo language learning progress and achievements',
-        logo: '🦉',
-        file: '/plugins/duolingo.js',
-        parseResult: (json) => {
-            return json.results[json.results.length - 1].value;
+        parseResult: (json: any) => {
+            // wise plugin returns {displayResults, proofs} instead of {results}
+            const results = json.displayResults || json.results || [];
+            return results.length ? results[results.length - 1].value : 'Proof generated successfully';
         },
     },
 };

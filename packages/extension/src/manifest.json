@@ -50,6 +50,8 @@
   "permissions": [
     "offscreen",
     "webRequest",
+    "webNavigation",
+    "storage",
     "activeTab",
     "tabs",
     "windows",

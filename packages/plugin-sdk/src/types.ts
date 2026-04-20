@@ -147,6 +147,8 @@ export type StartLineHandler = {
     | HandlerPart.REQUEST_TARGET
     | HandlerPart.STATUS_CODE;
   action: HandlerAction.REVEAL | HandlerAction.PEDERSEN;
+  /** Semantic label for Verifier-side structured field extraction (e.g. "state", "targetAmount") */
+  label?: string;
 };
 
 export type HeadersHandler = {
@@ -158,6 +160,8 @@ export type HeadersHandler = {
     hideKey?: boolean;
     hideValue?: boolean;
   };
+  /** Semantic label for Verifier-side structured field extraction */
+  label?: string;
 };
 
 export type BodyHandler = {
@@ -170,6 +174,8 @@ export type BodyHandler = {
     hideKey?: boolean;
     hideValue?: boolean;
   };
+  /** Semantic label for Verifier-side structured field extraction (e.g. "state", "targetAmount") */
+  label?: string;
 };
 
 export type AllHandler = {
@@ -181,9 +187,201 @@ export type AllHandler = {
     regex: string;
     flags?: string;
   };
+  /** Semantic label for Verifier-side structured field extraction */
+  label?: string;
 };
 
 export type Handler = StartLineHandler | HeadersHandler | BodyHandler | AllHandler;
+
+export type TranscriptCommitHashAlg = 'Sha256' | 'Blake3' | 'Keccak256';
+export type TranscriptCommitmentHashAlg = TranscriptCommitHashAlg | 'Unknown';
+export type TranscriptCommitmentKind = 'Hash' | 'Unknown';
+export type TranscriptCommitmentDirection = 'SENT' | 'RECV';
+
+export interface TranscriptCommitmentRange {
+  start: number;
+  end: number;
+}
+
+export interface TranscriptCommitmentSummary {
+  kind: TranscriptCommitmentKind;
+  direction?: TranscriptCommitmentDirection;
+  hashAlg?: TranscriptCommitmentHashAlg;
+  ranges?: TranscriptCommitmentRange[];
+  hashHex?: string;
+  hashLen?: number;
+  revealed?: boolean;
+}
+
+export interface VerifierTranscriptSummary {
+  sent: number[];
+  recv: number[];
+  sentAuthed: TranscriptCommitmentRange[];
+  recvAuthed: TranscriptCommitmentRange[];
+}
+
+export interface TranscriptCommitOpeningSummary {
+  kind: 'Hash';
+  direction: TranscriptCommitmentDirection;
+  hashAlg: TranscriptCommitmentHashAlg;
+  ranges: TranscriptCommitmentRange[];
+  blinderHex: string;
+}
+
+export type CommitmentSelfCheckStatus =
+  | 'passed'
+  | 'failed'
+  | 'skipped'
+  | 'unsupported_alg';
+
+export interface CommitmentSelfCheckSummary {
+  status: CommitmentSelfCheckStatus;
+  total: number;
+  matched: number;
+  mismatched: number;
+  message?: string;
+}
+
+// ─── Timing ──────────────────────────────────────────────────────────────────
+
+/**
+ * Per-phase timing breakdown for one prove() call.
+ * All values are integer milliseconds measured via performance.now().
+ *
+ * Phases:
+ *   connectionMs      – createProver(): session WS setup + WASM Prover init + setup()
+ *   requestMs         – send_request(): HTTP sent through the MPC-TLS channel
+ *   proofGenerationMs – reveal(): MPC reveal protocol + commitment generation
+ *   verificationMs    – getResponse(): elapsed until Verifier's session_completed arrives
+ *                       (includes Verifier computation + network RTT, callback-driven)
+ *   totalProtocolMs   – wall-clock from onProve entry to getResponse() completion
+ *                       (excludes commitmentSelfCheck and all post-processing)
+ *   verifierServerMs  – (optional) pure Verifier computation time reported by the
+ *                       Rust server; only present when server-side timing is enabled
+ */
+export interface ProveTiming {
+  connectionMs: number;
+  requestMs: number;
+  proofGenerationMs: number;
+  verificationMs: number;
+  totalProtocolMs: number;
+  /** Verifier 服务器内部纯计算耗时 (ms)，仅服务端计时启用时有值 */
+  verifierServerMs?: number;
+}
+
+export interface HandlerResult {
+  type: HandlerType;
+  part: HandlerPart;
+  value: string;
+  /** Index into transcriptCommitments[] this result corresponds to */
+  commitmentIndex: number;
+  /** Byte offset (inclusive) in the original transcript */
+  start: number;
+  /** Byte offset (exclusive) in the original transcript */
+  end: number;
+  /**
+   * Byte offset of the target field **value** within the value string (exclusive of surrounding quotes).
+   * For value = '"amount":"720.00"'  →  startValue points to '7' in "720.00"
+   * For non-JSON parts defaults to 0.
+   */
+  startValue: number;
+  /**
+   * Byte offset (exclusive) of the target field **value** within the value string.
+   * For value = '"amount":"720.00"'  →  endValue points just past the last '0'.
+   * For non-JSON parts defaults to value.length.
+   */
+  endValue: number;
+}
+
+/**
+ * Structured fields extracted and parsed by the Verifier from the revealed transcript.
+ * Fields correspond to handler labels set in prove() options.
+ * Only present when the Verifier supports structured field extraction.
+ */
+export interface VerifierStructuredFieldsSummary {
+  transferId?: string;
+  profileId?: string;
+  state?: string;
+  targetAmount?: string;
+  targetCurrency?: string;
+  transferDate?: string;
+  recipientTitle?: string;
+  recipientSubtitle?: string;
+}
+
+export interface VerifierSignatureSummary {
+  chainId: number;
+  sessionId: string;
+  /** keccak256 of all commitment hash bytes, hex without 0x */
+  commitmentsHash: string;
+  /**
+   * Order-binding hash echoed from session_data["__tlsn_order_binding_hash"].
+   * keccak256(abi.encodePacked(escrow, chainId, merchant, buyer, productId, orderId, assetType, amount, rate, deadline))
+   * "0x"-prefixed 32-byte hex. Present when the client passed the binding hash in sessionData.
+   */
+  orderBindingHash?: string;
+  /** 65-byte ECDSA r+s+v, hex without 0x */
+  signature: string;
+  /** 0x-prefixed Ethereum address of the verifier */
+  verifierAddress: string;
+}
+
+export interface ProveResponse {
+  /** Revealed items sorted by commitmentIndex — directly aligned with transcriptCommitments[i] */
+  results: HandlerResult[];
+  transcriptCommitments: TranscriptCommitmentSummary[];
+  verifierTranscript?: VerifierTranscriptSummary;
+  transcriptCommitOpenings?: TranscriptCommitOpeningSummary[];
+  commitmentSelfCheck?: CommitmentSelfCheckSummary;
+  /** Verifier ECDSA signature over (chainId, sessionId, commitmentsHash) */
+  verifierSignature?: VerifierSignatureSummary;
+  /** TLS server hostname (e.g. "wise.com") */
+  serverName?: string;
+  /** TLSN 协议各阶段耗时；prove() 成功时填充，失败时不存在 */
+  timing?: ProveTiming;
+  /** Structured fields extracted by the Verifier from the revealed transcript using handler labels */
+  structuredFields?: VerifierStructuredFieldsSummary;
+}
+
+export interface ProveRequestOptions {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+export interface ProveOptions {
+  verifierUrl: string;
+  proxyUrl: string;
+  maxRecvData?: number;
+  maxSentData?: number;
+  handlers: Handler[];
+  sessionData?: Record<string, string>;
+  /**
+   * Marks which handlers' transcript ranges should be verified as account hashes
+   * by the Verifier server (off-chain keccak256 comparison). These ranges are
+   * excluded from the returned proof results and commitment openings.
+   */
+  accountCheckFields?: Array<{
+    /** Index into handlers[] array (0-based) */
+    handlerIndex: number;
+    /** Key in sessionData that holds the expected keccak256 hash (0x-prefixed) */
+    sessionDataKey: string;
+    /**
+     * How to derive the bytes to hash from the matched transcript range.
+     * - 'full'       (default): hash the entire matched range as-is
+     * - 'json_value': extract the string value from a "key":"value" JSON fragment,
+     *                 hash only the inner string bytes (without quotes or key)
+     */
+    valueMode?: 'full' | 'json_value';
+  }>;
+  transcriptCommitHashAlg?: TranscriptCommitHashAlg;
+  transcriptCommitDebug?: {
+    exposeOpenings?: boolean;
+    includeVerifierTranscript?: boolean;
+    runSelfCheck?: boolean;
+  };
+}
 
 /**
  * Permission for making HTTP requests via prove()

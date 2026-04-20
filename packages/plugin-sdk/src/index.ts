@@ -16,9 +16,11 @@ import {
   InterceptedRequestHeader,
   OpenWindowResponse,
   WindowMessage,
-  Handler,
   PluginConfig,
   RequestPermission,
+  ProveRequestOptions,
+  ProveOptions,
+  ProveResponse,
 } from './types';
 import deepEqual from 'fast-deep-equal';
 
@@ -261,9 +263,17 @@ function makeOpenWindow(
           windowId: response.payload.windowId,
         });
 
+        // Debounce timer: batch rapid REQUEST_INTERCEPTED / HEADER_INTERCEPTED bursts
+        // into a single main() call, preventing QuickJS sync runtime overload.
+        let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
         const onMessage = async (message: any) => {
           // Handle window closed first - always remove listener
           if (message.type === 'WINDOW_CLOSED') {
+            if (debounceTimer !== null) {
+              clearTimeout(debounceTimer);
+              debounceTimer = null;
+            }
             eventEmitter.removeListener(onMessage);
             return;
           }
@@ -285,7 +295,13 @@ function makeOpenWindow(
               updateExecutionContext(uuid, {
                 requests: [...(executionContext.requests || []), request],
               });
-              executionContext.main();
+              // Debounce: only call main() after 100ms of no new requests
+              if (debounceTimer !== null) clearTimeout(debounceTimer);
+              debounceTimer = setTimeout(() => {
+                debounceTimer = null;
+                const ctx = executionContextRegistry.get(uuid);
+                if (ctx) ctx.main();
+              }, 100);
             }
 
             if (message.type === 'HEADER_INTERCEPTED') {
@@ -293,7 +309,13 @@ function makeOpenWindow(
               updateExecutionContext(uuid, {
                 headers: [...(executionContext.headers || []), header],
               });
-              executionContext.main();
+              // Debounce: only call main() after 100ms of no new headers
+              if (debounceTimer !== null) clearTimeout(debounceTimer);
+              debounceTimer = setTimeout(() => {
+                debounceTimer = null;
+                const ctx = executionContextRegistry.get(uuid);
+                if (ctx) ctx.main();
+              }, 100);
             }
 
             if (message.type === 'PLUGIN_UI_CLICK') {
@@ -317,8 +339,29 @@ function makeOpenWindow(
             }
 
             if (message.type === 'RE_RENDER_PLUGIN_UI') {
+              // Force re-render bypasses debounce
+              if (debounceTimer !== null) {
+                clearTimeout(debounceTimer);
+                debounceTimer = null;
+              }
               logger.debug('[makeOpenWindow] RE_RENDER_PLUGIN_UI', message.windowId);
               executionContext.main(true);
+            }
+
+            if (message.type === 'REQUESTS_RESET') {
+              if (message.windowId === executionContext.windowId) {
+                // Cancel pending debounce — reset takes priority
+                if (debounceTimer !== null) {
+                  clearTimeout(debounceTimer);
+                  debounceTimer = null;
+                }
+                logger.debug('[makeOpenWindow] REQUESTS_RESET for window', message.windowId);
+                updateExecutionContext(uuid, {
+                  requests: [],
+                  headers: [],
+                });
+                executionContext.main(true);
+              }
             }
           } catch (error) {
             logger.error(`[makeOpenWindow] Error handling message ${message.type}:`, error);
@@ -359,20 +402,9 @@ export {
 export class Host {
   private capabilities: Map<string, (...args: any[]) => any> = new Map();
   private onProve: (
-    requestOptions: {
-      url: string;
-      method: string;
-      headers: Record<string, string>;
-      body?: string;
-    },
-    proverOptions: {
-      verifierUrl: string;
-      proxyUrl: string;
-      maxRecvData?: number;
-      maxSentData?: number;
-      handlers: Handler[];
-    },
-  ) => Promise<any>;
+    requestOptions: ProveRequestOptions,
+    proverOptions: ProveOptions,
+  ) => Promise<ProveResponse>;
   private onRenderPluginUi: (windowId: number, result: DomJson) => void;
   private onCloseWindow: (windowId: number) => void;
   private onOpenWindow: (
@@ -386,20 +418,9 @@ export class Host {
 
   constructor(options: {
     onProve: (
-      requestOptions: {
-        url: string;
-        method: string;
-        headers: Record<string, string>;
-        body?: string;
-      },
-      proverOptions: {
-        verifierUrl: string;
-        proxyUrl: string;
-        maxRecvData?: number;
-        maxSentData?: number;
-        handlers: Handler[];
-      },
-    ) => Promise<any>;
+      requestOptions: ProveRequestOptions,
+      proverOptions: ProveOptions,
+    ) => Promise<ProveResponse>;
     onRenderPluginUi: (windowId: number, result: DomJson) => void;
     onCloseWindow: (windowId: number) => void;
     onOpenWindow: (

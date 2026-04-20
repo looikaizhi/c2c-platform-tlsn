@@ -138,6 +138,64 @@ browser.windows.onRemoved.addListener(async (windowId) => {
   }
 });
 
+// Intercept new tabs/windows opened from managed windows:
+// redirect navigation back to the original tab so tabId stays the same
+// and all request interception / plugin UI continues to work.
+chrome.webNavigation.onCreatedNavigationTarget.addListener(async (details: any) => {
+  logger.info(
+    `[Background] webNavigation.onCreatedNavigationTarget: sourceTabId=${details.sourceTabId}, tabId=${details.tabId}, url=${details.url}`,
+  );
+
+  const managedWindow = windowManager.getWindowByTabId(details.sourceTabId);
+  if (!managedWindow) {
+    logger.info(
+      `[Background] sourceTabId ${details.sourceTabId} not in any managed window, skipping`,
+    );
+    return;
+  }
+
+  const targetUrl = details.url;
+  if (!targetUrl || targetUrl === 'about:blank' || targetUrl === 'chrome://newtab/') {
+    logger.info(`[Background] targetUrl empty or ignored: ${targetUrl}`);
+    return;
+  }
+
+  logger.info(
+    `[Background] Redirecting navigation from managed tab ${managedWindow.tabId} back to same tab: ${targetUrl}`,
+  );
+
+  try {
+    await browser.tabs.remove(details.tabId);
+    await browser.tabs.update(managedWindow.tabId, { url: targetUrl });
+  } catch (error) {
+    logger.warn('[Background] Failed to redirect navigation:', error);
+  }
+});
+
+// Detect main-frame page navigation within managed tabs and reset request history.
+// This ensures the plugin sees fresh requests when navigating to a new page.
+chrome.webNavigation.onCommitted.addListener((details: any) => {
+  if (details.frameId !== 0) return;
+
+  const managedWindow = windowManager.getWindowByTabId(details.tabId);
+  if (!managedWindow) return;
+
+  if (managedWindow.requests.length === 0 && managedWindow.headers.length === 0) return;
+
+  logger.info(
+    `[Background] Page navigation in managed tab ${details.tabId}, resetting requests for window ${managedWindow.id}`,
+  );
+
+  windowManager.resetWindowRequests(managedWindow.id);
+
+  browser.runtime.sendMessage({
+    type: 'REQUESTS_RESET',
+    windowId: managedWindow.id,
+  }).catch(() => {
+    // Ignore — no listeners when offscreen document not yet ready
+  });
+});
+
 // Listen for tab updates to show overlay when tab is ready (Task 3.4)
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   // Only act when tab becomes complete

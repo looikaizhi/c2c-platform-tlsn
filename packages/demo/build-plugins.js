@@ -8,12 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const plugins = [
     'alipay',
     'binance',
-    'hongleongBank',
     'wise',
-    'twitter',
-    'swissbank',
-    'spotify',
-    'duolingo',
 ];
 
 // Build URLs from environment variables (matching config.ts pattern)

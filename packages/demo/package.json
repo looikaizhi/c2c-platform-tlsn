@@ -4,7 +4,8 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "dev": "npm run build:plugins && vite",
+        "dev": "node scripts/start-dev.js",
+        "dev:vite-only": "npm run build:plugins && vite",
         "build": "npm run build:plugins && vite build",
         "build:plugins": "node build-plugins.js",
         "preview": "vite preview",

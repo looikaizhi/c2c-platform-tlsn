@@ -363,6 +363,23 @@ export class WindowManager implements IWindowManager {
     return window?.headers || [];
   }
 
+  resetWindowRequests(windowId: number): void {
+    const window = this.windows.get(windowId);
+    if (!window) {
+      logger.warn(
+        `[WindowManager] Cannot reset requests for non-existent window: ${windowId}`,
+      );
+      return;
+    }
+
+    window.requests = [];
+    window.headers = [];
+
+    logger.debug(
+      `[WindowManager] Requests reset for window ${windowId} (${window.uuid})`,
+    );
+  }
+
   async showPluginUI(
     windowId: number,
     json: any,

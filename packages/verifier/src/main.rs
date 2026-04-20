@@ -27,8 +27,10 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use verifier::verifier;
+use verifier::{verifier, TranscriptCommitmentSummary, TranscriptDirectionSummary};
 use ws_stream_tungstenite::WsStream;
+use k256::ecdsa::{SigningKey, Signature};
+use sha3::{Keccak256, Digest};
 
 #[tokio::main]
 async fn main() {
@@ -134,25 +136,111 @@ pub(crate) struct RangeWithHandler {
     pub(crate) handler: Handler,
 }
 
+// Account hash check: verifier compares keccak256 of transcript slice against expected hash
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AccountCheck {
+    pub(crate) direction: String,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    #[serde(rename = "expectedHash")]
+    pub(crate) expected_hash: String,
+    /// How to derive bytes to hash from the matched range.
+    /// "full"       (default): hash entire range as-is
+    /// "json_value": extract inner string value from "key":"value" fragment, hash without quotes/key
+    #[serde(rename = "valueMode", default = "default_value_mode")]
+    pub(crate) value_mode: String,
+}
+
+fn default_value_mode() -> String {
+    "full".to_string()
+}
+
+/// Extract the inner string value from a JSON key-value fragment like `"key":"value"`.
+/// Returns the bytes of `value` without surrounding quotes.
+/// Returns None if the fragment doesn't match the expected pattern.
+fn extract_json_string_value(data: &[u8]) -> Option<&[u8]> {
+    let s = std::str::from_utf8(data).ok()?;
+    // Find the colon separating key from value
+    let colon_pos = s.find(':')?;
+    let after_colon = s[colon_pos + 1..].trim_start();
+    // Value must be a quoted string
+    if !after_colon.starts_with('"') {
+        return None;
+    }
+    let inner = &after_colon[1..];
+    let closing_quote = inner.find('"')?;
+    // Calculate byte offset of the opening quote of the value in the original slice
+    let value_start = colon_pos + 1 + (s[colon_pos + 1..].len() - after_colon.len()) + 1;
+    Some(&data[value_start..value_start + closing_quote])
+}
+
 // Reveal configuration sent before prover.reveal()
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RevealConfig {
     sent: Vec<RangeWithHandler>,
     recv: Vec<RangeWithHandler>,
+    #[serde(rename = "accountChecks", default)]
+    account_checks: Vec<AccountCheck>,
 }
 
-// Handler result with revealed value
+// Handler result with revealed value, aligned to transcript_commitments index
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HandlerResult {
+    /// Index into transcript_commitments[] this result corresponds to
+    commitment_index: usize,
     #[serde(flatten)]
     handler: Handler,
     value: String,
+    /// Byte offset (inclusive) in the original transcript
+    start: usize,
+    /// Byte offset (exclusive) in the original transcript
+    end: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TranscriptRangeSummary {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifierTranscriptSummary {
+    sent: Vec<u8>,
+    recv: Vec<u8>,
+    sent_authed: Vec<TranscriptRangeSummary>,
+    recv_authed: Vec<TranscriptRangeSummary>,
+}
+
+/// Verifier secp256k1 signature of transcript commitments
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifierSignature {
+    chain_id: u64,
+    session_id: String,
+    /// keccak256(hashHex[0] || hashHex[1] || ...), hex without 0x
+    commitments_hash: String,
+    /// keccak256(escrow||chainId||merchant||buyer||productId||orderId||assetType||amount||rate||deadline)
+    /// "0x"-prefixed 32-byte hex, echoed from session_data["__tlsn_order_binding_hash"]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    order_binding_hash: Option<String>,
+    /// 65-byte ECDSA signature r+s+v, hex without 0x
+    signature: String,
+    /// 0x-prefixed Ethereum address derived from verifier public key
+    verifier_address: String,
 }
 
 // Verification result containing handler results
 #[derive(Debug, Clone, Serialize)]
 struct VerificationResult {
+    /// Revealed items sorted by commitment_index (same order as transcript_commitments).
+    /// Hidden commitments have no entry here.
     results: Vec<HandlerResult>,
+    transcript_commitments: Vec<TranscriptCommitmentSummary>,
+    verifier_transcript: Option<VerifierTranscriptSummary>,
+    verifier_signature: Option<VerifierSignature>,
+    server_name: String,
 }
 
 // Type alias for the prover WebSocket sender
@@ -206,6 +294,8 @@ enum ClientMessage {
     RevealConfig {
         sent: Vec<RangeWithHandler>,
         recv: Vec<RangeWithHandler>,
+        #[serde(rename = "accountChecks", default)]
+        account_checks: Vec<AccountCheck>,
     },
 }
 
@@ -221,6 +311,14 @@ enum ServerMessage {
     /// Session completed with results
     SessionCompleted {
         results: Vec<HandlerResult>,
+        #[serde(rename = "transcriptCommitments")]
+        transcript_commitments: Vec<TranscriptCommitmentSummary>,
+        #[serde(rename = "verifierTranscript", skip_serializing_if = "Option::is_none")]
+        verifier_transcript: Option<VerifierTranscriptSummary>,
+        #[serde(rename = "verifierSignature", skip_serializing_if = "Option::is_none")]
+        verifier_signature: Option<VerifierSignature>,
+        #[serde(rename = "serverName")]
+        server_name: String,
     },
     /// Error occurred
     Error {
@@ -564,7 +662,7 @@ async fn handle_session_websocket(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Expect "reveal_config" message type
     let reveal_config = match client_msg {
-        ClientMessage::RevealConfig { sent, recv } => RevealConfig { sent, recv },
+        ClientMessage::RevealConfig { sent, recv, account_checks } => RevealConfig { sent, recv, account_checks },
         _ => {
             error!("[{}] Expected 'reveal_config' message type", session_id);
             send_error(&mut socket, "Expected 'reveal_config' message type").await;
@@ -603,6 +701,10 @@ async fn handle_session_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 &mut socket,
                 &ServerMessage::SessionCompleted {
                     results: result.results,
+                    transcript_commitments: result.transcript_commitments,
+                    verifier_transcript: result.verifier_transcript,
+                    verifier_signature: result.verifier_signature,
+                    server_name: result.server_name,
                 },
             )
             .await
@@ -905,7 +1007,7 @@ async fn run_verifier_task(
 
     // Handle the verification result
     match verification_result {
-        Ok(Ok((server_name, transcript))) => {
+        Ok(Ok((server_name, transcript, transcript_commitments))) => {
             info!("[{}] ✅ Verification completed successfully!", session_id);
 
             // Extract sent and received data
@@ -953,6 +1055,51 @@ async fn run_verifier_task(
                 tokio::time::sleep(Duration::from_millis(100)).await;
             };
 
+            // Account hash verification — check before proceeding to signing
+            {
+                let sent_bytes = transcript.sent_unsafe();
+                let recv_bytes = transcript.received_unsafe();
+
+                for check in &reveal_config.account_checks {
+                    let transcript_bytes = match check.direction.as_str() {
+                        "recv" => recv_bytes,
+                        "sent" => sent_bytes,
+                        other => {
+                            error!("[{}] accountCheck: invalid direction '{}'", session_id, other);
+                            cleanup_session(&state, &session_id).await;
+                            return;
+                        }
+                    };
+                    if check.end > transcript_bytes.len() || check.start > check.end {
+                        error!("[{}] accountCheck: range [{}..{}) out of bounds (len={})", session_id, check.start, check.end, transcript_bytes.len());
+                        cleanup_session(&state, &session_id).await;
+                        return;
+                    }
+                    let raw = &transcript_bytes[check.start..check.end];
+                    let bytes_to_hash: &[u8] = if check.value_mode == "json_value" {
+                        extract_json_string_value(raw).unwrap_or_else(|| {
+                            error!("[{}] accountCheck: json_value extraction failed at {}[{}..{}], falling back to full range", session_id, check.direction, check.start, check.end);
+                            raw
+                        })
+                    } else {
+                        raw
+                    };
+                    use sha3::{Digest, Keccak256};
+                    let mut hasher = Keccak256::new();
+                    hasher.update(bytes_to_hash);
+                    let computed = format!("0x{}", hex::encode(hasher.finalize()));
+                    if computed != check.expected_hash {
+                        error!(
+                            "[{}] accountCheck: hash mismatch at {}[{}..{}] — expected {} got {}",
+                            session_id, check.direction, check.start, check.end, check.expected_hash, computed
+                        );
+                        cleanup_session(&state, &session_id).await;
+                        return;
+                    }
+                    info!("[{}] ✅ accountCheck passed {}[{}..{}]", session_id, check.direction, check.start, check.end);
+                }
+            }
+
             // Validate that reveal_config ranges match authenticated transcript ranges
             if let Err((direction, start, end)) = verify_reveal_config(&reveal_config, &transcript)
             {
@@ -969,23 +1116,60 @@ async fn run_verifier_task(
                 session_id
             );
 
-            // Map revealed ranges to handler results using raw transcript bytes
+            // Build (direction, start, end) → (handler, extracted_value) lookup from reveal_config.
+            // This avoids reordering: results will be keyed by commitment index, not SENT-then-RECV.
+            let mut range_lookup: std::collections::HashMap<(String, usize, usize), (Handler, String)> =
+                std::collections::HashMap::new();
 
-            let mut handler_results = Vec::new();
+            for rwh in &reveal_config.sent {
+                let value = extract_bytes_as_string(&sent_bytes, rwh.start, rwh.end);
+                range_lookup.insert(
+                    ("SENT".to_string(), rwh.start, rwh.end),
+                    (rwh.handler.clone(), value),
+                );
+            }
+            for rwh in &reveal_config.recv {
+                let value = extract_bytes_as_string(&recv_bytes, rwh.start, rwh.end);
+                range_lookup.insert(
+                    ("RECV".to_string(), rwh.start, rwh.end),
+                    (rwh.handler.clone(), value),
+                );
+            }
 
-            // Process ranges using unified function to eliminate duplication
-            handler_results.extend(process_ranges(
-                &reveal_config.sent,
-                &sent_bytes,
-                "SENT",
-                &session_id,
-            ));
-            handler_results.extend(process_ranges(
-                &reveal_config.recv,
-                &recv_bytes,
-                "RECV",
-                &session_id,
-            ));
+            // Build handler_results in transcript_commitments order (commitment index as key).
+            // Only revealed commitments (those whose range appears in reveal_config) get an entry.
+            let handler_results: Vec<HandlerResult> = transcript_commitments
+                .iter()
+                .enumerate()
+                .filter_map(|(i, commitment)| {
+                    let dir = match commitment.direction {
+                        Some(TranscriptDirectionSummary::Sent) => "SENT",
+                        Some(TranscriptDirectionSummary::Recv) => "RECV",
+                        None => return None,
+                    };
+                    let ranges = commitment.ranges.as_ref()?;
+                    if ranges.len() != 1 {
+                        return None;
+                    }
+                    let r = &ranges[0];
+                    let key = (dir.to_string(), r.start, r.end);
+                    let (handler, value) = range_lookup.get(&key)?;
+                    Some(HandlerResult {
+                        commitment_index: i,
+                        handler: handler.clone(),
+                        value: value.clone(),
+                        start: r.start,
+                        end: r.end,
+                    })
+                })
+                .collect();
+
+            info!(
+                "[{}] Built {} revealed items aligned to {} commitments",
+                session_id,
+                handler_results.len(),
+                transcript_commitments.len()
+            );
 
             // Check if webhook is configured for this server_name
             let server_name_str = server_name.as_ref();
@@ -1024,9 +1208,72 @@ async fn run_verifier_task(
                 });
             }
 
+            let include_verifier_transcript =
+                session_flag_enabled(&session_data, "__tlsn_tc_include_verifier_transcript");
+            let verifier_transcript = include_verifier_transcript
+                .then(|| summarize_verifier_transcript(&transcript));
+
+            // Sign transcript commitments with verifier private key (optional)
+            let verifier_signature = match std::env::var("VERIFIER_PRIVATE_KEY") {
+                Ok(hex_key) => {
+                    match hex::decode(&hex_key)
+                        .map_err(|e| eyre::eyre!("bad VERIFIER_PRIVATE_KEY hex: {}", e))
+                        .and_then(|b| {
+                            SigningKey::from_slice(&b)
+                                .map_err(|e| eyre::eyre!("invalid private key: {}", e))
+                        }) {
+                        Ok(signing_key) => {
+                            let chain_id: u64 = std::env::var("CHAIN_ID")
+                                .ok()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(11155111); // Sepolia
+
+                            // Extract orderBindingHash from session_data if provided by the client.
+                            // Expected format: "0x" + 64 hex chars (32 bytes).
+                            let order_binding_hash: Option<[u8; 32]> = session_data
+                                .get("__tlsn_order_binding_hash")
+                                .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+                                .and_then(|bytes| bytes.try_into().ok());
+
+                            match sign_commitments(
+                                &signing_key,
+                                chain_id,
+                                &session_id,
+                                &transcript_commitments,
+                                order_binding_hash,
+                            ) {
+                                Ok(sig) => {
+                                    info!(
+                                        "[{}] ✅ Commitments signed, verifier={}",
+                                        session_id, sig.verifier_address
+                                    );
+                                    Some(sig)
+                                }
+                                Err(e) => {
+                                    error!("[{}] ❌ Sign failed: {}", session_id, e);
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("[{}] Key load failed: {}", session_id, e);
+                            None
+                        }
+                    }
+                }
+                Err(_) => {
+                    warn!("[{}] VERIFIER_PRIVATE_KEY not set, skipping signature", session_id);
+                    None
+                }
+            };
+
             // Send result to extension via the result channel
             let result = VerificationResult {
                 results: handler_results,
+                transcript_commitments,
+                verifier_transcript,
+                verifier_signature,
+                server_name: server_name.as_ref().to_string(),
             };
 
             if result_tx.send(result).is_err() {
@@ -1087,11 +1334,53 @@ fn verify_reveal_config(
     Ok(())
 }
 
+fn session_flag_enabled(session_data: &HashMap<String, String>, key: &str) -> bool {
+    session_data
+        .get(key)
+        .map(|value| {
+            let lowered = value.trim().to_ascii_lowercase();
+            matches!(lowered.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn summarize_verifier_transcript(transcript: &PartialTranscript) -> VerifierTranscriptSummary {
+    VerifierTranscriptSummary {
+        sent: transcript.sent_unsafe().to_vec(),
+        recv: transcript.received_unsafe().to_vec(),
+        sent_authed: transcript
+            .sent_authed()
+            .iter()
+            .map(|range| TranscriptRangeSummary {
+                start: range.start,
+                end: range.end,
+            })
+            .collect(),
+        recv_authed: transcript
+            .received_authed()
+            .iter()
+            .map(|range| TranscriptRangeSummary {
+                start: range.start,
+                end: range.end,
+            })
+            .collect(),
+    }
+}
+
 // Helper function to clean up session from state
 async fn cleanup_session(state: &Arc<AppState>, session_id: &str) {
     let mut sessions = state.sessions.lock().await;
     if sessions.remove(session_id).is_some() {
         info!("[{}] Session removed from state", session_id);
+    }
+}
+
+/// Extract bytes[start..end] as a UTF-8 string (lossy). Returns an error string on bad range.
+fn extract_bytes_as_string(bytes: &[u8], start: usize, end: usize) -> String {
+    if start < bytes.len() && end <= bytes.len() && start < end {
+        String::from_utf8_lossy(&bytes[start..end]).to_string()
+    } else {
+        format!("ERROR: Invalid range [{}, {})", start, end)
     }
 }
 
@@ -1129,8 +1418,11 @@ fn process_ranges(
             );
 
             HandlerResult {
+                commitment_index: 0, // not used in this legacy path
                 handler: range_with_handler.handler.clone(),
                 value,
+                start: range_with_handler.start,
+                end: range_with_handler.end,
             }
         })
         .collect()
@@ -1172,4 +1464,88 @@ async fn send_webhook(config: &WebhookConfig, payload: &WebhookPayload, session_
             );
         }
     }
+}
+
+/// Derive an Ethereum address from a secp256k1 signing key.
+/// Address = keccak256(uncompressed_pubkey[1..])[12..] (last 20 bytes), 0x-prefixed.
+fn eth_address_from_signing_key(signing_key: &SigningKey) -> String {
+    let verifying_key = signing_key.verifying_key();
+    let point = verifying_key.to_encoded_point(false); // uncompressed, 65 bytes (04 || x || y)
+    let pubkey_bytes = &point.as_bytes()[1..];          // drop 0x04 prefix → 64 bytes
+    let hash: [u8; 32] = Keccak256::digest(pubkey_bytes).into();
+    format!("0x{}", hex::encode(&hash[12..]))           // last 20 bytes = Ethereum address
+}
+
+/// Sign transcript commitments with EIP-191 personal_sign scheme.
+///
+/// commitmentsHash  = keccak256(hashHex[0] || hashHex[1] || ...)
+/// messageHash      = keccak256(chainId_u64_be8 || keccak256(sessionId) || commitmentsHash || orderBindingHash)
+///                    (orderBindingHash is omitted / zero-padded when None, but the caller always
+///                     passes Some for production proofs so the contract binding check passes)
+/// ethSignedHash    = keccak256("\x19Ethereum Signed Message:\n32" || messageHash)
+///
+/// Returns a [`VerifierSignature`] containing all fields needed for on-chain verification.
+fn sign_commitments(
+    signing_key: &SigningKey,
+    chain_id: u64,
+    session_id: &str,
+    transcript_commitments: &[TranscriptCommitmentSummary],
+    order_binding_hash: Option<[u8; 32]>,
+) -> Result<VerifierSignature, eyre::ErrReport> {
+    // 1. commitmentsHash = keccak256(hashHex[0] || hashHex[1] || ...)
+    let mut hasher = Keccak256::new();
+    for commitment in transcript_commitments {
+        if let Some(hash_hex) = &commitment.hash_hex {
+            let bytes = hex::decode(hash_hex)
+                .map_err(|e| eyre::eyre!("Invalid hashHex '{}': {}", hash_hex, e))?;
+            hasher.update(&bytes);
+        }
+    }
+    let commitments_hash: [u8; 32] = hasher.finalize().into();
+    let commitments_hash_hex = hex::encode(commitments_hash);
+
+    // 2. sessionIdHash = keccak256(sessionId as UTF-8) → fixed 32 bytes
+    let session_id_hash: [u8; 32] = Keccak256::digest(session_id.as_bytes()).into();
+
+    // 3. messageHash = keccak256(chainId_8bytes_be || sessionIdHash || commitmentsHash || orderBindingHash)
+    //    chainId encoded as uint64 big-endian (matches abi.encodePacked(uint64))
+    //    preimage: 8 + 32 + 32 + 32 = 104 bytes
+    let chain_id_bytes = chain_id.to_be_bytes(); // 8 bytes
+    let binding_bytes = order_binding_hash.unwrap_or([0u8; 32]);
+    let mut message_preimage = [0u8; 104]; // 8 + 32 + 32 + 32
+    message_preimage[..8].copy_from_slice(&chain_id_bytes);
+    message_preimage[8..40].copy_from_slice(&session_id_hash);
+    message_preimage[40..72].copy_from_slice(&commitments_hash);
+    message_preimage[72..104].copy_from_slice(&binding_bytes);
+    let message_hash: [u8; 32] = Keccak256::digest(&message_preimage).into();
+
+    // 4. ethSignedHash = keccak256("\x19Ethereum Signed Message:\n32" || messageHash)
+    let prefix = b"\x19Ethereum Signed Message:\n32";
+    let mut eth_preimage = Vec::with_capacity(prefix.len() + 32);
+    eth_preimage.extend_from_slice(prefix);
+    eth_preimage.extend_from_slice(&message_hash);
+    let eth_signed_hash: [u8; 32] = Keccak256::digest(&eth_preimage).into();
+
+    // 5. secp256k1 ECDSA sign on prehash
+    let (sig, recovery_id): (Signature, k256::ecdsa::RecoveryId) = signing_key
+        .sign_prehash_recoverable(&eth_signed_hash)
+        .map_err(|e| eyre::eyre!("ECDSA sign failed: {}", e))?;
+
+    // 6. Pack 65-byte signature: r(32) || s(32) || v(1)
+    //    Ethereum convention: v = recovery_id + 27 (i.e. 27 or 28)
+    let sig_bytes = sig.to_bytes();
+    let v = recovery_id.to_byte() + 27;
+    let mut sig65 = Vec::with_capacity(65);
+    sig65.extend_from_slice(&sig_bytes);
+    sig65.push(v);
+
+    Ok(VerifierSignature {
+        chain_id,
+        session_id: session_id.to_string(),
+        commitments_hash: commitments_hash_hex,
+        order_binding_hash: order_binding_hash
+            .map(|b| format!("0x{}", hex::encode(b))),
+        signature: hex::encode(&sig65),
+        verifier_address: eth_address_from_signing_key(signing_key),
+    })
 }

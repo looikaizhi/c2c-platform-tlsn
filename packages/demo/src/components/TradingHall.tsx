@@ -1,0 +1,971 @@
+// packages/demo/src/components/TradingHall.tsx
+// Exchange-style advertisement list — shows all registered products from the contract.
+// Click a row to open ProductDetailModal with full info, order form, and confirmation.
+
+import { useState, useEffect, useCallback } from 'react';
+import { keccak256, toBytes } from 'viem';
+import type { Hex } from 'viem';
+import { publicClient, userClients, MERCHANT_ADDRESSES, USER_ADDRESSES } from '../utils/hardhatAccounts';
+import { C2C_ADMIN_ABI } from '../utils/c2cAbi';
+import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+import {
+  placeWiseCryptoOrder,
+  placeWiseFiatOrder,
+  makeWiseCryptoBindingContext,
+  generateWiseCryptoProof,
+  submitWiseCryptoProof,
+} from '../utils/wiseC2cActions';
+import {
+  placeAlipayCryptoOrder,
+  placeAlipayFiatOrder,
+  makeAlipayCryptoBindingContext,
+  generateAlipayCryptoProof,
+  submitAlipayCryptoProof,
+} from '../utils/alipayC2cActions';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type Platform  = 'Wise' | 'Alipay';
+type Direction = 'Crypto' | 'Fiat';
+type SortKey   = 'rate' | 'rateVersion' | 'merchantIdx';
+type SortDir   = 'asc' | 'desc';
+type FilterStatus = '' | 'open' | 'closed';
+
+interface ProductCard {
+  merchantIdx:  number;
+  merchantAddr: Hex;
+  platform:     Platform;
+  direction:    Direction;
+  productId:    bigint;
+  assetType:    0 | 1;
+  rate:         bigint;
+  rateVersion:  number;
+  isOpen:       boolean;
+  collateral:   bigint;
+}
+
+// ─── Design Tokens ───────────────────────────────────────────────────────────
+
+const COLOR = {
+  primary:      '#1677ff',
+  primaryHover: '#0958d9',
+  success:      '#52c41a',
+  successBg:    '#f6ffed',
+  successBorder:'#b7eb8f',
+  danger:       '#ff4d4f',
+  dangerBg:     '#fff1f0',
+  dangerBorder: '#ffa39e',
+  warning:      '#faad14',
+  text:         '#1a1a1a',
+  textSecondary:'#666',
+  textMuted:    '#aaa',
+  border:       '#e8e8e8',
+  bgPage:       '#f5f7fa',
+  bgCard:       '#fff',
+  bgRow:        '#fafafa',
+  bgRowHover:   '#f0f5ff',
+  overlay:      'rgba(0,0,0,0.5)',
+  skeleton:     '#f0f0f0',
+  skeletonShine:'#e8e8e8',
+} as const;
+
+// ─── Shared Styles ────────────────────────────────────────────────────────────
+
+const S = {
+  card: {
+    background: COLOR.bgCard,
+    borderRadius: 12,
+    padding: '20px 24px',
+    boxShadow: '0 2px 12px rgba(0,0,0,0.08)',
+    marginBottom: 24,
+  } as React.CSSProperties,
+
+  btn: (color: string, disabled = false): React.CSSProperties => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    padding: '7px 16px',
+    minHeight: 36,
+    borderRadius: 6,
+    border: 'none',
+    background: disabled ? '#d9d9d9' : color,
+    color: '#fff',
+    fontWeight: 600,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontSize: 13,
+    transition: 'background 0.15s',
+    opacity: disabled ? 0.7 : 1,
+  }),
+
+  btnOutline: (disabled = false): React.CSSProperties => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    padding: '7px 16px',
+    minHeight: 36,
+    borderRadius: 6,
+    border: `1px solid ${COLOR.border}`,
+    background: '#fff',
+    color: disabled ? COLOR.textMuted : COLOR.text,
+    fontWeight: 500,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontSize: 13,
+    transition: 'border-color 0.15s',
+  }),
+
+  overlay: {
+    position: 'fixed' as const,
+    inset: 0,
+    background: COLOR.overlay,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+
+  modal: {
+    background: '#fff',
+    borderRadius: 12,
+    padding: '28px 32px',
+    width: 540,
+    maxHeight: '88vh',
+    overflowY: 'auto' as const,
+    boxShadow: '0 8px 40px rgba(0,0,0,0.18)',
+    position: 'relative' as const,
+  },
+
+  input: {
+    padding: '7px 10px',
+    borderRadius: 6,
+    border: `1px solid ${COLOR.border}`,
+    fontSize: 13,
+    width: '100%',
+    boxSizing: 'border-box' as const,
+    outline: 'none',
+    transition: 'border-color 0.15s',
+  },
+
+  select: {
+    padding: '6px 10px',
+    borderRadius: 6,
+    border: `1px solid ${COLOR.border}`,
+    fontSize: 13,
+    background: '#fff',
+    cursor: 'pointer',
+  },
+
+  label: {
+    display: 'block' as const,
+    fontSize: 12,
+    fontWeight: 600,
+    color: COLOR.textSecondary,
+    marginBottom: 5,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.04em',
+  },
+
+  badge: (open: boolean): React.CSSProperties => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: 11,
+    fontWeight: 700,
+    padding: '2px 8px',
+    borderRadius: 4,
+    background: open ? COLOR.successBg : COLOR.dangerBg,
+    color: open ? COLOR.success : COLOR.danger,
+    border: `1px solid ${open ? COLOR.successBorder : COLOR.dangerBorder}`,
+    letterSpacing: '0.04em',
+  }),
+
+  divider: {
+    borderTop: `1px solid ${COLOR.border}`,
+    margin: '18px 0',
+  } as React.CSSProperties,
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function rateDisplay(c: ProductCard): string {
+  const curr = c.platform === 'Wise' ? 'MYR' : 'CNY';
+  if (c.assetType === 0) return `${(Number(c.rate) / 1e18).toFixed(3)} ${curr}/USDT`;
+  return `${(Number(c.rate) / 1000).toFixed(3)} ${curr}/USDT`;
+}
+
+function fiatEstimate(rate: bigint, assetType: 0 | 1, usdtAmount: number, curr: string): string {
+  if (!usdtAmount || usdtAmount <= 0) return '—';
+  const fiat = assetType === 0
+    ? usdtAmount * (Number(rate) / 1e18)
+    : usdtAmount * (Number(rate) / 1000);
+  return `≈ ${fiat.toFixed(2)} ${curr}`;
+}
+
+function Spinner({ size = 14 }: { size?: number }) {
+  return (
+    <span style={{ display: 'inline-block', width: size, height: size }}>
+      <svg viewBox="0 0 24 24" style={{ animation: 'spin 0.8s linear infinite', width: size, height: size }}>
+        <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="3" strokeDasharray="31.4" strokeDashoffset="10" />
+      </svg>
+    </span>
+  );
+}
+
+// ─── SkeletonRow ──────────────────────────────────────────────────────────────
+
+function SkeletonRow() {
+  const cell = (w: string | number): React.CSSProperties => ({
+    height: 14,
+    borderRadius: 4,
+    background: `linear-gradient(90deg, ${COLOR.skeleton} 25%, ${COLOR.skeletonShine} 50%, ${COLOR.skeleton} 75%)`,
+    backgroundSize: '400% 100%',
+    animation: 'shimmer 1.4s ease-in-out infinite',
+    width: typeof w === 'number' ? w : w,
+  });
+  return (
+    <tr style={{ borderBottom: `1px solid ${COLOR.border}` }}>
+      {[80, 72, 70, 110, 52, 60, 72].map((w, i) => (
+        <td key={i} style={{ padding: '14px 12px' }}>
+          <div style={cell(w)} />
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+// ─── ConfirmDialog ────────────────────────────────────────────────────────────
+
+function ConfirmDialog({
+  card,
+  amount,
+  userIdx,
+  onConfirm,
+  onCancel,
+}: {
+  card:     ProductCard;
+  amount:   string;
+  userIdx:  number;
+  onConfirm: () => void;
+  onCancel:  () => void;
+}) {
+  const curr        = card.platform === 'Wise' ? 'MYR' : 'CNY';
+  const usdtAmt     = parseFloat(amount) || 0;
+  const estimate    = fiatEstimate(card.rate, card.assetType, usdtAmt, curr);
+  const dirLabel    = card.direction === 'Crypto'
+    ? `You pay ${curr} → receive USDT`
+    : `You lock USDT → merchant pays ${curr}`;
+
+  return (
+    <div style={S.overlay} onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div style={{ ...S.modal, width: 400 }}>
+        <h3 style={{ margin: '0 0 18px', fontSize: 17 }}>Confirm Order</h3>
+
+        <div style={{
+          background: COLOR.bgPage,
+          borderRadius: 8,
+          padding: '14px 16px',
+          marginBottom: 18,
+          fontSize: 13,
+          lineHeight: 1.8,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: COLOR.textSecondary }}>Platform</span>
+            <strong>{card.platform}-{card.direction}</strong>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: COLOR.textSecondary }}>Merchant</span>
+            <span style={{ fontFamily: 'monospace' }}>M{card.merchantIdx + 1} ({card.merchantAddr.slice(0, 10)}…)</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: COLOR.textSecondary }}>User</span>
+            <span>User {userIdx + 1} ({USER_ADDRESSES[userIdx].slice(0, 10)}…)</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: COLOR.textSecondary }}>Amount</span>
+            <strong>{usdtAmt.toFixed(3)} USDT</strong>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: COLOR.textSecondary }}>Fiat estimate</span>
+            <span style={{ color: COLOR.primary }}>{estimate}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: COLOR.textSecondary }}>Direction</span>
+            <span style={{ color: COLOR.textSecondary }}>{dirLabel}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: COLOR.textSecondary }}>Rate (v{card.rateVersion})</span>
+            <span>{rateDisplay(card)}</span>
+          </div>
+        </div>
+
+        <p style={{ fontSize: 12, color: COLOR.textSecondary, margin: '0 0 18px' }}>
+          This will submit a transaction to the blockchain. Please confirm the details above before proceeding.
+        </p>
+
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button style={S.btnOutline()} onClick={onCancel}>Cancel</button>
+          <button style={S.btn(COLOR.primary)} onClick={onConfirm}>Confirm Order</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ProductDetailModal ───────────────────────────────────────────────────────
+
+function ProductDetailModal({
+  card,
+  onClose,
+}: {
+  card:    ProductCard;
+  onClose: () => void;
+}) {
+  const [userIdx, setUserIdx]         = useState(0);
+  const [amount, setAmount]           = useState('1');
+  const [buyerName, setBuyerName]     = useState('');
+  const [buyerHandle, setBuyerHandle] = useState('');
+  const [log, setLog]                 = useState<{ msg: string; type: 'info' | 'error' | 'success' }[]>([]);
+  const [running, setRunning]         = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [done, setDone]               = useState(false);
+
+  const curr     = card.platform === 'Wise' ? 'MYR' : 'CNY';
+  const usdtAmt  = parseFloat(amount) || 0;
+  const estimate = fiatEstimate(card.rate, card.assetType, usdtAmt, curr);
+
+  function addLog(msg: string, type: 'info' | 'error' | 'success' = 'info') {
+    setLog((p) => [...p, { msg, type }]);
+  }
+
+  function validateForm(): string | null {
+    if (!amount || usdtAmt <= 0) return 'Please enter a valid USDT amount.';
+    if (card.direction === 'Fiat' && !buyerName.trim()) return `Please enter your ${card.platform} display name.`;
+    if (card.direction === 'Fiat' && !buyerHandle.trim()) return `Please enter your ${card.platform} ${card.platform === 'Wise' ? 'handle' : 'account'}.`;
+    return null;
+  }
+
+  function handlePlaceOrderClick() {
+    const err = validateForm();
+    if (err) { addLog(`⚠ ${err}`, 'error'); return; }
+    setShowConfirm(true);
+  }
+
+  async function handleConfirmedOrder() {
+    setShowConfirm(false);
+    setRunning(true);
+    try {
+      const buyerClient = userClients[userIdx] as any;
+      const buyerAddr   = USER_ADDRESSES[userIdx] as Hex;
+      const amountBig   = BigInt(Math.floor(usdtAmt * 1e18));
+
+      addLog(`Placing ${card.platform}-${card.direction} order…`);
+
+      if (card.platform === 'Wise' && card.direction === 'Crypto') {
+        const { orderId, deadline: dl } = await placeWiseCryptoOrder(buyerClient, card.merchantAddr, amountBig);
+        addLog(`Order placed — orderId=${orderId}  deadline=${new Date(Number(dl) * 1000).toLocaleTimeString()}`);
+        addLog('Building binding context (reads rateVersion from chain)…');
+        const ctx = await makeWiseCryptoBindingContext(card.merchantAddr, buyerAddr, amountBig, orderId);
+        addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
+        addLog('Launching TLSN Wise plugin (contacts + transfer)…');
+        const { contacts, transfer } = await generateWiseCryptoProof(ctx);
+        addLog('Proofs generated, submitting to contract…');
+        const txHash = await submitWiseCryptoProof(buyerClient, card.merchantAddr, orderId, contacts, transfer);
+        addLog(`Transaction confirmed — tx=${txHash}`, 'success');
+        setDone(true);
+
+      } else if (card.platform === 'Wise' && card.direction === 'Fiat') {
+        const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
+        const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
+        const { orderId } = await placeWiseFiatOrder(buyerClient, card.merchantAddr, amountBig, buyerNameHash, buyerIdHash);
+        addLog(`Order placed — orderId=${orderId}  USDT locked.`);
+        addLog('Merchant must now pay MYR and submit Wise proof (see Merchant Panel).', 'success');
+        setDone(true);
+
+      } else if (card.platform === 'Alipay' && card.direction === 'Crypto') {
+        const { orderId } = await placeAlipayCryptoOrder(buyerClient, card.merchantAddr, amountBig);
+        addLog(`Order placed — orderId=${orderId}`);
+        const ctx = await makeAlipayCryptoBindingContext(card.merchantAddr, buyerAddr, amountBig, orderId);
+        addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
+        addLog('Launching TLSN Alipay plugin…');
+        const proof = await generateAlipayCryptoProof(ctx);
+        addLog('Proof generated, submitting to contract…');
+        const txHash = await submitAlipayCryptoProof(buyerClient, card.merchantAddr, orderId, proof);
+        addLog(`Transaction confirmed — tx=${txHash}`, 'success');
+        setDone(true);
+
+      } else if (card.platform === 'Alipay' && card.direction === 'Fiat') {
+        const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
+        const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
+        const { orderId } = await placeAlipayFiatOrder(buyerClient, card.merchantAddr, amountBig, buyerNameHash, buyerIdHash);
+        addLog(`Order placed — orderId=${orderId}  USDT locked.`);
+        addLog('Merchant must now pay CNY and submit Alipay proof (see Merchant Panel).', 'success');
+        setDone(true);
+      }
+    } catch (err: any) {
+      addLog(`Error: ${err?.shortMessage ?? err?.message ?? String(err)}`, 'error');
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <>
+      <div style={S.overlay} onClick={(e) => { if (e.target === e.currentTarget && !running) onClose(); }}>
+        <div style={S.modal}>
+
+          {/* Header */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+            <div>
+              <h3 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 700 }}>
+                {card.platform}
+                <span style={{ color: COLOR.textSecondary, fontWeight: 400, fontSize: 14, marginLeft: 6 }}>
+                  {card.direction === 'Crypto' ? 'Buy USDT' : 'Sell USDT'}
+                </span>
+              </h3>
+              <span style={S.badge(card.isOpen)}>{card.isOpen ? '● OPEN' : '● CLOSED'}</span>
+            </div>
+            {!running && (
+              <button
+                onClick={onClose}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: COLOR.textMuted, lineHeight: 1, padding: 4 }}
+                aria-label="Close"
+              >×</button>
+            )}
+          </div>
+
+          {/* Section 1: Product Info */}
+          <div style={{ background: COLOR.bgPage, borderRadius: 8, padding: '14px 16px', marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: COLOR.textMuted, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 10 }}>
+              Product Details
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: 13 }}>
+              <div>
+                <div style={{ color: COLOR.textSecondary, fontSize: 11, marginBottom: 2 }}>Merchant</div>
+                <div style={{ fontFamily: 'monospace', fontSize: 12 }}>M{card.merchantIdx + 1} — {card.merchantAddr.slice(0, 16)}…</div>
+              </div>
+              <div>
+                <div style={{ color: COLOR.textSecondary, fontSize: 11, marginBottom: 2 }}>Rate</div>
+                <div style={{ fontWeight: 600, color: COLOR.primary }}>{rateDisplay(card)}</div>
+              </div>
+              <div>
+                <div style={{ color: COLOR.textSecondary, fontSize: 11, marginBottom: 2 }}>Rate Version</div>
+                <div>v{card.rateVersion}</div>
+              </div>
+              <div>
+                <div style={{ color: COLOR.textSecondary, fontSize: 11, marginBottom: 2 }}>Direction</div>
+                <div>{card.direction === 'Crypto'
+                  ? `Pay ${curr} → Receive USDT`
+                  : `Lock USDT → Receive ${curr}`
+                }</div>
+              </div>
+              <div>
+                <div style={{ color: COLOR.textSecondary, fontSize: 11, marginBottom: 2 }}>Product ID</div>
+                <div style={{ fontFamily: 'monospace' }}>{card.productId.toString()}</div>
+              </div>
+              <div>
+                <div style={{ color: COLOR.textSecondary, fontSize: 11, marginBottom: 2 }}>Asset Type</div>
+                <div>{card.assetType === 0 ? 'Crypto (0)' : 'Fiat (1)'}</div>
+              </div>
+            </div>
+          </div>
+
+          <div style={S.divider} />
+
+          {/* Section 2: Order Form */}
+          <div style={{ fontSize: 11, fontWeight: 700, color: COLOR.textMuted, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 14 }}>
+            Place Order
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+            <div>
+              <label style={S.label}>Acting as user</label>
+              <select
+                value={userIdx}
+                onChange={(e) => setUserIdx(Number(e.target.value))}
+                style={{ ...S.select, width: '100%' }}
+                disabled={running}
+              >
+                {USER_ADDRESSES.map((a, i) => (
+                  <option key={i} value={i}>User {i + 1} ({a.slice(0, 10)}…)</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={S.label}>Amount (USDT)</label>
+              <input
+                type="number" min="0.001" step="0.001"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                style={S.input}
+                disabled={running}
+              />
+              {usdtAmt > 0 && (
+                <div style={{ fontSize: 11, color: COLOR.primary, marginTop: 4 }}>{estimate}</div>
+              )}
+            </div>
+          </div>
+
+          {card.direction === 'Fiat' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+              <div>
+                <label style={S.label}>
+                  {card.platform} display name <span style={{ color: COLOR.danger }}>*</span>
+                </label>
+                <input
+                  type="text"
+                  value={buyerName}
+                  onChange={(e) => setBuyerName(e.target.value)}
+                  placeholder="e.g. JOHN DOE"
+                  style={S.input}
+                  disabled={running}
+                />
+              </div>
+              <div>
+                <label style={S.label}>
+                  {card.platform} {card.platform === 'Wise' ? 'handle' : 'account'} <span style={{ color: COLOR.danger }}>*</span>
+                </label>
+                <input
+                  type="text"
+                  value={buyerHandle}
+                  onChange={(e) => setBuyerHandle(e.target.value)}
+                  placeholder={card.platform === 'Wise' ? '@handle' : 'phone/email'}
+                  style={S.input}
+                  disabled={running}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: log.length > 0 ? 16 : 0 }}>
+            <button
+              style={S.btn(COLOR.primary, running || !card.isOpen)}
+              disabled={running || !card.isOpen}
+              onClick={handlePlaceOrderClick}
+            >
+              {running ? <><Spinner />Processing…</> : 'Place Order'}
+            </button>
+            {!card.isOpen && (
+              <span style={{ fontSize: 12, color: COLOR.danger }}>Merchant is currently closed</span>
+            )}
+            {done && (
+              <button style={S.btnOutline()} onClick={onClose}>Close</button>
+            )}
+          </div>
+
+          {/* Execution Log */}
+          {log.length > 0 && (
+            <div style={{
+              background: '#1a1a2e',
+              borderRadius: 8,
+              padding: '12px 14px',
+              fontFamily: 'monospace',
+              fontSize: 12,
+              maxHeight: 180,
+              overflowY: 'auto',
+              lineHeight: 1.7,
+            }}>
+              {log.map((entry, i) => (
+                <div key={i} style={{ color: entry.type === 'error' ? '#ff6b6b' : entry.type === 'success' ? '#69db7c' : '#c8d6e5' }}>
+                  <span style={{ color: '#546e7a', marginRight: 8 }}>{String(i + 1).padStart(2, '0')}</span>
+                  {entry.msg}
+                </div>
+              ))}
+              {running && (
+                <div style={{ color: '#546e7a', marginTop: 4 }}>
+                  <span style={{ animation: 'blink 1s step-end infinite' }}>▌</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Confirmation overlay (stacked above modal) */}
+      {showConfirm && (
+        <ConfirmDialog
+          card={card}
+          amount={amount}
+          userIdx={userIdx}
+          onConfirm={handleConfirmedOrder}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
+    </>
+  );
+}
+
+// ─── SortIcon ─────────────────────────────────────────────────────────────────
+
+function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
+  return (
+    <span style={{ marginLeft: 4, opacity: active ? 1 : 0.3, fontSize: 10, verticalAlign: 'middle' }}>
+      {active ? (dir === 'asc' ? '▲' : '▼') : '⇅'}
+    </span>
+  );
+}
+
+// ─── TradingHall ──────────────────────────────────────────────────────────────
+
+export function TradingHall() {
+  const [cards, setCards]           = useState<ProductCard[]>([]);
+  const [loading, setLoading]       = useState(false);
+  const [filterPlatform, setFilterP]  = useState<'' | Platform>('');
+  const [filterDir, setFilterDir]     = useState<'' | Direction>('');
+  const [filterStatus, setFilterStatus] = useState<FilterStatus>('');
+  const [sortKey, setSortKey]       = useState<SortKey>('merchantIdx');
+  const [sortDir, setSortDir]       = useState<SortDir>('asc');
+  const [selectedCard, setSelectedCard] = useState<ProductCard | null>(null);
+  const [hoveredRow, setHoveredRow] = useState<string | null>(null);
+
+  const loadCards = useCallback(async () => {
+    if (!isC2CConfigured()) return;
+    setLoading(true);
+    try {
+      const newCards: ProductCard[] = [];
+      const defs: Array<{ platform: Platform; direction: Direction; productId: bigint; assetType: 0 | 1 }> = [
+        { platform: 'Wise',   direction: 'Crypto', productId: 0n, assetType: 0 },
+        { platform: 'Wise',   direction: 'Fiat',   productId: 0n, assetType: 1 },
+        { platform: 'Alipay', direction: 'Crypto', productId: 1n, assetType: 0 },
+        { platform: 'Alipay', direction: 'Fiat',   productId: 1n, assetType: 1 },
+      ];
+
+      for (let mi = 0; mi < MERCHANT_ADDRESSES.length; mi++) {
+        const merchantAddr = MERCHANT_ADDRESSES[mi] as Hex;
+        for (const def of defs) {
+          try {
+            const [rateInfo, isOpen] = await Promise.all([
+              publicClient.readContract({
+                address: c2cConfig.adminAddress,
+                abi: C2C_ADMIN_ABI,
+                functionName: 'getMerchantRate',
+                args: [merchantAddr, def.productId, def.assetType],
+              }).then((r: any) => r),
+              publicClient.readContract({
+                address: c2cConfig.adminAddress,
+                abi: C2C_ADMIN_ABI,
+                functionName: 'isMerchantOpen',
+                args: [merchantAddr, def.productId, def.assetType],
+              }),
+            ]);
+
+            const rate: bigint       = rateInfo?.rate    ?? 0n;
+            const rateVersion: number = rateInfo?.version ?? 0;
+
+            // Skip products not registered in the contract (rate=0 and version=0 means unregistered)
+            if (rate === 0n && rateVersion === 0) continue;
+
+            newCards.push({
+              merchantIdx: mi,
+              merchantAddr,
+              ...def,
+              rate,
+              rateVersion,
+              isOpen: isOpen as boolean,
+              collateral: 0n,
+            });
+          } catch {
+            // Product does not exist for this merchant, skip silently
+          }
+        }
+      }
+      setCards(newCards);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadCards(); }, [loadCards]);
+
+  // ── Filter ──
+  const filtered = cards.filter((c) => {
+    if (filterPlatform && c.platform !== filterPlatform) return false;
+    if (filterDir && c.direction !== filterDir) return false;
+    if (filterStatus === 'open' && !c.isOpen) return false;
+    if (filterStatus === 'closed' && c.isOpen) return false;
+    return true;
+  });
+
+  // ── Sort ──
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  }
+
+  const sorted = [...filtered].sort((a, b) => {
+    let v = 0;
+    if (sortKey === 'rate') {
+      v = Number(a.rate - b.rate);
+    } else if (sortKey === 'rateVersion') {
+      v = a.rateVersion - b.rateVersion;
+    } else {
+      v = a.merchantIdx - b.merchantIdx;
+    }
+    return sortDir === 'asc' ? v : -v;
+  });
+
+  const thStyle = (key?: SortKey): React.CSSProperties => ({
+    padding: '10px 12px',
+    textAlign: 'left',
+    fontSize: 12,
+    fontWeight: 700,
+    color: COLOR.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    whiteSpace: 'nowrap',
+    cursor: key ? 'pointer' : 'default',
+    userSelect: 'none',
+    borderBottom: `2px solid ${COLOR.border}`,
+    background: COLOR.bgPage,
+  });
+
+  const tdStyle: React.CSSProperties = {
+    padding: '13px 12px',
+    fontSize: 13,
+    borderBottom: `1px solid ${COLOR.border}`,
+    verticalAlign: 'middle',
+  };
+
+  return (
+    <>
+      {/* Global animation keyframes */}
+      <style>{`
+        @keyframes shimmer { 0%{background-position:100% 0} 100%{background-position:-100% 0} }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+        @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
+      `}</style>
+
+      <div style={S.card}>
+        {/* ── Header ── */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 18 }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Trading Hall</h2>
+            {!loading && cards.length > 0 && (
+              <div style={{ fontSize: 12, color: COLOR.textMuted, marginTop: 3 }}>
+                {sorted.length} of {cards.length} products shown
+              </div>
+            )}
+          </div>
+
+          {/* ── Filter Bar ── */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <select
+              value={filterPlatform}
+              onChange={(e) => setFilterP(e.target.value as '' | Platform)}
+              style={S.select}
+            >
+              <option value="">All platforms</option>
+              <option value="Wise">Wise</option>
+              <option value="Alipay">Alipay</option>
+            </select>
+
+            <select
+              value={filterDir}
+              onChange={(e) => setFilterDir(e.target.value as '' | Direction)}
+              style={S.select}
+            >
+              <option value="">All directions</option>
+              <option value="Crypto">Crypto (buy USDT)</option>
+              <option value="Fiat">Fiat (sell USDT)</option>
+            </select>
+
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value as FilterStatus)}
+              style={S.select}
+            >
+              <option value="">All status</option>
+              <option value="open">Open only</option>
+              <option value="closed">Closed only</option>
+            </select>
+
+            <button
+              onClick={loadCards}
+              disabled={loading}
+              style={{
+                ...S.btnOutline(loading),
+                minHeight: 33,
+                padding: '5px 14px',
+              }}
+            >
+              {loading ? <><Spinner size={12} /> Loading…</> : '↻ Refresh'}
+            </button>
+          </div>
+        </div>
+
+        {/* ── Body ── */}
+        {!isC2CConfigured() ? (
+          <div style={{ textAlign: 'center', padding: '48px 24px', color: COLOR.textMuted }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>🔗</div>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Contracts not deployed</div>
+            <div style={{ fontSize: 13 }}>Deploy contracts first using the Deploy Panel above.</div>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', animation: 'fadeIn 0.2s ease' }}>
+              <thead>
+                <tr>
+                  <th style={thStyle()}>Platform</th>
+                  <th style={thStyle()}>Direction</th>
+                  <th
+                    style={thStyle('merchantIdx')}
+                    onClick={() => handleSort('merchantIdx')}
+                  >
+                    Merchant
+                    <SortIcon active={sortKey === 'merchantIdx'} dir={sortDir} />
+                  </th>
+                  <th
+                    style={thStyle('rate')}
+                    onClick={() => handleSort('rate')}
+                  >
+                    Rate
+                    <SortIcon active={sortKey === 'rate'} dir={sortDir} />
+                  </th>
+                  <th
+                    style={thStyle('rateVersion')}
+                    onClick={() => handleSort('rateVersion')}
+                  >
+                    Version
+                    <SortIcon active={sortKey === 'rateVersion'} dir={sortDir} />
+                  </th>
+                  <th style={thStyle()}>Status</th>
+                  <th style={{ ...thStyle(), textAlign: 'right' }}>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  Array.from({ length: 6 }).map((_, i) => <SkeletonRow key={i} />)
+                ) : sorted.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} style={{ padding: '52px 0', textAlign: 'center' }}>
+                      <div style={{ fontSize: 28, marginBottom: 10 }}>📭</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: COLOR.textSecondary, marginBottom: 6 }}>
+                        No products found
+                      </div>
+                      <div style={{ fontSize: 13, color: COLOR.textMuted, marginBottom: 16 }}>
+                        {cards.length === 0
+                          ? 'No products have been registered in the contract yet.'
+                          : 'No products match the current filters.'}
+                      </div>
+                      <button
+                        onClick={loadCards}
+                        style={{ ...S.btn(COLOR.primary), margin: '0 auto' }}
+                      >
+                        Refresh
+                      </button>
+                    </td>
+                  </tr>
+                ) : (
+                  sorted.map((c) => {
+                    const rowKey = `${c.merchantIdx}-${c.platform}-${c.direction}`;
+                    const isHovered = hoveredRow === rowKey;
+                    return (
+                      <tr
+                        key={rowKey}
+                        onClick={() => c.isOpen && setSelectedCard(c)}
+                        onMouseEnter={() => setHoveredRow(rowKey)}
+                        onMouseLeave={() => setHoveredRow(null)}
+                        style={{
+                          cursor: c.isOpen ? 'pointer' : 'default',
+                          background: isHovered && c.isOpen ? COLOR.bgRowHover : 'transparent',
+                          transition: 'background 0.12s',
+                          opacity: c.isOpen ? 1 : 0.55,
+                        }}
+                      >
+                        {/* Platform */}
+                        <td style={tdStyle}>
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            fontWeight: 600,
+                            fontSize: 13,
+                          }}>
+                            <span style={{
+                              width: 24, height: 24, borderRadius: '50%',
+                              background: c.platform === 'Wise' ? '#9de0fb' : '#1677ff',
+                              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: 10, fontWeight: 800, color: '#fff',
+                              flexShrink: 0,
+                            }}>
+                              {c.platform === 'Wise' ? 'W' : 'A'}
+                            </span>
+                            {c.platform}
+                          </span>
+                        </td>
+
+                        {/* Direction */}
+                        <td style={tdStyle}>
+                          <span style={{
+                            display: 'inline-block',
+                            fontSize: 12,
+                            fontWeight: 600,
+                            padding: '2px 8px',
+                            borderRadius: 4,
+                            background: c.direction === 'Crypto' ? '#e6f4ff' : '#fff7e6',
+                            color: c.direction === 'Crypto' ? '#0958d9' : '#d46b08',
+                          }}>
+                            {c.direction === 'Crypto' ? '↑ Buy USDT' : '↓ Sell USDT'}
+                          </span>
+                        </td>
+
+                        {/* Merchant */}
+                        <td style={tdStyle}>
+                          <div style={{ fontWeight: 600 }}>M{c.merchantIdx + 1}</div>
+                          <div style={{ fontSize: 11, color: COLOR.textMuted, fontFamily: 'monospace' }}>
+                            {c.merchantAddr.slice(0, 14)}…
+                          </div>
+                        </td>
+
+                        {/* Rate */}
+                        <td style={{ ...tdStyle, fontWeight: 700, color: COLOR.primary, fontFamily: 'monospace' }}>
+                          {rateDisplay(c)}
+                        </td>
+
+                        {/* Version */}
+                        <td style={{ ...tdStyle, color: COLOR.textSecondary }}>
+                          v{c.rateVersion}
+                        </td>
+
+                        {/* Status */}
+                        <td style={tdStyle}>
+                          <span style={S.badge(c.isOpen)}>
+                            {c.isOpen ? '● OPEN' : '● CLOSED'}
+                          </span>
+                        </td>
+
+                        {/* Action */}
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>
+                          <button
+                            style={S.btn(c.isOpen ? COLOR.primary : '#d9d9d9', !c.isOpen)}
+                            disabled={!c.isOpen}
+                            onClick={(e) => { e.stopPropagation(); if (c.isOpen) setSelectedCard(c); }}
+                          >
+                            Trade →
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {selectedCard && (
+        <ProductDetailModal
+          card={selectedCard}
+          onClose={() => setSelectedCard(null)}
+        />
+      )}
+    </>
+  );
+}

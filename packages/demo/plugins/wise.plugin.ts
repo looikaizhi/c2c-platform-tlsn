@@ -6,6 +6,15 @@ const VERIFIER_URL = VITE_VERIFIER_URL;
 // @ts-ignore
 const PROXY_URL_BASE = VITE_PROXY_URL;
 
+// Sentinel constants injected at runtime by the demo frontend before execCode().
+// Each sentinel has a unique last digit so replace() calls are independent.
+const CONTACTS_ORDER_BINDING_HASH = '0x0000000000000000000000000000000000000000000000000000000000000001';
+const MERCHANT_NAME_HASH          = '0x0000000000000000000000000000000000000000000000000000000000000002';
+const MERCHANT_ID_HASH            = '0x0000000000000000000000000000000000000000000000000000000000000003';
+const PAYEE_NAME_HASH             = '0x0000000000000000000000000000000000000000000000000000000000000004';
+const PAYEE_ID_HASH               = '0x0000000000000000000000000000000000000000000000000000000000000005';
+const TRANSFER_ORDER_BINDING_HASH = '0x0000000000000000000000000000000000000000000000000000000000000006';
+
 const HOST = 'wise.com';
 const METHOD = 'GET';
 const LANDING_URL = 'https://wise.com/home';
@@ -62,7 +71,7 @@ const CONTACTS_HANDLERS = [
     {
         type: 'RECV',
         part: 'ALL',
-        action: 'REVEAL',
+        action: 'PEDERSEN',
         params: {
             type: 'regex',
             regex: '"title"\\s*:\\s*"[^"]*"',
@@ -72,7 +81,7 @@ const CONTACTS_HANDLERS = [
     {
         type: 'RECV',
         part: 'ALL',
-        action: 'REVEAL',
+        action: 'PEDERSEN',
         params: {
             type: 'regex',
             regex: '"subtitle"\\s*:\\s*"[^"]*"',
@@ -84,6 +93,12 @@ const CONTACTS_HANDLERS = [
 const TRANSFER_HANDLERS = [
     { type: 'SENT', part: 'START_LINE', action: 'REVEAL' },
     { type: 'RECV', part: 'START_LINE', action: 'REVEAL' },
+    {
+        type: 'RECV',
+        part: 'BODY',
+        action: 'REVEAL',
+        params: { type: 'json', path: 'id' },
+    },
     {
         type: 'RECV',
         part: 'BODY',
@@ -246,7 +261,26 @@ async function onClick() {
                 proxyUrl: PROXY_URL_BASE + HOST,
                 maxRecvData: 20000,
                 maxSentData: 12000,
+                transcriptCommitHashAlg: 'Keccak256',
                 handlers: CONTACTS_HANDLERS,
+                sessionData: {
+                    __tlsn_order_binding_hash: CONTACTS_ORDER_BINDING_HASH,
+                    __tlsn_merchant_name_hash: MERCHANT_NAME_HASH,
+                    __tlsn_merchant_id_hash:   MERCHANT_ID_HASH,
+                    __tlsn_payee_name_hash:    PAYEE_NAME_HASH,
+                    __tlsn_payee_id_hash:      PAYEE_ID_HASH,
+                },
+                accountCheckFields: [
+                    // CONTACTS_HANDLERS[2] = title    → verify against payeeNameHash
+                    { handlerIndex: 2, sessionDataKey: '__tlsn_payee_name_hash', valueMode: 'json_value' },
+                    // CONTACTS_HANDLERS[3] = subtitle → verify against payeeIdHash
+                    { handlerIndex: 3, sessionDataKey: '__tlsn_payee_id_hash',   valueMode: 'json_value' },
+                ],
+                transcriptCommitDebug: {
+                    exposeOpenings: true,
+                    //includeVerifierTranscript: true,
+                    runSelfCheck: true,
+                },
             }
         );
 
@@ -261,19 +295,30 @@ async function onClick() {
                 proxyUrl: PROXY_URL_BASE + HOST,
                 maxRecvData: 20000,
                 maxSentData: 12000,
+                transcriptCommitHashAlg: 'Keccak256',
                 handlers: TRANSFER_HANDLERS,
+                sessionData: { __tlsn_order_binding_hash: TRANSFER_ORDER_BINDING_HASH },
+                transcriptCommitDebug: {
+                    exposeOpenings: true,
+                    //includeVerifierTranscript: true,
+                    runSelfCheck: true,
+                },
             }
         );
 
-        const combinedProof = {
-            results: [
+        console.log('[wise] prove ok for contacts + transfer');
+        done(JSON.stringify({
+            // 前端展示用（合并结果）
+            displayResults: [
                 ...(contactsProof?.results || []),
                 ...(transferProof?.results || []),
             ],
-        };
-
-        console.log('[wise] prove ok for contacts + transfer');
-        done(JSON.stringify(combinedProof));
+            // 合约提交用（独立 proof，保留完整 ProveResponse）
+            proofs: {
+                contacts: contactsProof,
+                transfer: transferProof,
+            },
+        }));
     } catch (err) {
         console.error('[wise] onClick error', err);
         setState('isRequestPending', false);
@@ -345,7 +390,7 @@ function main() {
     let latestTransferHeader: any = null;
 
     for (const header of matchedHeaders) {
-        const endpoint = getEndpointFromUrl(header?.url);
+        const endpoint = getEndpointFromUrl(header?.url ?? '');
         if (endpoint === ENDPOINT_CONTACTS) latestContactsHeader = header;
         if (endpoint === ENDPOINT_TRANSFER) latestTransferHeader = header;
     }

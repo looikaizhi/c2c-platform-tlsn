@@ -10,9 +10,11 @@
 import type {
   InterceptedRequest,
   InterceptedRequestHeader,
-  Handler,
   DomOptions,
   DomJson,
+  ProveRequestOptions,
+  ProveOptions,
+  ProveResponse,
 } from './types';
 
 declare global {
@@ -73,20 +75,9 @@ declare global {
    * Generate a TLS proof for an HTTP request
    */
   function prove(
-    requestOptions: {
-      url: string;
-      method: string;
-      headers: Record<string, string>;
-      body?: string;
-    },
-    proverOptions: {
-      verifierUrl: string;
-      proxyUrl: string;
-      maxRecvData?: number;
-      maxSentData?: number;
-      handlers: Handler[];
-    },
-  ): Promise<any>;
+    requestOptions: ProveRequestOptions,
+    proverOptions: ProveOptions,
+  ): Promise<ProveResponse>;
 
   /**
    * Complete plugin execution and return result

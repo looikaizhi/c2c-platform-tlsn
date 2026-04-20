@@ -1,8 +1,10 @@
 use eyre::eyre;
+use serde::Serialize;
 use tlsn::{
     config::{tls_commit::TlsCommitProtocolConfig, verifier::VerifierConfig},
     connection::{DnsName, ServerName},
-    transcript::PartialTranscript,
+    hash::HashAlgId,
+    transcript::{Direction, PartialTranscript, TranscriptCommitment},
     verifier::VerifierOutput,
     webpki::RootCertStore,
     Session,
@@ -11,15 +13,56 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{debug, info};
 
-/// Core verifier logic that validates the TLS proof
-/// Returns: (sent_bytes, recv_bytes, sent_string, recv_string)
-/// - sent_bytes/recv_bytes: Raw transcript bytes (with \0 for unrevealed)
-/// - sent_string/recv_string: Display strings (with 🙈 for unrevealed)
+// ── Public types exported to main.rs ─────────────────────────────────────────
+
+/// Transcript direction for commitment summaries.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum TranscriptDirectionSummary {
+    Sent,
+    Recv,
+}
+
+/// A single byte range within a transcript commitment.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptCommitmentRangeSummary {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Summary of a single transcript commitment, serialised into the
+/// `session_completed` WebSocket message.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptCommitmentSummary {
+    /// Always `"Hash"` for now (the only kind in TLSN alpha).
+    pub kind: String,
+    /// Which side of the transcript this commitment covers.
+    pub direction: Option<TranscriptDirectionSummary>,
+    /// Hash algorithm: `"Sha256"`, `"Blake3"`, or `"Keccak256"`.
+    pub hash_alg: Option<String>,
+    /// Byte ranges in the transcript that are covered by this commitment.
+    pub ranges: Option<Vec<TranscriptCommitmentRangeSummary>>,
+    /// Hex-encoded commitment hash (no `0x` prefix).
+    pub hash_hex: Option<String>,
+    /// Length of the commitment hash in bytes.
+    pub hash_len: Option<usize>,
+}
+
+// ── Core verifier logic ───────────────────────────────────────────────────────
+
+/// Run the MPC-TLS verifier protocol.
+///
+/// Returns `(dns_name, partial_transcript, commitment_summaries)`:
+/// - `dns_name`            – TLS server hostname
+/// - `partial_transcript`  – authed transcript data
+/// - `commitment_summaries`– one summary per transcript commitment produced
+///                           during the MPC reveal phase (used for signing)
 pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     socket: T,
     max_sent_data: usize,
     max_recv_data: usize,
-) -> Result<(DnsName, PartialTranscript), eyre::ErrReport> {
+) -> Result<(DnsName, PartialTranscript, Vec<TranscriptCommitmentSummary>), eyre::ErrReport> {
     info!(
         "Starting verification with maxSentData={}, maxRecvData={}",
         max_sent_data, max_recv_data
@@ -99,7 +142,7 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
         VerifierOutput {
             server_name,
             transcript,
-            ..
+            transcript_commitments,
         },
         verifier,
     ) = verifier
@@ -132,7 +175,7 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     info!("server_name: {:?}", server_name);
     debug!("transcript: {:?}", &transcript);
 
-    // Extract sent and received data
+    // Extract sent and received data for logging
     info!("Extracting transcript data...");
     let sent = transcript.sent_unsafe().to_vec();
     let received = transcript.received_unsafe().to_vec();
@@ -152,8 +195,72 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
         bytes_to_redacted_string(&received, "█")?
     );
 
-    // Return both raw bytes (for range extraction) and display strings (for logging)
-    Ok((dns_name, transcript))
+    // Convert TLSN transcript commitments to our summary type
+    let commitment_summaries = build_commitment_summaries(&transcript_commitments);
+    info!(
+        "Built {} transcript commitment summaries",
+        commitment_summaries.len()
+    );
+
+    Ok((dns_name, transcript, commitment_summaries))
+}
+
+/// Convert TLSN `TranscriptCommitment` objects into serialisable summaries.
+fn build_commitment_summaries(
+    commitments: &[TranscriptCommitment],
+) -> Vec<TranscriptCommitmentSummary> {
+    commitments
+        .iter()
+        .map(|c| match c {
+            TranscriptCommitment::Hash(ph) => {
+                let direction = match ph.direction {
+                    Direction::Sent => Some(TranscriptDirectionSummary::Sent),
+                    Direction::Received => Some(TranscriptDirectionSummary::Recv),
+                };
+
+                let hash_alg = if ph.hash.alg == HashAlgId::SHA256 {
+                    Some("Sha256".to_string())
+                } else if ph.hash.alg == HashAlgId::BLAKE3 {
+                    Some("Blake3".to_string())
+                } else if ph.hash.alg == HashAlgId::KECCAK256 {
+                    Some("Keccak256".to_string())
+                } else {
+                    Some("Unknown".to_string())
+                };
+
+                let hash_bytes = ph.hash.value.as_bytes();
+                let hash_hex = Some(hex::encode(hash_bytes));
+                let hash_len = Some(hash_bytes.len());
+
+                let ranges: Vec<TranscriptCommitmentRangeSummary> = ph
+                    .idx
+                    .iter()
+                    .map(|r| TranscriptCommitmentRangeSummary {
+                        start: r.start,
+                        end: r.end,
+                    })
+                    .collect();
+
+                TranscriptCommitmentSummary {
+                    kind: "Hash".to_string(),
+                    direction,
+                    hash_alg,
+                    ranges: Some(ranges),
+                    hash_hex,
+                    hash_len,
+                }
+            }
+            // TranscriptCommitment is #[non_exhaustive], so a catch-all is required
+            _ => TranscriptCommitmentSummary {
+                kind: "Unknown".to_string(),
+                direction: None,
+                hash_alg: None,
+                ranges: None,
+                hash_hex: None,
+                hash_len: None,
+            },
+        })
+        .collect()
 }
 
 /// Compress long sequences of redacted emojis for better readability
