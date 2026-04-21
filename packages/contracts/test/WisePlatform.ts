@@ -83,11 +83,9 @@ function nextWiseTransferId(): bigint {
   return _wiseTransferId;
 }
 
-function calcFiatX1000(amount: bigint, rate: bigint, assetType: number): bigint {
-  if (assetType === ASSET_CRYPTO) {
-    return (amount * rate) / (10n ** 33n);
-  }
-  return (amount * rate * 10n) / (10n ** 18n);
+function calcFiatX1000(amount: bigint, rate: bigint, _assetType?: number): bigint {
+  // Unified formula: rate = fiatPrice × 10^8; tokenDecimals = 18 (USDT)
+  return (amount * 1000n * rate) / (10n ** 26n);
 }
 
 function toAmountX1000String(v: bigint): string {

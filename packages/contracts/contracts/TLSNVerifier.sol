@@ -273,7 +273,13 @@ contract TLSNVerifier {
     function _recoverVerifierSigner(TLSNProof calldata proof) internal pure returns (address) {
         bytes32 sessionIdHash = keccak256(bytes(proof.sessionId));
         bytes32 messageHash = keccak256(
-            abi.encodePacked(proof.chainId, sessionIdHash, proof.commitmentsHash, proof.orderBindingHash)
+            abi.encodePacked(
+                proof.chainId,
+                sessionIdHash,
+                proof.commitmentsHash,
+                proof.orderBindingHash,
+                proof.policyVersionHash
+            )
         );
         bytes32 ethSignedHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
         return ECDSA.recover(ethSignedHash, proof.verifierSignature);

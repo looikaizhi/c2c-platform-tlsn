@@ -1,8 +1,8 @@
 use crate::{
-    build_slim_webhook_payload, compute_hmac_sha256, current_timestamp_str, init_db,
-    insert_proof_record, get_proof_by_session_id, get_proof_by_tx_hash, patch_tx_hash,
-    retain_until_str, Handler, HandlerPart, HandlerResult, HandlerType, ProofExportRecord,
-    VerifierSignature,
+    build_slim_webhook_payload, compute_hmac_sha256, current_timestamp_str, format_rfc3339,
+    init_db, insert_proof_record, get_proof_by_session_id, get_proof_by_tx_hash, patch_tx_hash,
+    record_to_response, retain_until_str, Handler, HandlerPart, HandlerResult, HandlerType,
+    ProofExportRecord, VerifierSignature,
 };
 
 // ============================================================================
@@ -58,6 +58,8 @@ fn make_test_record(session_id: &str) -> ProofExportRecord {
         tx_hash: None,
         recorded_at: current_timestamp_str(),
         retain_until: retain_until_str(),
+        transcript_commitments: None,
+        signing_chain_id: None,
     }
 }
 
@@ -89,7 +91,9 @@ fn test_sqlite_patch_tx_hash() {
     let record = make_test_record("test-session-tx");
     insert_proof_record(&conn, &record);
 
-    patch_tx_hash(&conn, "test-session-tx", "0xabc123", Some(11155111));
+    let rows = patch_tx_hash(&conn, "test-session-tx", "0xabc123", Some(11155111))
+        .expect("patch_tx_hash should not return a DB error");
+    assert_eq!(rows, 1, "Should have updated exactly 1 row");
 
     let retrieved = get_proof_by_session_id(&conn, "test-session-tx");
     assert!(retrieved.is_some());
@@ -97,11 +101,21 @@ fn test_sqlite_patch_tx_hash() {
 }
 
 #[test]
+fn test_patch_tx_hash_unknown_session_returns_zero_rows() {
+    let conn = init_db(":memory:");
+    // No record inserted — session_id does not exist.
+    let rows = patch_tx_hash(&conn, "nonexistent-session", "0xdeadbeef", None)
+        .expect("patch_tx_hash should not return a DB error for missing session");
+    assert_eq!(rows, 0, "Should return 0 rows affected when session_id is not found");
+}
+
+#[test]
 fn test_sqlite_get_by_tx_hash() {
     let conn = init_db(":memory:");
     let record = make_test_record("test-session-lookup");
     insert_proof_record(&conn, &record);
-    patch_tx_hash(&conn, "test-session-lookup", "0xunique-tx", None);
+    patch_tx_hash(&conn, "test-session-lookup", "0xunique-tx", None)
+        .expect("patch_tx_hash should succeed");
 
     let retrieved = get_proof_by_tx_hash(&conn, "0xunique-tx");
     assert!(retrieved.is_some(), "Should find record by tx hash");
@@ -259,4 +273,151 @@ fn test_sign_commitments_same_policy_version_is_deterministic() {
 
     assert_eq!(sig1.signature, sig2.signature,
         "Same inputs must produce same signature (deterministic ECDSA)");
+}
+
+// ============================================================================
+// Compliance full-path regression tests (Groups 1–6)
+// ============================================================================
+
+// Group 1: account_checks persisted and retrieved
+#[test]
+fn test_account_checks_persisted_and_retrieved() {
+    let conn = init_db(":memory:");
+    let account_checks_json = r#"[
+        {"direction":"recv","start":100,"end":150,
+         "expectedHash":"0xabc","computedHash":"0xabc",
+         "valueMode":"json_value","passed":true,"fieldLabel":"originator.accountId"}
+    ]"#;
+    let mut record = make_test_record("session-checks");
+    record.account_checks = Some(account_checks_json.to_string());
+    insert_proof_record(&conn, &record);
+
+    let retrieved = get_proof_by_session_id(&conn, "session-checks").unwrap();
+    assert!(retrieved.account_checks.is_some());
+    let parsed: serde_json::Value =
+        serde_json::from_str(retrieved.account_checks.unwrap().as_str()).unwrap();
+    assert_eq!(parsed[0]["passed"], true);
+    assert_eq!(parsed[0]["fieldLabel"], "originator.accountId");
+}
+
+// Group 2: transcript_commitments persisted and retrieved
+#[test]
+fn test_transcript_commitments_persisted_and_retrieved() {
+    let conn = init_db(":memory:");
+    let tc_json = r#"[{"commitmentIndex":0,"hashHex":"0xcafe","start":0,"end":10}]"#;
+    let mut record = make_test_record("session-tc");
+    record.transcript_commitments = Some(tc_json.to_string());
+    insert_proof_record(&conn, &record);
+
+    let retrieved = get_proof_by_session_id(&conn, "session-tc").unwrap();
+    assert!(retrieved.transcript_commitments.is_some());
+    let parsed: serde_json::Value =
+        serde_json::from_str(retrieved.transcript_commitments.unwrap().as_str()).unwrap();
+    assert_eq!(parsed[0]["hashHex"], "0xcafe");
+}
+
+// Group 3: signing_chain_id persisted and retrieved
+#[test]
+fn test_signing_chain_id_persisted_and_retrieved() {
+    let conn = init_db(":memory:");
+    let mut record = make_test_record("session-chainid");
+    record.signing_chain_id = Some(11155111);
+    insert_proof_record(&conn, &record);
+
+    let retrieved = get_proof_by_session_id(&conn, "session-chainid").unwrap();
+    assert_eq!(retrieved.signing_chain_id, Some(11155111));
+}
+
+// Group 4: record_to_response produces ProofExportV1-aligned structure
+#[test]
+fn test_record_to_response_travel_rule_fields() {
+    let conn = init_db(":memory:");
+    let handler_results = r#"[
+        {"commitmentIndex":0,"type":"RECV","part":"BODY",
+         "label":"originator.amount","value":"100.00","start":0,"end":6},
+        {"commitmentIndex":1,"type":"RECV","part":"BODY",
+         "value":"no-label","start":6,"end":14}
+    ]"#;
+    let mut record = make_test_record("session-trf");
+    record.handler_results = handler_results.to_string();
+    insert_proof_record(&conn, &record);
+
+    let retrieved = get_proof_by_session_id(&conn, "session-trf").unwrap();
+    let response = record_to_response(retrieved);
+
+    assert_eq!(response.format_version, "ProofExportV1");
+    let trf = &response.travel_rule_fields;
+    assert!(trf.get("originator.amount").is_some(), "labeled handler must appear");
+    assert!(trf.get("no-label").is_none(), "handler without label must not appear");
+}
+
+#[test]
+fn test_record_to_response_has_required_v1_fields() {
+    let record = make_test_record("session-v1");
+    let response = record_to_response(record);
+    assert_eq!(response.format_version, "ProofExportV1");
+    assert!(response.account_checks.is_array(), "accountChecks must be a JSON array");
+    assert!(response.transcript_commitments.is_array(), "transcriptCommitments must be a JSON array");
+}
+
+// Group 5: duplicate travel_rule label does not panic
+#[test]
+fn test_duplicate_label_does_not_panic() {
+    let results = vec![
+        make_handler_result(Some("originator.amount"), "100.00", 0),
+        make_handler_result(Some("originator.amount"), "200.00", 1),
+    ];
+    let sig: Option<VerifierSignature> = None;
+    // Must not panic; duplicate label — last value wins
+    let payload = build_slim_webhook_payload(
+        "session-dup",
+        Some("v1.0.0".to_string()),
+        "wise.com",
+        &results,
+        true,
+        &sig,
+        None,
+    );
+    assert_eq!(payload.travel_rule_fields.len(), 1);
+    assert_eq!(payload.travel_rule_fields["originator.amount"].value, "200.00");
+}
+
+// Group 6: timestamp functions return RFC3339 format
+
+/// Validates that a string is a strict RFC3339 datetime using a regex that
+/// checks the structural format beyond the loose `contains('T')` / `ends_with('Z')`
+/// heuristics.  Pattern: YYYY-MM-DDTHH:MM:SS followed by Z or ±HH:MM offset.
+fn assert_is_rfc3339(s: &str, label: &str) {
+    let re = regex::Regex::new(
+        r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$",
+    )
+    .expect("RFC3339 regex must compile");
+    assert!(
+        re.is_match(s),
+        "{} must match strict RFC3339 YYYY-MM-DDTHH:MM:SS(Z|±HH:MM), got: {}",
+        label,
+        s
+    );
+}
+
+#[test]
+fn test_current_timestamp_str_is_rfc3339() {
+    let ts = current_timestamp_str();
+    assert_is_rfc3339(&ts, "current_timestamp_str()");
+}
+
+#[test]
+fn test_retain_until_str_is_rfc3339() {
+    let ts = retain_until_str();
+    assert_is_rfc3339(&ts, "retain_until_str()");
+}
+
+#[test]
+fn test_format_rfc3339_known_value() {
+    // Unix epoch = 1970-01-01T00:00:00Z
+    assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00Z");
+    // 1745222400 = 2025-04-21T08:00:00Z
+    assert_eq!(format_rfc3339(1745222400), "2025-04-21T08:00:00Z");
+    // 2024-02-29T11:34:56Z (leap year) = 1709206496
+    assert_eq!(format_rfc3339(1709206496), "2024-02-29T11:34:56Z");
 }

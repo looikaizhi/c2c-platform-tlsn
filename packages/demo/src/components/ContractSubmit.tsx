@@ -3,6 +3,7 @@ import { buildContractProof, type ExtensionProveResponse } from '../utils/proofT
 import { submitProofToContract, type SubmitAction } from '../utils/contractSubmitter';
 import { isContractConfigured } from '../utils/contractConfig';
 import { discoverWallets, type EIP6963ProviderDetail } from '../utils/walletDiscovery';
+import { config } from '../config';
 import type { Hex } from 'viem';
 
 type SubmitStatus = 'idle' | 'building' | 'confirming' | 'pending' | 'success' | 'error';
@@ -56,6 +57,10 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
 
             const provider = selectedWallet?.provider;
 
+            // Fetch chainId once and reuse for both PATCH calls (EIP-1193)
+            const chainIdHex = await provider.request({ method: 'eth_chainId' });
+            const chainId = parseInt(chainIdHex as string, 16);
+
             if (hasWiseProofs) {
                 const contactsContractProof = buildContractProof(wiseProofs.contacts);
                 const transferContractProof = buildContractProof(wiseProofs.transfer);
@@ -72,6 +77,14 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
 
                 const { hash } = await submitProofToContract(transferContractProof, action, provider);
                 setTxHash(hash);
+                const attestationId = wiseProofs?.transfer?.verifierSignature?.sessionId;
+                if (attestationId) {
+                    await fetch(`${config.verifierUrl}/proof/${attestationId}/tx`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ txHash: hash, chainId }),
+                    });
+                }
             } else if (singleProof) {
                 const contractProof = buildContractProof(singleProof);
 
@@ -80,6 +93,14 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
                 const action: SubmitAction = { type: 'registerMerchant' };
                 const { hash } = await submitProofToContract(contractProof, action, provider);
                 setTxHash(hash);
+                const attestationId = proveResponse?.verifierSignature?.sessionId;
+                if (attestationId) {
+                    await fetch(`${config.verifierUrl}/proof/${attestationId}/tx`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ txHash: hash, chainId }),
+                    });
+                }
             }
 
             setStatus('success');

@@ -60,12 +60,45 @@ async fn main() {
     let db = Arc::new(std::sync::Mutex::new(conn));
     info!("SQLite proof store initialized at '{}'", db_path);
 
+    let proof_api_key = std::env::var("PROOF_API_KEY").ok();
+    if proof_api_key.is_none() {
+        warn!("PROOF_API_KEY not set — /proof* endpoints are UNAUTHENTICATED (dev mode only)");
+    }
+
     // Create application state with session storage, config, and DB
     let app_state = Arc::new(AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(config),
         db: db.clone(),
+        proof_api_key,
+        ws_rate_limiter: Arc::new(std::sync::Mutex::new(HashMap::new())),
     });
+
+    if app_state.proof_api_key.is_some() {
+        info!("Proof API: authentication ENABLED (X-TLSN-Api-Key / Authorization: Bearer)");
+    } else {
+        warn!("Proof API: authentication DISABLED — set PROOF_API_KEY for production");
+    }
+
+    let cors = {
+        let origins_str = std::env::var("CORS_ALLOW_ORIGINS")
+            .unwrap_or_else(|_| "http://localhost:3000,http://localhost:8080".to_string());
+        let origins: Vec<axum::http::HeaderValue> = origins_str
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        if origins.is_empty() {
+            CorsLayer::permissive()
+        } else {
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::PATCH])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ])
+        }
+    };
 
     // Build router with routes
     let app = Router::new()
@@ -78,7 +111,8 @@ async fn main() {
         .route("/proof/:session_id", get(get_proof_handler))
         .route("/proof/:session_id/tx", patch(patch_proof_tx_handler))
         .route("/proof", get(get_proof_by_tx_handler))
-        .layer(CorsLayer::permissive())
+        .layer(axum::extract::DefaultBodyLimit::max(65_536))
+        .layer(cors)
         .with_state(app_state);
 
     // Start server
@@ -99,7 +133,7 @@ async fn main() {
     );
     info!("Proxy WebSocket endpoint: ws://{}/proxy?token=<host>", addr);
 
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .tcp_nodelay(true)
         .await
         .expect("Server error");
@@ -277,6 +311,10 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     /// SQLite connection for R.11 proof persistence (std::sync::Mutex, not tokio)
     pub(crate) db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    /// API key for /proof* endpoints; None = dev mode (unauthenticated)
+    pub(crate) proof_api_key: Option<String>,
+    /// Per-IP WS connection rate limiter: IpAddr → (count_in_window, window_start)
+    pub(crate) ws_rate_limiter: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
 }
 
 // Query parameters for verifier WebSocket connection
@@ -450,6 +488,21 @@ impl RedactedTranscript {
 // Compliance Structures (R.11, R.15, R.16)
 // ============================================================================
 
+/// Per-check result stored in DB and returned by GET /proof
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountCheckResult {
+    pub(crate) direction: String,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) expected_hash: String,
+    pub(crate) computed_hash: String,
+    pub(crate) value_mode: String,
+    pub(crate) passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) field_label: Option<String>,
+}
+
 /// Single Travel Rule field value in the slim webhook payload
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -479,6 +532,7 @@ struct SlimWebhookPayload {
 }
 
 /// Internal record stored in SQLite for R.11 retrieval
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ProofExportRecord {
     session_id: String,
     server_name: String,
@@ -495,6 +549,8 @@ struct ProofExportRecord {
     tx_hash: Option<String>,
     recorded_at: String,
     retain_until: String,
+    transcript_commitments: Option<String>, // JSON of Vec<TranscriptCommitmentSummary>
+    signing_chain_id: Option<i64>,          // chain_id locked into verifier ECDSA signature
 }
 
 /// Body for PATCH /proof/:session_id/tx
@@ -512,24 +568,30 @@ struct GetProofByTxQuery {
     tx_hash: String,
 }
 
-/// Response body for GET /proof/{id}
+/// Response body for GET /proof/{id} — aligned to ProofExportV1 contract in types.ts
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProofExportResponse {
-    format_version: &'static str,
+    format_version: &'static str,              // "ProofExportV1"
     attestation_id: String,
     tx_hash: Option<String>,
     policy_version: String,
-    timestamp: String,
+    timestamp: String,                         // RFC3339 UTC
     server_name: String,
     verifier_version: &'static str,
     order_binding_hash: Option<String>,
     commitments_hash: String,
-    verifier_signature: Option<String>,
-    verifier_address: Option<String>,
+    verifier_signature: String,                // empty string when no signing key
+    verifier_address: String,                  // empty string when no signing key
+    chain_id: Option<i64>,                     // signing_chain_id from ECDSA signature
+    travel_rule_fields: serde_json::Value,     // {label: {value, commitmentIndex}}
+    account_checks: serde_json::Value,         // JSON array of AccountCheckResult
+    transcript_commitments: serde_json::Value, // JSON array of TranscriptCommitmentSummary
     redacted_transcript: Option<RedactedTranscriptExport>,
-    handler_results: serde_json::Value,
-    session_data: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handler_results: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -542,11 +604,67 @@ struct RedactedTranscriptExport {
 // Proof Store HTTP Endpoints (R.11)
 // ============================================================================
 
+/// Returns true if this IP is within the per-IP WS rate limit, false if it should be rejected.
+/// Window: 60 seconds. Limit: WS_RATE_LIMIT_PER_IP env var (default 10).
+fn check_ws_rate_limit(state: &Arc<AppState>, ip: std::net::IpAddr) -> bool {
+    let limit: u32 = std::env::var("WS_RATE_LIMIT_PER_IP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let window = std::time::Duration::from_secs(60);
+    let mut limiter = state.ws_rate_limiter.lock().unwrap();
+    let now = std::time::Instant::now();
+    let entry = limiter.entry(ip).or_insert((0, now));
+    if now.duration_since(entry.1) >= window {
+        // Window expired — reset counter
+        *entry = (1, now);
+        true
+    } else if entry.0 < limit {
+        entry.0 += 1;
+        true
+    } else {
+        false
+    }
+}
+
+/// Returns Ok(()) if auth passes, or Err(StatusCode::UNAUTHORIZED) if it fails.
+fn check_proof_api_key(
+    headers: &axum::http::HeaderMap,
+    state: &Arc<AppState>,
+) -> Result<(), StatusCode> {
+    let Some(ref expected) = state.proof_api_key else {
+        return Ok(()); // dev mode: no key configured, allow all
+    };
+    let provided = headers
+        .get("X-TLSN-Api-Key")
+        .or_else(|| headers.get("authorization"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_start_matches("Bearer ").trim());
+    if provided == Some(expected.as_str()) {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// Returns true if `s` matches `^0x[0-9a-fA-F]{1,64}$`.
+fn is_valid_tx_hash(s: &str) -> bool {
+    s.starts_with("0x")
+        && s.len() >= 3
+        && s.len() <= 66
+        && s[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// GET /proof/:session_id — retrieve full proof by session ID
 pub(crate) async fn get_proof_handler(
+    headers: axum::http::HeaderMap,
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(status) = check_proof_api_key(&headers, &state) {
+        return status.into_response();
+    }
+    let session_id_for_log = session_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let conn = state.db.lock().unwrap();
         get_proof_by_session_id(&conn, &session_id)
@@ -555,31 +673,82 @@ pub(crate) async fn get_proof_handler(
     .unwrap_or(None);
 
     match result {
-        Some(record) => (StatusCode::OK, Json(record_to_response(record))).into_response(),
+        Some(record) => {
+            info!(session_id = %session_id_for_log, action = "proof_read", "Proof accessed");
+            (StatusCode::OK, Json(record_to_response(record))).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "Proof not found").into_response(),
     }
 }
 
 /// PATCH /proof/:session_id/tx — write on-chain tx hash after confirmation
 pub(crate) async fn patch_proof_tx_handler(
+    headers: axum::http::HeaderMap,
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<PatchTxBody>,
-) -> impl IntoResponse {
-    tokio::task::spawn_blocking(move || {
+) -> axum::response::Response {
+    if let Err(status) = check_proof_api_key(&headers, &state) {
+        return status.into_response();
+    }
+    if !is_valid_tx_hash(&body.tx_hash) {
+        return (StatusCode::BAD_REQUEST, "Invalid tx_hash format: must be 0x<1-64 hex chars>")
+            .into_response();
+    }
+    if let Some(cid) = body.chain_id {
+        if cid <= 0 {
+            return (StatusCode::BAD_REQUEST, "Invalid chain_id: must be positive").into_response();
+        }
+    }
+    let tx_hash_for_log = body.tx_hash.clone();
+    let result = tokio::task::spawn_blocking(move || {
         let conn = state.db.lock().unwrap();
-        patch_tx_hash(&conn, &session_id, &body.tx_hash, body.chain_id);
+        let rows = patch_tx_hash(&conn, &session_id, &body.tx_hash, body.chain_id)?;
+        if rows == 0 {
+            // Distinguish: record not found vs tx_hash already set
+            let exists = get_proof_by_session_id(&conn, &session_id).is_some();
+            Ok::<(usize, bool, String), rusqlite::Error>((0usize, exists, session_id))
+        } else {
+            Ok((rows, false, session_id))
+        }
     })
-    .await
-    .ok();
-    StatusCode::OK
+    .await;
+
+    match result {
+        Ok(Ok((rows, _, ref sid))) if rows > 0 => {
+            info!(session_id = %sid, tx_hash = %tx_hash_for_log, action = "tx_hash_written", "tx_hash recorded");
+            StatusCode::OK.into_response()
+        }
+        Ok(Ok((_, true, sid))) => {
+            warn!("[{}] Attempted overwrite of tx_hash rejected (409)", sid);
+            (StatusCode::CONFLICT, "tx_hash already set for this session — overwrite not allowed")
+                .into_response()
+        }
+        Ok(Ok((_, false, _))) => (StatusCode::NOT_FOUND, "Proof not found").into_response(),
+        Ok(Err(e)) => {
+            error!("patch_tx_hash DB error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            error!("patch_tx_hash spawn error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// GET /proof?txHash=xxx — reverse lookup by on-chain tx hash
 pub(crate) async fn get_proof_by_tx_handler(
+    headers: axum::http::HeaderMap,
     Query(params): Query<GetProofByTxQuery>,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err(status) = check_proof_api_key(&headers, &state) {
+        return status.into_response();
+    }
+    if !is_valid_tx_hash(&params.tx_hash) {
+        return (StatusCode::BAD_REQUEST, "Invalid txHash query parameter").into_response();
+    }
+    let tx_hash_for_log = params.tx_hash.clone();
     let result = tokio::task::spawn_blocking(move || {
         let conn = state.db.lock().unwrap();
         get_proof_by_tx_hash(&conn, &params.tx_hash)
@@ -588,7 +757,10 @@ pub(crate) async fn get_proof_by_tx_handler(
     .unwrap_or(None);
 
     match result {
-        Some(record) => (StatusCode::OK, Json(record_to_response(record))).into_response(),
+        Some(record) => {
+            info!(tx_hash = %tx_hash_for_log, action = "proof_read_by_tx", "Proof accessed by tx_hash");
+            (StatusCode::OK, Json(record_to_response(record))).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "Proof not found").into_response(),
     }
 }
@@ -623,8 +795,13 @@ pub(crate) async fn info_handler() -> impl IntoResponse {
 // WebSocket session handler for extension
 pub(crate) async fn session_ws_handler(
     ws: WebSocketUpgrade,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if !check_ws_rate_limit(&state, addr.ip()) {
+        warn!("[session_ws_handler] Rate limit exceeded for {}", addr.ip());
+        return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
+    }
     ws.on_upgrade(move |socket| handle_session_websocket(socket, state))
 }
 
@@ -739,9 +916,18 @@ async fn handle_session_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         max_sent_data,
     };
 
-    // Store session data (so prover can connect)
+    // Store session data (so prover can connect) — enforce WS_MAX_SESSIONS cap
     {
         let mut sessions = state.sessions.lock().await;
+        let max_sessions: usize = std::env::var("WS_MAX_SESSIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        if sessions.len() >= max_sessions {
+            warn!("[{}] WS_MAX_SESSIONS ({}) reached, rejecting new session", session_id, max_sessions);
+            send_error(&mut socket, "Server at capacity — too many active sessions").await;
+            return;
+        }
         sessions.insert(session_id.clone(), SessionData { prover_socket_tx });
     }
 
@@ -908,9 +1094,14 @@ async fn handle_session_websocket(mut socket: WebSocket, state: Arc<AppState>) {
 // WebSocket handler for verifier (prover connection)
 pub(crate) async fn verifier_ws_handler(
     ws: WebSocketUpgrade,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Query(query): Query<VerifierQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if !check_ws_rate_limit(&state, addr.ip()) {
+        warn!("[verifier_ws_handler] Rate limit exceeded for {}", addr.ip());
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded".to_string()));
+    }
     let session_id = query.session_id;
 
     // Look up the session and extract the socket sender
@@ -956,8 +1147,14 @@ pub(crate) async fn verifier_ws_handler(
 // Compatible with notary.pse.dev: /proxy?token=<host> or legacy /proxy?host=<host>
 pub(crate) async fn proxy_ws_handler(
     ws: WebSocketUpgrade,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<ProxyQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if !check_ws_rate_limit(&state, addr.ip()) {
+        warn!("[proxy_ws_handler] Rate limit exceeded for {}", addr.ip());
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded".to_string()));
+    }
     let host = query.token;
 
     info!("[Proxy] New proxy request for host: {}", host);
@@ -1243,7 +1440,11 @@ async fn run_verifier_task(
                 tokio::time::sleep(Duration::from_millis(100)).await;
             };
 
-            // Account hash verification — check before proceeding to signing
+            // Account hash verification — check before proceeding to signing.
+            // Collect all check results (pass and fail) for DB persistence.
+            // field_label will be populated after handler_results is built below.
+            let account_checks_json: Option<String>;
+            let mut account_check_results: Vec<AccountCheckResult> = Vec::new();
             {
                 let sent_bytes = transcript.sent_unsafe();
                 let recv_bytes = transcript.received_unsafe();
@@ -1276,7 +1477,18 @@ async fn run_verifier_task(
                     let mut hasher = Keccak256::new();
                     hasher.update(bytes_to_hash);
                     let computed = format!("0x{}", hex::encode(hasher.finalize()));
-                    if computed != check.expected_hash {
+                    let passed = computed == check.expected_hash;
+                    account_check_results.push(AccountCheckResult {
+                        direction: check.direction.clone(),
+                        start: check.start,
+                        end: check.end,
+                        expected_hash: check.expected_hash.clone(),
+                        computed_hash: computed.clone(),
+                        value_mode: check.value_mode.clone(),
+                        passed,
+                        field_label: None, // populated after handler_results below
+                    });
+                    if !passed {
                         error!(
                             "[{}] accountCheck: hash mismatch at {}[{}..{}] — expected {} got {}",
                             session_id, check.direction, check.start, check.end, check.expected_hash, computed
@@ -1399,6 +1611,29 @@ async fn run_verifier_task(
                 transcript_commitments.len()
             );
 
+            // Populate field_label in account_check_results using handler range→label lookup.
+            {
+                let handler_label_lookup: std::collections::HashMap<(String, usize, usize), String> =
+                    handler_results
+                        .iter()
+                        .filter_map(|hr| {
+                            hr.handler.label.as_ref().map(|lbl| {
+                                let dir = match hr.handler.handler_type {
+                                    HandlerType::Sent => "sent".to_string(),
+                                    HandlerType::Recv => "recv".to_string(),
+                                };
+                                ((dir, hr.start, hr.end), lbl.clone())
+                            })
+                        })
+                        .collect();
+                for result in &mut account_check_results {
+                    result.field_label = handler_label_lookup
+                        .get(&(result.direction.clone(), result.start, result.end))
+                        .cloned();
+                }
+            }
+            account_checks_json = serde_json::to_string(&account_check_results).ok();
+
             let server_name_str = server_name.as_ref();
 
             // Extract policy_version from session_data (injected by SessionManager, T8)
@@ -1464,8 +1699,22 @@ async fn run_verifier_task(
                     }
                 }
                 Err(_) => {
-                    warn!("[{}] VERIFIER_PRIVATE_KEY not set, skipping signature", session_id);
-                    None
+                    if order_binding_hash_bytes.is_some() {
+                        error!(
+                            "[{}] ❌ VERIFIER_PRIVATE_KEY not set but orderBindingHash present — \
+                             refusing to produce unsigned proof for on-chain flow",
+                            session_id
+                        );
+                        // Drop result_tx without sending → session handler delivers
+                        // "Verification failed" error to the extension (fail-closed).
+                        return;
+                    } else {
+                        warn!(
+                            "[{}] VERIFIER_PRIVATE_KEY not set, skipping signature (dev/test mode)",
+                            session_id
+                        );
+                        None
+                    }
                 }
             };
 
@@ -1515,6 +1764,10 @@ async fn run_verifier_task(
                     serde_json::to_string(&session_data).unwrap_or_default();
                 let now = current_timestamp_str();
                 let until = retain_until_str();
+                let transcript_commitments_json =
+                    serde_json::to_string(&transcript_commitments).ok();
+                let signing_chain_id_val =
+                    verifier_signature.as_ref().map(|s| s.chain_id as i64);
                 let record = ProofExportRecord {
                     session_id: session_id.clone(),
                     server_name: server_name_str.to_string(),
@@ -1524,13 +1777,15 @@ async fn run_verifier_task(
                     verifier_signature: sig_hex,
                     verifier_address: sig_addr,
                     handler_results: handler_results_json,
-                    account_checks: None,
+                    account_checks: account_checks_json,
                     redacted_sent: Some(redacted_transcript.sent.clone()),
                     redacted_recv: Some(redacted_transcript.recv.clone()),
                     session_data: Some(session_data_json),
                     tx_hash: None,
                     recorded_at: now,
                     retain_until: until,
+                    transcript_commitments: transcript_commitments_json,
+                    signing_chain_id: signing_chain_id_val,
                 };
                 let db = state.db.clone();
                 tokio::task::spawn_blocking(move || {
@@ -1660,26 +1915,50 @@ fn extract_bytes_as_string(bytes: &[u8], start: usize, end: usize) -> String {
 // Compliance Helper Functions (R.11, R.15, R.16)
 // ============================================================================
 
-/// Return current Unix seconds as a simple timestamp string (used for DB fields).
-fn current_timestamp_str() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
+/// Convert Unix seconds to RFC3339 UTC string (YYYY-MM-DDTHH:MM:SSZ).
+/// Uses Howard Hinnant's civil-from-days algorithm; no external crates required.
+pub(crate) fn format_rfc3339(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let time = secs % 86400;
+    let h = time / 3600;
+    let m = (time % 3600) / 60;
+    let s = time % 60;
+
+    // Civil date from days since Unix epoch (1970-01-01)
+    let z = days + 719468;
+    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let yr = if mth <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yr, mth, d, h, m, s)
 }
 
-/// Return Unix seconds + 5 years for retain_until field.
-fn retain_until_str() -> String {
+/// Return current time as RFC3339 UTC string.
+pub(crate) fn current_timestamp_str() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format_rfc3339(secs)
+}
+
+/// Return RFC3339 UTC string for recorded_at + 5 years (retain_until).
+pub(crate) fn retain_until_str() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let five_years: u64 = 5 * 365 * 24 * 3600;
-    (SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        + five_years)
-        .to_string()
+        + five_years;
+    format_rfc3339(secs)
 }
 
 /// Compute HMAC-SHA256 hex of body using secret key.
@@ -1695,6 +1974,26 @@ pub(crate) fn init_db(path: &str) -> rusqlite::Connection {
     let conn = rusqlite::Connection::open(path).expect("Failed to open SQLite DB");
     conn.execute_batch(include_str!("schema.sql"))
         .expect("Failed to init DB schema");
+    // Migrate existing DBs: add new columns if they don't exist yet.
+    // SQLite does not support IF NOT EXISTS on ALTER TABLE; ignore duplicate-column errors.
+    if let Err(e) = conn.execute(
+        "ALTER TABLE proof_store ADD COLUMN transcript_commitments TEXT",
+        [],
+    ) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            panic!("Unexpected ALTER TABLE error: {}", e);
+        }
+    }
+    if let Err(e) = conn.execute(
+        "ALTER TABLE proof_store ADD COLUMN signing_chain_id INTEGER",
+        [],
+    ) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            panic!("Unexpected ALTER TABLE error: {}", e);
+        }
+    }
     conn
 }
 
@@ -1706,8 +2005,9 @@ pub(crate) fn insert_proof_record(conn: &rusqlite::Connection, r: &ProofExportRe
             commitments_hash, verifier_signature, verifier_address,
             handler_results, account_checks,
             redacted_sent, redacted_recv, session_data,
-            tx_hash, recorded_at, retain_until
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            tx_hash, recorded_at, retain_until,
+            transcript_commitments, signing_chain_id
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         rusqlite::params![
             r.session_id,
             r.server_name,
@@ -1724,6 +2024,8 @@ pub(crate) fn insert_proof_record(conn: &rusqlite::Connection, r: &ProofExportRe
             r.tx_hash,
             r.recorded_at,
             r.retain_until,
+            r.transcript_commitments,
+            r.signing_chain_id,
         ],
     )
     .ok();
@@ -1739,7 +2041,8 @@ pub(crate) fn get_proof_by_session_id(
                 commitments_hash,verifier_signature,verifier_address,
                 handler_results,account_checks,
                 redacted_sent,redacted_recv,session_data,
-                tx_hash,recorded_at,retain_until
+                tx_hash,recorded_at,retain_until,
+                transcript_commitments,signing_chain_id
          FROM proof_store WHERE session_id = ?1",
         rusqlite::params![session_id],
         |row| {
@@ -1759,24 +2062,28 @@ pub(crate) fn get_proof_by_session_id(
                 tx_hash: row.get(12)?,
                 recorded_at: row.get(13)?,
                 retain_until: row.get(14)?,
+                transcript_commitments: row.get(15)?,
+                signing_chain_id: row.get(16)?,
             })
         },
     )
     .ok()
 }
 
-/// Update tx_hash on an existing proof record.
+/// Update tx_hash (and chain_id) on an existing proof record.
+/// Only updates if tx_hash IS NULL (first-write lock).
+/// Returns the number of rows affected (0 if not found OR already set).
 pub(crate) fn patch_tx_hash(
     conn: &rusqlite::Connection,
     session_id: &str,
     tx_hash: &str,
-    _chain_id: Option<i64>,
-) {
+    chain_id: Option<i64>,
+) -> Result<usize, rusqlite::Error> {
     conn.execute(
-        "UPDATE proof_store SET tx_hash = ?1 WHERE session_id = ?2",
-        rusqlite::params![tx_hash, session_id],
+        "UPDATE proof_store SET tx_hash = ?1, chain_id = ?2 \
+         WHERE session_id = ?3 AND tx_hash IS NULL",
+        rusqlite::params![tx_hash, chain_id, session_id],
     )
-    .ok();
 }
 
 /// Fetch a proof record by on-chain tx hash.
@@ -1789,7 +2096,8 @@ pub(crate) fn get_proof_by_tx_hash(
                 commitments_hash,verifier_signature,verifier_address,
                 handler_results,account_checks,
                 redacted_sent,redacted_recv,session_data,
-                tx_hash,recorded_at,retain_until
+                tx_hash,recorded_at,retain_until,
+                transcript_commitments,signing_chain_id
          FROM proof_store WHERE tx_hash = ?1",
         rusqlite::params![tx_hash],
         |row| {
@@ -1809,25 +2117,80 @@ pub(crate) fn get_proof_by_tx_hash(
                 tx_hash: row.get(12)?,
                 recorded_at: row.get(13)?,
                 retain_until: row.get(14)?,
+                transcript_commitments: row.get(15)?,
+                signing_chain_id: row.get(16)?,
             })
         },
     )
     .ok()
 }
 
+/// Build travelRuleFields from handler_results: only entries with a "label" field.
+fn build_travel_rule_fields_from_handler_results(
+    handler_results: &serde_json::Value,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    if let Some(arr) = handler_results.as_array() {
+        for item in arr {
+            if let Some(label) = item.get("label").and_then(|v| v.as_str()) {
+                if let (Some(value), Some(idx)) = (
+                    item.get("value").and_then(|v| v.as_str()),
+                    item.get("commitmentIndex").and_then(|v| v.as_u64()),
+                ) {
+                    if map.contains_key(label) {
+                        warn!(
+                            "Duplicate travel_rule label '{}' in handler_results — \
+                             previous value will be overwritten.",
+                            label
+                        );
+                    }
+                    map.insert(
+                        label.to_string(),
+                        serde_json::json!({ "value": value, "commitmentIndex": idx }),
+                    );
+                }
+            }
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
 /// Build a ProofExportResponse from a stored record.
-fn record_to_response(r: ProofExportRecord) -> ProofExportResponse {
-    let handler_results: serde_json::Value =
+pub(crate) fn record_to_response(r: ProofExportRecord) -> ProofExportResponse {
+    // 1. handler_results (raw, kept as optional debug field)
+    let handler_results_val: serde_json::Value =
         serde_json::from_str(&r.handler_results).unwrap_or(serde_json::Value::Array(vec![]));
-    let session_data: serde_json::Value = r
+
+    // 2. travelRuleFields derived from handler_results
+    let travel_rule_fields = build_travel_rule_fields_from_handler_results(&handler_results_val);
+
+    // 3. account_checks
+    let account_checks: serde_json::Value = r
+        .account_checks
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Array(vec![]));
+
+    // 4. transcript_commitments
+    let transcript_commitments: serde_json::Value = r
+        .transcript_commitments
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Array(vec![]));
+
+    // 5. session_data (optional debug)
+    let session_data_val: serde_json::Value = r
         .session_data
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+    // 6. redacted_transcript
     let redacted_transcript = match (r.redacted_sent, r.redacted_recv) {
         (Some(sent), Some(recv)) => Some(RedactedTranscriptExport { sent, recv }),
         _ => None,
     };
+
     ProofExportResponse {
         format_version: "ProofExportV1",
         attestation_id: r.session_id,
@@ -1838,11 +2201,15 @@ fn record_to_response(r: ProofExportRecord) -> ProofExportResponse {
         verifier_version: env!("CARGO_PKG_VERSION"),
         order_binding_hash: r.order_binding_hash,
         commitments_hash: r.commitments_hash,
-        verifier_signature: r.verifier_signature,
-        verifier_address: r.verifier_address,
+        verifier_signature: r.verifier_signature.unwrap_or_default(),
+        verifier_address: r.verifier_address.unwrap_or_default(),
+        chain_id: r.signing_chain_id,
+        travel_rule_fields,
+        account_checks,
+        transcript_commitments,
         redacted_transcript,
-        handler_results,
-        session_data,
+        handler_results: Some(handler_results_val),
+        session_data: Some(session_data_val),
     }
 }
 
@@ -1859,6 +2226,13 @@ pub(crate) fn build_slim_webhook_payload(
     let mut travel_rule_fields = HashMap::new();
     for result in handler_results {
         if let Some(ref label) = result.handler.label {
+            if travel_rule_fields.contains_key(label) {
+                warn!(
+                    "[{}] Duplicate travel_rule label '{}' — previous value will be overwritten. \
+                     Consider using unique labels or upgrading to ProofExportV2.",
+                    session_id, label
+                );
+            }
             travel_rule_fields.insert(
                 label.clone(),
                 TravelRuleFieldValue {
@@ -1924,6 +2298,24 @@ async fn send_webhook(config: &WebhookConfig, payload: &SlimWebhookPayload, sess
                 session_id, config.url, e
             );
         }
+    }
+}
+
+/// Test-only HTTP handler: POST /test/seed — inserts a ProofExportRecord directly into the DB.
+/// Only compiled when running tests (`#[cfg(test)]`).
+#[cfg(test)]
+pub(crate) async fn test_seed_proof_handler(
+    State(state): State<Arc<AppState>>,
+    Json(record): Json<ProofExportRecord>,
+) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = state.db.lock().unwrap();
+        insert_proof_record(&conn, &record);
+    })
+    .await;
+    match result {
+        Ok(_) => StatusCode::CREATED,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

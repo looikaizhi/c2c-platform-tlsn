@@ -29,6 +29,7 @@ type Endpoint = typeof ENDPOINT_CONTACTS | typeof ENDPOINT_TRANSFER;
 const config = {
     name: 'Wise Contacts + Transfer Prover',
     description: 'Prove your Wise contacts and transfer responses.',
+    policyVersion: 'v1.0.0',
     requests: [
         {
             method: METHOD,
@@ -98,24 +99,28 @@ const TRANSFER_HANDLERS = [
         part: 'BODY',
         action: 'REVEAL',
         params: { type: 'json', path: 'id' },
+        label: 'transaction.id',
     },
     {
         type: 'RECV',
         part: 'BODY',
         action: 'REVEAL',
         params: { type: 'json', path: 'state' },
+        label: 'transaction.status',
     },
     {
         type: 'RECV',
         part: 'BODY',
         action: 'REVEAL',
         params: { type: 'json', path: 'targetAmount' },
+        label: 'originator.amount',
     },
     {
         type: 'RECV',
         part: 'BODY',
         action: 'REVEAL',
         params: { type: 'json', path: 'targetCurrency' },
+        label: 'originator.currency',
     },
     {
         type: 'RECV',
@@ -126,6 +131,7 @@ const TRANSFER_HANDLERS = [
             regex: '(?<="state"\\s*:\\s*"OUTGOING_PAYMENT_SENT"\\s*,\\s*)"date"\\s*:\\s*(?:"[^"]*"|\\d+)',
             flags: 'g',
         },
+        label: 'originator.timestamp',
     },
 ] as unknown as import('@tlsn/plugin-sdk/src/types').Handler[];
 

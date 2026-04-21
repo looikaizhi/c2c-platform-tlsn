@@ -114,7 +114,7 @@ impl TestWebhookServer {
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
             info!("[TestWebhookServer] Listening on {}", addr);
 
-            axum::serve(listener, app)
+            axum::serve(listener, app.into_make_service())
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                     info!("[TestWebhookServer] Shutting down");
@@ -182,6 +182,8 @@ webhooks:
         sessions: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(config),
         db,
+        proof_api_key: None,
+        ws_rate_limiter: Arc::new(std::sync::Mutex::new(HashMap::new())),
     });
 
     let app = Router::new()
@@ -193,6 +195,7 @@ webhooks:
         .route("/proof/:session_id", axum::routing::get(crate::get_proof_handler))
         .route("/proof/:session_id/tx", axum::routing::patch(crate::patch_proof_tx_handler))
         .route("/proof", axum::routing::get(crate::get_proof_by_tx_handler))
+        .route("/test/seed", axum::routing::post(crate::test_seed_proof_handler))
         .layer(CorsLayer::permissive())
         .with_state(app_state);
 
@@ -201,7 +204,7 @@ webhooks:
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         info!("[TestVerifier] Listening on {}", addr);
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
     })
 }
 
@@ -927,10 +930,18 @@ async fn test_webhook_integration_with_github() {
     let payload = &payloads[0];
 
     // Verify SlimWebhookPayload structure (R.16 / Travel Rule)
+
+    // attestationId must equal the session_id returned by /session at registration time
     assert!(
         payload["attestationId"].is_string(),
         "attestationId should be a string"
     );
+    assert_eq!(
+        payload["attestationId"].as_str().unwrap_or(""),
+        session_id.as_str(),
+        "attestationId must equal the session_id from the /session registration"
+    );
+
     assert!(
         payload["serverName"].is_string(),
         "serverName should be a string (camelCase)"
@@ -939,10 +950,18 @@ async fn test_webhook_integration_with_github() {
         payload["serverName"], "raw.githubusercontent.com",
         "serverName should match"
     );
+
+    // The reveal_config used in this test has no labeled handlers (label: None),
+    // so the Travel Rule fields map must be empty.
+    let travel_rule_fields = payload["travelRuleFields"]
+        .as_object()
+        .expect("travelRuleFields must be a JSON object");
     assert!(
-        payload["travelRuleFields"].is_object(),
-        "travelRuleFields should be an object"
+        travel_rule_fields.is_empty(),
+        "no labeled handlers were submitted, so travelRuleFields must be empty, got: {:?}",
+        travel_rule_fields
     );
+
     assert!(
         payload["accountChecksAllPassed"].is_boolean(),
         "accountChecksAllPassed should be a boolean"
@@ -979,11 +998,13 @@ async fn test_webhook_integration_with_github() {
     info!("Integration test completed successfully!");
 }
 
-/// Test GET /proof/:session_id returns a proof record after a verified session,
-/// and PATCH /proof/:session_id/tx writes the tx hash back.
+/// Verifies that the `/proof/:session_id` and `/proof?txHash=` routes return
+/// HTTP 404 for unknown identifiers, and that the routing layer is wired up
+/// correctly.
 ///
-/// Note: This test exercises the proof store API with a seeded in-memory DB record
-/// rather than running a full MPC-TLS session, to keep test time reasonable.
+/// This test only exercises the 404 path.  The success paths (200 on GET,
+/// 200 on PATCH, and the subsequent GET reflecting the new txHash) are covered
+/// by `test_proof_store_api_success_paths`.
 #[tokio::test]
 async fn test_proof_store_api() {
     let _ = tracing_subscriber::fmt()
@@ -1009,16 +1030,373 @@ async fn test_proof_store_api() {
         .expect("Failed to send GET");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    // 404 for unknown tx hash via GET /proof?txHash=
+    // 404 for unknown but valid-format tx hash via GET /proof?txHash=
     let resp = client
         .get(format!(
-            "http://127.0.0.1:{}/proof?txHash=0xunknown",
+            "http://127.0.0.1:{}/proof?txHash=0xdeadbeef",
             VERIFIER_PORT + 4
         ))
         .send()
         .await
         .expect("Failed to send GET by txHash");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    verifier_handle.abort();
+}
+
+/// Test success paths for the proof store API:
+/// GET /proof/:id (200), PATCH /proof/:id/tx (200), GET /proof?txHash= (200), unknown PATCH (404).
+#[tokio::test]
+async fn test_proof_store_api_success_paths() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    let verifier_handle = start_verifier_server(WEBHOOK_PORT + 5, VERIFIER_PORT + 5).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", VERIFIER_PORT + 5);
+    let session_id = "test-success-session-abc123";
+
+    // 1. Seed a record via the test-only POST /test/seed endpoint
+    let seed_body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": "wise.com",
+        "policy_version": "v1.0.0",
+        "order_binding_hash": "0xdeadbeef",
+        "commitments_hash": "0xcafebabe",
+        "verifier_signature": "0xsig",
+        "verifier_address": "0xaddr",
+        "handler_results": "[]",
+        "account_checks": null,
+        "redacted_sent": "GET / HTTP/1.1\r\n",
+        "redacted_recv": "HTTP/1.1 200 OK\r\n",
+        "session_data": null,
+        "tx_hash": null,
+        "recorded_at": "2026-01-01T00:00:00Z",
+        "retain_until": "2027-01-01T00:00:00Z",
+        "transcript_commitments": null,
+        "signing_chain_id": null
+    });
+    let seed_resp = client
+        .post(format!("{}/test/seed", base))
+        .json(&seed_body)
+        .send()
+        .await
+        .expect("Failed to seed record");
+    assert_eq!(seed_resp.status(), StatusCode::CREATED);
+
+    // 2. GET /proof/:session_id returns 200 and session_id matches
+    let get_resp = client
+        .get(format!("{}/proof/{}", base, session_id))
+        .send()
+        .await
+        .expect("Failed GET /proof/:id");
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body: serde_json::Value = get_resp.json().await.expect("Failed to parse JSON");
+    assert_eq!(body["attestationId"].as_str().unwrap_or(""), session_id);
+
+    // 3. tx_hash should be null before PATCH
+    assert!(body["txHash"].is_null());
+
+    // 4. PATCH /proof/:session_id/tx with txHash + chainId returns 200
+    let patch_resp = client
+        .patch(format!("{}/proof/{}/tx", base, session_id))
+        .json(&serde_json::json!({ "txHash": "0xabcdef", "chainId": 11155111 }))
+        .send()
+        .await
+        .expect("Failed PATCH /proof/:id/tx");
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // 5. GET /proof/:session_id now shows the tx_hash
+    let get_resp2 = client
+        .get(format!("{}/proof/{}", base, session_id))
+        .send()
+        .await
+        .expect("Failed GET /proof/:id after PATCH");
+    assert_eq!(get_resp2.status(), StatusCode::OK);
+    let body2: serde_json::Value = get_resp2.json().await.expect("Failed to parse JSON");
+    assert_eq!(body2["txHash"].as_str().unwrap_or(""), "0xabcdef");
+
+    // 6. GET /proof?txHash=0xabcdef returns 200 and session_id matches
+    let by_tx_resp = client
+        .get(format!("{}/proof?txHash=0xabcdef", base))
+        .send()
+        .await
+        .expect("Failed GET /proof?txHash=");
+    assert_eq!(by_tx_resp.status(), StatusCode::OK);
+    let body3: serde_json::Value = by_tx_resp.json().await.expect("Failed to parse JSON");
+    assert_eq!(body3["attestationId"].as_str().unwrap_or(""), session_id);
+
+    // 7. PATCH for unknown session returns 404
+    let unknown_patch = client
+        .patch(format!("{}/proof/nonexistent-session/tx", base))
+        .json(&serde_json::json!({ "txHash": "0x999" }))
+        .send()
+        .await
+        .expect("Failed PATCH unknown");
+    assert_eq!(unknown_patch.status(), StatusCode::NOT_FOUND);
+
+    verifier_handle.abort();
+}
+
+// ============================================================================
+// Phase D helpers and tests — 401 / 400 / 409 paths
+// ============================================================================
+
+/// Start a verifier server with a specific `proof_api_key` for auth tests.
+async fn start_verifier_server_with_key(verifier_port: u16, key: &str) -> JoinHandle<()> {
+    let config_yaml = r#"webhooks: {}"#;
+    let config: crate::Config = serde_yaml::from_str(config_yaml).unwrap();
+    let conn = crate::init_db(":memory:");
+    let db = Arc::new(std::sync::Mutex::new(conn));
+
+    let app_state = Arc::new(crate::AppState {
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        config: Arc::new(config),
+        db,
+        proof_api_key: Some(key.to_string()),
+        ws_rate_limiter: Arc::new(std::sync::Mutex::new(HashMap::new())),
+    });
+
+    let app = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route("/proof/:session_id", axum::routing::get(crate::get_proof_handler))
+        .route("/proof/:session_id/tx", axum::routing::patch(crate::patch_proof_tx_handler))
+        .route("/proof", axum::routing::get(crate::get_proof_by_tx_handler))
+        .route("/test/seed", axum::routing::post(crate::test_seed_proof_handler))
+        .layer(CorsLayer::permissive())
+        .with_state(app_state);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], verifier_port));
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+    })
+}
+
+/// D-2/D-3/D-4: Auth required — 401 without key, 401 with wrong key, 404 with correct key.
+#[tokio::test]
+async fn test_proof_api_auth_required() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    const PORT: u16 = VERIFIER_PORT + 6;
+    let verifier_handle = start_verifier_server_with_key(PORT, "test-secret").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", PORT);
+
+    // D-2: no key header → 401
+    let resp = client
+        .get(format!("{}/proof/any-id", base))
+        .send()
+        .await
+        .expect("Failed request");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "missing key should be 401");
+
+    // D-3: wrong key → 401
+    let resp = client
+        .get(format!("{}/proof/any-id", base))
+        .header("X-TLSN-Api-Key", "wrong-key")
+        .send()
+        .await
+        .expect("Failed request");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "wrong key should be 401");
+
+    // D-4: correct key → auth passes, 404 because no record seeded
+    let resp = client
+        .get(format!("{}/proof/any-id", base))
+        .header("X-TLSN-Api-Key", "test-secret")
+        .send()
+        .await
+        .expect("Failed request");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "correct key but unknown id should be 404");
+
+    // Bearer form also accepted
+    let resp = client
+        .get(format!("{}/proof/any-id", base))
+        .header("authorization", "Bearer test-secret")
+        .send()
+        .await
+        .expect("Failed request");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "Bearer token form should also pass auth");
+
+    verifier_handle.abort();
+}
+
+/// D-5: Invalid PATCH inputs return 400.
+#[tokio::test]
+async fn test_patch_tx_invalid_inputs() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    const PORT: u16 = VERIFIER_PORT + 7;
+    // Dev-mode server (no API key) so auth does not interfere with input validation tests.
+    let verifier_handle = start_verifier_server(WEBHOOK_PORT + 7, PORT).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", PORT);
+
+    // Seed a record so the session exists (validates that 400 fires before DB lookup).
+    let seed_body = serde_json::json!({
+        "session_id": "seed-for-input-validation",
+        "server_name": "wise.com",
+        "policy_version": "v1.0.0",
+        "order_binding_hash": "0xdeadbeef",
+        "commitments_hash": "0xcafebabe",
+        "verifier_signature": "0xsig",
+        "verifier_address": "0xaddr",
+        "handler_results": "[]",
+        "account_checks": null,
+        "redacted_sent": "GET / HTTP/1.1\r\n",
+        "redacted_recv": "HTTP/1.1 200 OK\r\n",
+        "session_data": null,
+        "tx_hash": null,
+        "recorded_at": "2026-01-01T00:00:00Z",
+        "retain_until": "2027-01-01T00:00:00Z",
+        "transcript_commitments": null,
+        "signing_chain_id": null
+    });
+    let seed_resp = client.post(format!("{}/test/seed", base)).json(&seed_body).send().await.unwrap();
+    assert_eq!(seed_resp.status(), StatusCode::CREATED);
+
+    let url = format!("{}/proof/seed-for-input-validation/tx", base);
+
+    // Case 1: txHash without 0x prefix → 400
+    let resp = client
+        .patch(&url)
+        .json(&serde_json::json!({ "txHash": "not-a-hash" }))
+        .send()
+        .await
+        .expect("Failed PATCH");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "non-hex txHash should be 400");
+
+    // Case 2: 0x prefix but invalid hex chars → 400
+    let resp = client
+        .patch(&url)
+        .json(&serde_json::json!({ "txHash": "0xinvalid!!!" }))
+        .send()
+        .await
+        .expect("Failed PATCH");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "0x + invalid chars should be 400");
+
+    // Case 3: valid txHash but negative chainId → 400
+    let resp = client
+        .patch(&url)
+        .json(&serde_json::json!({ "txHash": "0xabc123", "chainId": -1 }))
+        .send()
+        .await
+        .expect("Failed PATCH");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "negative chainId should be 400");
+
+    verifier_handle.abort();
+}
+
+/// D-6: Second PATCH on same session returns 409; first PATCH value is preserved.
+#[tokio::test]
+async fn test_patch_tx_no_overwrite() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    const PORT: u16 = VERIFIER_PORT + 8;
+    let verifier_handle = start_verifier_server(WEBHOOK_PORT + 8, PORT).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", PORT);
+    let session_id = "no-overwrite-session";
+
+    // Seed a record.
+    let seed_body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": "wise.com",
+        "policy_version": "v1.0.0",
+        "order_binding_hash": "0xdeadbeef",
+        "commitments_hash": "0xcafebabe",
+        "verifier_signature": "0xsig",
+        "verifier_address": "0xaddr",
+        "handler_results": "[]",
+        "account_checks": null,
+        "redacted_sent": "GET / HTTP/1.1\r\n",
+        "redacted_recv": "HTTP/1.1 200 OK\r\n",
+        "session_data": null,
+        "tx_hash": null,
+        "recorded_at": "2026-01-01T00:00:00Z",
+        "retain_until": "2027-01-01T00:00:00Z",
+        "transcript_commitments": null,
+        "signing_chain_id": null
+    });
+    client.post(format!("{}/test/seed", base)).json(&seed_body).send().await.unwrap();
+
+    let url = format!("{}/proof/{}/tx", base, session_id);
+
+    // Step 1: first PATCH → 200
+    let resp = client
+        .patch(&url)
+        .json(&serde_json::json!({ "txHash": "0xabc111", "chainId": 11155111 }))
+        .send()
+        .await
+        .expect("Failed first PATCH");
+    assert_eq!(resp.status(), StatusCode::OK, "first PATCH should be 200");
+
+    // Step 2: second PATCH with a different hash → 409
+    let resp = client
+        .patch(&url)
+        .json(&serde_json::json!({ "txHash": "0xabc222", "chainId": 11155111 }))
+        .send()
+        .await
+        .expect("Failed second PATCH");
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "second PATCH should be 409");
+
+    // Step 3: GET /proof/:id → txHash is still the first value
+    let resp = client
+        .get(format!("{}/proof/{}", base, session_id))
+        .send()
+        .await
+        .expect("Failed GET after double PATCH");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["txHash"].as_str().unwrap_or(""), "0xabc111", "txHash must not be overwritten");
+
+    verifier_handle.abort();
+}
+
+/// D-7: GET /proof?txHash= with invalid format returns 400.
+#[tokio::test]
+async fn test_get_proof_by_tx_invalid_format() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
+    const PORT: u16 = VERIFIER_PORT + 9;
+    let verifier_handle = start_verifier_server(WEBHOOK_PORT + 9, PORT).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", PORT);
+
+    // Non-hex value → 400
+    let resp = client
+        .get(format!("{}/proof?txHash=not-a-valid-hash", base))
+        .send()
+        .await
+        .expect("Failed GET");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "invalid txHash format should be 400");
+
+    // Valid 0x prefix but illegal chars → 400
+    let resp = client
+        .get(format!("{}/proof?txHash=0xbad!!!", base))
+        .send()
+        .await
+        .expect("Failed GET");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "0x + invalid chars should be 400");
 
     verifier_handle.abort();
 }

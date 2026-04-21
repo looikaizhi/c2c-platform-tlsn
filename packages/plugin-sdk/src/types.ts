@@ -324,6 +324,10 @@ export interface VerifierSignatureSummary {
   signature: string;
   /** 0x-prefixed Ethereum address of the verifier */
   verifierAddress: string;
+  /** Policy version locked into this signature (R.15). Present when the plugin passed a version. */
+  policyVersion?: string;
+  /** keccak256(policyVersion UTF-8) or bytes32(0), hex without 0x. For on-chain submission. */
+  policyVersionHash?: string;
 }
 
 export interface ProveResponse {

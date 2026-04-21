@@ -3,10 +3,17 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use futures_util::{SinkExt, StreamExt};
 
-/// Test the WebSocket-to-TCP proxy end-to-end
+/// Test that a self-contained WebSocket-to-TCP forwarding helper correctly
+/// relays binary frames in both directions.
+///
+/// NOTE: This test does NOT exercise the verifier's actual `/proxy` endpoint.
+/// It validates the WS↔TCP forwarding pattern using a standalone proxy helper
+/// defined below.  For tests against the real `proxy_ws_handler` (including
+/// rate-limiting and query-parameter parsing), see
+/// `src/tests/proxy_test.rs` (internal module with crate access).
 #[tokio::test]
-async fn test_proxy_endpoint_integration() {
-    println!("\n=== Starting Proxy Integration Test ===\n");
+async fn test_ws_to_tcp_forwarding_generic() {
+    println!("\n=== WS-to-TCP Generic Forwarding Test ===\n");
 
     // Step 1: Start a simple TCP echo server
     let echo_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -57,10 +64,10 @@ async fn test_proxy_endpoint_integration() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    // Step 2: Start a minimal WebSocket proxy server
+    // Step 2: Start a minimal WebSocket proxy server (stand-alone helper, not the verifier)
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
-    println!("✓ Proxy server listening on {}", proxy_addr);
+    println!("✓ Proxy helper listening on {}", proxy_addr);
 
     let echo_host = format!("127.0.0.1:{}", echo_port);
     let echo_host_for_spawn = echo_host.clone();
@@ -71,11 +78,10 @@ async fn test_proxy_endpoint_integration() {
             let echo_host = echo_host_for_spawn.clone();
 
             tokio::spawn(async move {
-                // Accept WebSocket upgrade
                 match tokio_tungstenite::accept_async(stream).await {
                     Ok(ws) => {
                         println!("  Proxy: WebSocket handshake completed");
-                        handle_proxy_test(ws, echo_host).await;
+                        handle_proxy_generic(ws, echo_host).await;
                     }
                     Err(e) => {
                         println!("  Proxy: WebSocket handshake failed: {}", e);
@@ -87,7 +93,7 @@ async fn test_proxy_endpoint_integration() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    // Step 3: Connect WebSocket client to proxy
+    // Step 3: Connect WebSocket client to the standalone proxy helper
     let ws_url = format!("ws://{}/proxy", proxy_addr);
     println!("✓ Connecting WebSocket client to {}", ws_url);
 
@@ -106,11 +112,9 @@ async fn test_proxy_endpoint_integration() {
         println!("\n--- Test Message {} ---", i + 1);
         println!("  Client: sending {} bytes: {:?}", test_data.len(), String::from_utf8_lossy(test_data));
 
-        // Send binary message
         ws_write.send(Message::Binary(test_data.clone())).await.unwrap();
         println!("  Client: sent binary frame");
 
-        // Receive echo back
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         if let Some(Ok(Message::Binary(response))) = ws_read.next().await {
@@ -122,16 +126,16 @@ async fn test_proxy_endpoint_integration() {
         }
     }
 
-    println!("\n✅ All proxy tests passed!\n");
+    println!("\n✅ WS-to-TCP generic forwarding test passed!\n");
 }
 
-/// Simplified proxy handler for testing
-async fn handle_proxy_test(ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, host: String) {
+/// Stand-alone WS-to-TCP bridge used only by this test module.
+/// This is NOT the verifier's `handle_proxy_connection` from main.rs.
+async fn handle_proxy_generic(ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, host: String) {
     use futures_util::{SinkExt, StreamExt};
 
     println!("  Proxy Handler: connecting to TCP host: {}", host);
 
-    // Connect to TCP host
     let tcp_stream = match tokio::net::TcpStream::connect(&host).await {
         Ok(stream) => {
             println!("  Proxy Handler: TCP connection established");
@@ -143,11 +147,9 @@ async fn handle_proxy_test(ws: tokio_tungstenite::WebSocketStream<tokio::net::Tc
         }
     };
 
-    // Split streams
     let (mut ws_sink, mut ws_stream) = ws.split();
     let (mut tcp_read, mut tcp_write) = tokio::io::split(tcp_stream);
 
-    // Forward WebSocket -> TCP
     let ws_to_tcp = tokio::spawn(async move {
         let mut count = 0;
         while let Some(Ok(msg)) = ws_stream.next().await {
@@ -163,7 +165,6 @@ async fn handle_proxy_test(ws: tokio_tungstenite::WebSocketStream<tokio::net::Tc
         println!("  Proxy: WS->TCP closed (forwarded {} messages)", count);
     });
 
-    // Forward TCP -> WebSocket
     let tcp_to_ws = tokio::spawn(async move {
         let mut buf = vec![0u8; 8192];
         let mut count = 0;
@@ -220,7 +221,7 @@ async fn test_proxy_real_http_request() {
                     Ok(ws) => {
                         println!("  Proxy: WebSocket handshake completed");
                         // Use httpbin.org on port 80 (plain HTTP)
-                        handle_proxy_test(ws, "httpbin.org:80".to_string()).await;
+                        handle_proxy_generic(ws, "httpbin.org:80".to_string()).await;
                     }
                     Err(e) => {
                         println!("  Proxy: WebSocket handshake failed: {}", e);
@@ -253,7 +254,6 @@ async fn test_proxy_real_http_request() {
     println!("\n📤 Sending HTTP request:");
     println!("{}", http_request);
 
-    // Send HTTP request as binary WebSocket message
     ws_write
         .send(Message::Binary(http_request.as_bytes().to_vec()))
         .await
@@ -261,17 +261,14 @@ async fn test_proxy_real_http_request() {
 
     println!("✓ HTTP request sent through WebSocket\n");
 
-    // Collect response data
     let mut response_data = Vec::new();
     let mut message_count = 0;
 
     println!("📥 Receiving HTTP response...\n");
 
-    // Set timeout for receiving response
     let timeout_duration = tokio::time::Duration::from_secs(10);
     let start = tokio::time::Instant::now();
 
-    // Read all binary messages until connection closes or timeout
     while let Some(result) = ws_read.next().await {
         if start.elapsed() > timeout_duration {
             println!("⚠️  Timeout waiting for response");
@@ -284,14 +281,11 @@ async fn test_proxy_real_http_request() {
                 println!("  Received chunk #{}: {} bytes", message_count, data.len());
                 response_data.extend_from_slice(&data);
 
-                // Check if we've received the complete response
                 let response_str = String::from_utf8_lossy(&response_data);
                 if response_str.contains("Content-Length:") {
-                    // Try to parse content length and check if we have all data
                     if let Some(content_length_line) = response_str.lines().find(|l| l.starts_with("Content-Length:")) {
                         if let Some(length_str) = content_length_line.split(':').nth(1) {
                             if let Ok(expected_length) = length_str.trim().parse::<usize>() {
-                                // Check if we have headers + body
                                 if let Some(body_start) = response_str.find("\r\n\r\n") {
                                     let body_received = response_data.len() - (body_start + 4);
                                     if body_received >= expected_length {
@@ -320,43 +314,28 @@ async fn test_proxy_real_http_request() {
 
     println!("\n✓ Received total {} bytes in {} chunks\n", response_data.len(), message_count);
 
-    // Parse HTTP response
     let response_str = String::from_utf8_lossy(&response_data);
 
-    // Print COMPLETE transcript
-    println!("==================== FULL HTTP TRANSCRIPT ====================");
-    println!("{}", response_str);
-    println!("==================== END TRANSCRIPT ({} bytes) ====================\n", response_data.len());
-
-    // Verify response
-    assert!(response_data.len() > 0, "Should receive response data");
+    assert!(!response_data.is_empty(), "Should receive response data");
     assert!(response_str.contains("HTTP/"), "Should contain HTTP status line");
     assert!(
         response_str.contains("200"),
         "Should receive HTTP 200 OK status"
     );
 
-    // Check for expected JSON content from httpbin.org/json
-    if response_str.contains("{") {
-        println!("✓ Response contains JSON data");
-        if response_str.contains("slideshow") {
-            println!("✓ Response contains expected httpbin.org/json content");
-        }
-    }
-
     println!("\n✅ Real HTTP proxy test passed!");
-    println!("\nℹ️  Note on HTTPS:");
-    println!("  For HTTPS endpoints like https://swapi.dev/api/starships/9/:");
-    println!("  1. The proxy forwards raw TCP (works for both HTTP and HTTPS)");
-    println!("  2. The CLIENT must perform TLS handshake for HTTPS");
-    println!("  3. For TLSNotary use case, MPC-TLS handles the encrypted connection\n");
 }
 
-/// Simple test to verify WebSocket client can send/receive binary messages
+/// Smoke test that the tokio_tungstenite library correctly handles binary WebSocket
+/// frames in a loopback echo scenario.
+///
+/// NOTE: This test does not invoke any verifier code — it only exercises the
+/// `tokio_tungstenite` dev-dependency.  It exists to catch regressions in our
+/// test infrastructure's WS setup, not in the verifier itself.
 #[tokio::test]
-async fn test_websocket_binary_frames() {
+async fn test_websocket_binary_frames_loopback() {
     // This is a basic test to ensure our WebSocket setup works
-    println!("Testing WebSocket binary frame handling...");
+    println!("Testing WebSocket binary frame handling (tokio_tungstenite loopback)...");
 
     // Start a simple WebSocket echo server
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -392,7 +371,7 @@ async fn test_websocket_binary_frames() {
     if let Some(Ok(Message::Binary(response))) = read.next().await {
         println!("WS Client: received {} bytes", response.len());
         assert_eq!(test_data, &response[..]);
-        println!("✅ WebSocket binary frame test passed!");
+        println!("✅ WebSocket binary frame loopback test passed!");
     } else {
         panic!("Expected binary message response");
     }

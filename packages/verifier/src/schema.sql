@@ -16,8 +16,11 @@ CREATE TABLE IF NOT EXISTS proof_store (
     redacted_recv      TEXT,            -- redacted HTTP response transcript
     session_data       TEXT,            -- JSON of session metadata
     tx_hash            TEXT,            -- on-chain tx hash (written after PATCH)
-    recorded_at        TEXT NOT NULL,   -- ISO 8601 UTC timestamp
-    retain_until       TEXT NOT NULL    -- recorded_at + 5 years
+    chain_id           INTEGER,         -- on-chain chain ID (written after PATCH)
+    recorded_at             TEXT NOT NULL,   -- RFC3339 UTC timestamp
+    retain_until            TEXT NOT NULL,   -- RFC3339 UTC, recorded_at + 5 years
+    transcript_commitments  TEXT,            -- JSON array of TranscriptCommitmentSummary
+    signing_chain_id        INTEGER          -- chain_id locked into verifier ECDSA signature
 );
 
 -- Index for reverse lookup by on-chain tx hash

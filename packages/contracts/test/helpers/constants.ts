@@ -12,18 +12,18 @@ export const COLLATERAL   = 10_000_000_000_000_000_000n; // 10 USDT (enough for 
 export const MINT_AMOUNT  = 50_000_000_000_000_000_000n; // 50 USDT
 
 // ── Alipay rates ──────────────────────────────────────────────────────────────
-// CRYPTO product: fiatX1000 = mulDiv(1e18, rateCrypto, 1e33) = 7200 → 7.200 CNY
-export const RATE_ALIPAY_CRYPTO   = 7_200_000_000_000_000_000n;
-// FIAT product:   fiatX1000 = mulDiv(1e18, rateFiat*10, 1e18) = 7200
-export const RATE_ALIPAY_FIAT     = 720n;
+// Unified encoding: rate = fiat_price_per_whole_token × 10^8
+// fiatX1000 = mulDiv(amountRaw × 1000, rate, 10^(tokenDecimals + 8))
+// For USDT (18dp): fiatX1000 = 1e18 × 1000 × 720_000_000 / 10^26 = 7200
+export const RATE_ALIPAY_CRYPTO   = 720_000_000n; // 7.200 CNY/token × 1e8
+export const RATE_ALIPAY_FIAT     = 720_000_000n; // same unified encoding
 export const ALIPAY_FIAT_X1000    = 7200n; // expected fiatAmountX1000 in both flows
 export const ALIPAY_AMOUNT_STR    = "7.200"; // extractFiatAmount("7.200") == 7200
 
 // ── Wise rates ────────────────────────────────────────────────────────────────
-// CRYPTO product: fiatX1000 = mulDiv(1e18, rateCrypto, 1e33) = 4500 → 4.500 MYR
-export const RATE_WISE_CRYPTO     = 4_500_000_000_000_000_000n;
-// FIAT product:   fiatX1000 = mulDiv(1e18, rateFiat*10, 1e18) = 4500
-export const RATE_WISE_FIAT       = 450n;
+// For USDT (18dp): fiatX1000 = 1e18 × 1000 × 450_000_000 / 10^26 = 4500
+export const RATE_WISE_CRYPTO     = 450_000_000n; // 4.500 MYR/token × 1e8
+export const RATE_WISE_FIAT       = 450_000_000n; // same unified encoding
 export const WISE_FIAT_X1000      = 4500n;
 export const WISE_AMOUNT_STR      = "4.500";
 

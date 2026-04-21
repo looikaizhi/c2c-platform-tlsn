@@ -37,7 +37,8 @@ contract C2CAdmin {
     mapping(address => mapping(uint256 => mapping(uint8 => BusinessHours)))
         public businessHours;
 
-    // 单笔最大 USD 金额（D-5：1:1，USDT 18 位，1000 USDT = 1000 * 1e18）
+    // Maximum order size expressed as 18-decimal-normalised amount.
+    // 1_000 * 1e18 ≡ "1000 whole tokens" regardless of the token's own decimal count.
     uint256 public maxOrderAmount = 1_000 * 1e18;
 
     // ================================================================
@@ -292,7 +293,14 @@ contract C2CAdmin {
     //                   Rate & Business Hours Functions
     // ================================================================
 
-    /// @notice 商家发布/更新汇率。发布即生效。
+    /// @notice Merchant publishes or updates the exchange rate for a product.
+    /// @param _rate Exchange rate encoded as: fiat_price_per_whole_token × 10^8
+    ///              Example: 4.70 MYR per 1 USDT → _rate = 470_000_000
+    ///              This encoding is token-decimal-agnostic.
+    /// @dev ⚠️  MIGRATION: After the C2CEscrow contract upgrade that introduced
+    ///      RATE_PRECISION_EXP = 8, all existing rates must be re-published.
+    ///      Old CRYPTO encoding (rate = fiatPrice × 1e18) is incompatible.
+    ///      Old FIAT encoding (rate = fiatPrice × 100) is incompatible.
     function publishRate(
         uint256 _productId,
         uint8 _assetType,

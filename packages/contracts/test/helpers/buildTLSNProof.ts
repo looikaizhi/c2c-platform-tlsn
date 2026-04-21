@@ -33,6 +33,7 @@ export interface TLSNProofStruct {
   sessionId: string;
   commitmentsHash: Hex;
   orderBindingHash: Hex;
+  policyVersionHash: Hex;
   verifierSignature: Hex;
   revealedItems: Array<{
     handlerType: string;
@@ -120,14 +121,15 @@ export async function buildTLSNProof(params: {
   }
   const commitmentsHash = keccak256(concatenated);
 
-  // Sign: message = keccak256(abi.encodePacked(chainId, keccak256(sessionId), commitmentsHash, orderBindingHash))
+  // Sign: preimage (136 bytes) = chainId || keccak256(sessionId) || commitmentsHash || orderBindingHash || policyVersionHash
   const sessionIdHash = keccak256(toHex(sessionId, { size: undefined }));
+  const policyVersionHash: Hex = ZERO_BYTES32;
 
-  // abi.encodePacked(uint64, bytes32, bytes32, bytes32)
+  // abi.encodePacked(uint64, bytes32, bytes32, bytes32, bytes32)
   const messageHash = keccak256(
     encodePacked(
-      ["uint64", "bytes32", "bytes32", "bytes32"],
-      [chainId, sessionIdHash, commitmentsHash, orderBindingHash],
+      ["uint64", "bytes32", "bytes32", "bytes32", "bytes32"],
+      [chainId, sessionIdHash, commitmentsHash, orderBindingHash, policyVersionHash],
     ),
   );
 
@@ -160,6 +162,7 @@ export async function buildTLSNProof(params: {
     sessionId,
     commitmentsHash,
     orderBindingHash,
+    policyVersionHash,
     verifierSignature,
     revealedItems: revealedItemsStruct,
     commitmentOpenings,

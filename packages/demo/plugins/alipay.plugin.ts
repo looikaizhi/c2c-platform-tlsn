@@ -43,6 +43,7 @@ function getFormBody(request: any) {
 const config = {
     name: 'Alipay Payment Detail',
     description: 'Verify Alipay payment transaction details: payer, payee, amount, status, and timestamp (selective disclosure of bizInfo fields).',
+    policyVersion: 'v1.0.0',
     requests: [
         {
             method: METHOD,
@@ -144,9 +145,9 @@ async function onClick() {
                     __tlsn_payee_id_hash:      PAYEE_ID_HASH,
                 },
                 accountCheckFields: [
-                    // handlers[4] = payeeName       → verify against payeeNameHash
+                    // handlers[4] = payeeName       → verify against payeeNameHash (demo placeholder)
                     { handlerIndex: 4, sessionDataKey: '__tlsn_payee_name_hash', valueMode: 'json_value' },
-                    // handlers[5] = payeeLoginEmail → verify against payeeIdHash
+                    // handlers[5] = payeeLoginEmail → verify against payeeIdHash (demo placeholder)
                     { handlerIndex: 5, sessionDataKey: '__tlsn_payee_id_hash',   valueMode: 'json_value' },
                 ],
                 handlers: [
@@ -168,20 +169,27 @@ async function onClick() {
                     //   status         – 订单状态 ("SUCCESS" = completed)
                     // part:'ALL' + params.regex is the correct path for regex matching
                     // (extractBodyRanges only supports type:'json'; regex lives in extractAllRanges)
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN', 
-                        params: { type: 'regex', regex: '"orderId"\\s*:\\s*"[^"]*"' } },
                     { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
-                        params: { type: 'regex', regex: '"gmtSuccess"\\s*:\\s*"[^"]*"' } },
+                        params: { type: 'regex', regex: '"orderId"\\s*:\\s*"[^"]*"' },
+                        label: 'transaction.id' },
                     { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
-                        params: { type: 'regex', regex: '"payeeName"\\s*:\\s*"[^"]*"' } },
+                        params: { type: 'regex', regex: '"gmtSuccess"\\s*:\\s*"[^"]*"' },
+                        label: 'originator.timestamp' },
                     { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
-                        params: { type: 'regex', regex: '"payeeLoginEmail"\\s*:\\s*"[^"]*"' } },
+                        params: { type: 'regex', regex: '"payeeName"\\s*:\\s*"[^"]*"' },
+                        label: 'beneficiary.name' },
                     { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
-                        params: { type: 'regex', regex: '"payAmount"\\s*:\\s*"[^"]*"' } },
+                        params: { type: 'regex', regex: '"payeeLoginEmail"\\s*:\\s*"[^"]*"' },
+                        label: 'beneficiary.accountId' },
                     { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
-                        params: { type: 'regex', regex: '"bizType"\\s*:\\s*"[^"]*"' } },
+                        params: { type: 'regex', regex: '"payAmount"\\s*:\\s*"[^"]*"' },
+                        label: 'originator.amount' },
                     { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
-                        params: { type: 'regex', regex: '"status"\\s*:\\s*"[A-Z_]+"' } },
+                        params: { type: 'regex', regex: '"bizType"\\s*:\\s*"[^"]*"' },
+                        label: 'transaction.type' },
+                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                        params: { type: 'regex', regex: '"status"\\s*:\\s*"[A-Z_]+"' },
+                        label: 'transaction.status' },
                 ] as unknown as import('@tlsn/plugin-sdk/src/types').Handler[],
                 transcriptCommitDebug: {
                     exposeOpenings: true,

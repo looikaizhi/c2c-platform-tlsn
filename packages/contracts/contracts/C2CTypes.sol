@@ -15,7 +15,8 @@ enum OrderStatus {
     CANCELLED,
     EXPIRED,
     COMPLETED,
-    WAITING
+    WAITING,
+    DISPUTED
 }
 
 struct SupportCryptoInfo {
@@ -60,6 +61,8 @@ struct TLSNProof {
     bytes32 commitmentsHash;
     /// @dev keccak256(abi.encodePacked(escrow, chainId, merchant, buyer, productId, orderId, assetType, amount, rate, deadline))
     bytes32 orderBindingHash;
+    /// @dev keccak256(policyVersion as UTF-8), or bytes32(0) if absent
+    bytes32 policyVersionHash;
     bytes verifierSignature;
     TLSNRevealedItem[] revealedItems;
     TLSNCommitmentOpening[] commitmentOpenings;
@@ -171,3 +174,7 @@ error OrderBindingHashMismatch();
 error AlipayTransferTooOld();
 error WiseTransferTooOld();
 error MerchantPaymentInfoNotSet();
+error OrderInDispute();
+error DisputeWindowNotExpired();
+error NotDisputedOrder();
+error AlreadyDisputed();

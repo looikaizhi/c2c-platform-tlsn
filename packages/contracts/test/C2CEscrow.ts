@@ -103,11 +103,9 @@ function nextAlipayOrderId(prefix: string): string {
   return `${prefix}-${Date.now()}-${_alipayOrderCounter}`;
 }
 
-function calcFiatX1000(amount: bigint, rate: bigint, assetType: number): bigint {
-  if (assetType === ASSET_CRYPTO) {
-    return (amount * rate) / (10n ** 33n);
-  }
-  return (amount * rate * 10n) / (10n ** 18n);
+function calcFiatX1000(amount: bigint, rate: bigint, _assetType?: number): bigint {
+  // Unified formula: rate = fiatPrice × 10^8; tokenDecimals = 18 (USDT)
+  return (amount * 1000n * rate) / (10n ** 26n);
 }
 
 function toAmountX1000String(v: bigint): string {
@@ -731,9 +729,15 @@ describe("C2CEscrow", async function () {
 
     T("ESC-FLOW-08", "FIAT 超时索赔成功 -> buyer 获 2x", async (ctx) => {
       await placeFiatOrder(viem, d);
+      // Step 1: advance past ORDER_TIMEOUT so buyer can open dispute
       await advanceTime(testClient, Number(ORDER_TIMEOUT + 1n));
+      await sendTx(ctx, d.escrowAsBuyer.write.requestRefund([
+        d.merchant.account.address, WISE_FIAT_PID, 0n,
+      ]));
+      // Step 2: advance past DISPUTE_WINDOW (24h) so anyone can finalize
+      await advanceTime(testClient, 24 * 60 * 60 + 1);
       const buyerBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
-      await sendTx(ctx, d.escrowAsBuyer.write.claimRefundAfterTimeout([
+      await sendTx(ctx, d.escrowAsBuyer.write.finalizeExpiredDispute([
         d.merchant.account.address, WISE_FIAT_PID, 0n,
       ]));
       const buyerAfter = await d.usdt.read.balanceOf([d.buyer.account.address]);
@@ -830,6 +834,76 @@ describe("C2CEscrow", async function () {
       ]);
       assert.equal(p1, PLATFORM_WISE);
       assert.equal(p2, PLATFORM_WISE);
+    });
+
+    T("ESC-FLOW-17", "adminForceSettle: disputeDeadline 未过期 -> DisputeWindowNotExpired", async (ctx) => {
+      await placeFiatOrder(viem, d);
+      await advanceTime(testClient, Number(ORDER_TIMEOUT + 1n));
+      await sendTx(ctx, d.escrowAsBuyer.write.requestRefund([
+        d.merchant.account.address, WISE_FIAT_PID, 0n,
+      ]));
+      // dispute is now open, deadline has NOT passed yet
+      await expectRevertTracked(ctx, d.c2cEscrow.write.adminForceSettle([
+        d.merchant.account.address, WISE_FIAT_PID, 0n, true,
+      ]), "DisputeWindowNotExpired");
+    });
+
+    T("ESC-FLOW-18", "adminForceSettle: 过期后 settleToMerchant=true -> 商家获得 crypto", async (ctx) => {
+      await placeFiatOrder(viem, d);
+      await advanceTime(testClient, Number(ORDER_TIMEOUT + 1n));
+      await sendTx(ctx, d.escrowAsBuyer.write.requestRefund([
+        d.merchant.account.address, WISE_FIAT_PID, 0n,
+      ]));
+      await advanceTime(testClient, 24 * 60 * 60 + 1);
+      const merchantBefore = await d.usdt.read.balanceOf([d.merchant.account.address]);
+      await sendTx(ctx, d.c2cEscrow.write.adminForceSettle([
+        d.merchant.account.address, WISE_FIAT_PID, 0n, true,
+      ]));
+      const merchantAfter = await d.usdt.read.balanceOf([d.merchant.account.address]);
+      assert.equal(merchantAfter - merchantBefore, TRADE_AMOUNT);
+      const active = await d.c2cEscrow.read.hasActiveOrder([
+        d.buyer.account.address, d.merchant.account.address, ASSET_FIAT, WISE_FIAT_PID,
+      ]);
+      assert.equal(active, false);
+    });
+
+    T("ESC-FLOW-19", "adminForceSettle: 过期后 settleToMerchant=false -> buyer 获 2x 赔偿", async (ctx) => {
+      await placeFiatOrder(viem, d);
+      await advanceTime(testClient, Number(ORDER_TIMEOUT + 1n));
+      await sendTx(ctx, d.escrowAsBuyer.write.requestRefund([
+        d.merchant.account.address, WISE_FIAT_PID, 0n,
+      ]));
+      await advanceTime(testClient, 24 * 60 * 60 + 1);
+      const buyerBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
+      await sendTx(ctx, d.c2cEscrow.write.adminForceSettle([
+        d.merchant.account.address, WISE_FIAT_PID, 0n, false,
+      ]));
+      const buyerAfter = await d.usdt.read.balanceOf([d.buyer.account.address]);
+      assert.equal(buyerAfter - buyerBefore, TRADE_AMOUNT * 2n);
+      const active = await d.c2cEscrow.read.hasActiveOrder([
+        d.buyer.account.address, d.merchant.account.address, ASSET_FIAT, WISE_FIAT_PID,
+      ]);
+      assert.equal(active, false);
+    });
+
+    T("ESC-FLOW-20", "disputeDeadline 内商家可抢先 resolveDisputeByMerchant", async (ctx) => {
+      await placeFiatOrder(viem, d);
+      const { proofs } = await buildWiseProofPairForFiat(d);
+      await advanceTime(testClient, Number(ORDER_TIMEOUT + 1n));
+      await sendTx(ctx, d.escrowAsBuyer.write.requestRefund([
+        d.merchant.account.address, WISE_FIAT_PID, 0n,
+      ]));
+      // deadline not yet passed — merchant submits proof first
+      const merchantBefore = await d.usdt.read.balanceOf([d.merchant.account.address]);
+      await sendTx(ctx, d.escrowAsMerchant.write.resolveDisputeByMerchant([
+        WISE_FIAT_PID, 0n, proofs,
+      ]));
+      const merchantAfter = await d.usdt.read.balanceOf([d.merchant.account.address]);
+      assert.equal(merchantAfter - merchantBefore, TRADE_AMOUNT);
+      // admin should now fail — order is gone (cleaned up as COMPLETED)
+      await expectRevertTracked(ctx, d.c2cEscrow.write.adminForceSettle([
+        d.merchant.account.address, WISE_FIAT_PID, 0n, true,
+      ]), "NotDisputedOrder");
     });
   });
 
@@ -990,9 +1064,9 @@ describe("C2CEscrow", async function () {
       ]), "NotWaiting");
     });
 
-    T("ESC-ERR-20", "claimRefund 未超时 -> NotYetExpired", async (ctx) => {
+    T("ESC-ERR-20", "requestRefund 未超时 -> NotYetExpired", async (ctx) => {
       await placeFiatOrder(viem, d);
-      await expectRevertTracked(ctx, d.escrowAsBuyer.write.claimRefundAfterTimeout([
+      await expectRevertTracked(ctx, d.escrowAsBuyer.write.requestRefund([
         d.merchant.account.address, WISE_FIAT_PID, 0n,
       ]), "NotYetExpired");
     });
@@ -1533,5 +1607,212 @@ describe("C2CEscrow", async function () {
         d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs,
       ]), "OrderBindingHashMismatch");
     });
+  });
+});
+
+// ============================================================================
+// Phase B' — Token-decimal-aware rate formula
+// ============================================================================
+
+describe("TokenDecimalRate", async function () {
+  const { viem } = await network.connect();
+  const testClient = await viem.getTestClient();
+
+  it("fiatAmountX1000 is equal for USDC and USDT at the same nominal fiat amount", async () => {
+    const d = await deployAll(viem);
+    const pc = await viem.getPublicClient();
+
+    // Deploy a 6-decimal USDC mock and add as supported crypto (id=1)
+    const usdc = await viem.deployContract("MockERC20", ["USD Coin", "USDC", 6]);
+    await d.c2cAdmin.write.addCryptoInfo([usdc.address, true]);
+    const USDC_ID = 1n;
+    const MYR_ID = 1n;
+
+    await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
+    const PLATFORM_WISE = await d.tlsnVerifier.read.PLATFORM_WISE();
+    const adminMerchant = await viem.getContractAt("C2CAdmin", d.c2cAdmin.address, { client: { wallet: d.merchant } });
+    const escrowMerchant = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: d.merchant } });
+    const escrowBuyer = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: d.buyer } });
+    await adminMerchant.write.setMerchantPaymentInfoForPlatform([PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH]);
+
+    // Mint & approve USDT (18dp)
+    const COLLATERAL_USDT = 1_000n * 10n ** 18n;
+    const ORDER_USDT = 100n * 10n ** 18n;
+    await d.usdt.write.mint([d.merchant.account.address, COLLATERAL_USDT]);
+    await d.usdt.write.mint([d.buyer.account.address, ORDER_USDT]);
+    await d.usdtAsMerchant.write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+    await (await viem.getContractAt("MockERC20", d.usdt.address, { client: { wallet: d.buyer } }))
+      .write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+
+    // Mint & approve USDC (6dp)
+    const COLLATERAL_USDC = 1_000n * 10n ** 6n;
+    const ORDER_USDC = 100n * 10n ** 6n;
+    await usdc.write.mint([d.merchant.account.address, COLLATERAL_USDC]);
+    await usdc.write.mint([d.buyer.account.address, ORDER_USDC]);
+    await (await viem.getContractAt("MockERC20", usdc.address, { client: { wallet: d.merchant } }))
+      .write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+    await (await viem.getContractAt("MockERC20", usdc.address, { client: { wallet: d.buyer } }))
+      .write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+
+    // List USDT product (pid=0) and USDC product (pid=1)
+    await escrowMerchant.write.listCryptoProduct([0n, MYR_ID, COLLATERAL_USDT, true, PLATFORM_WISE]);
+    await escrowMerchant.write.listCryptoProduct([USDC_ID, MYR_ID, COLLATERAL_USDC, true, PLATFORM_WISE]);
+
+    // Rate: 4.70 MYR/token × 10^8 = 470_000_000
+    const RATE = 470_000_000n;
+    const expiry = (await pc.getBlock()).timestamp + 365n * 24n * 3600n;
+    await adminMerchant.write.publishRate([0n, 0, RATE, expiry]);
+    await adminMerchant.write.publishRate([1n, 0, RATE, expiry]);
+    await adminMerchant.write.openNow([0n, 0]);
+    await adminMerchant.write.openNow([1n, 0]);
+
+    const AMOUNT_STR = "470.000"; // 100 tokens × 4.70 = 470.000
+
+    const buyerUsdtBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    const buyerUsdcBefore = await usdc.read.balanceOf([d.buyer.account.address]);
+
+    // Place and pay USDT order (pid=0, oid=0)
+    await escrowBuyer.write.placeOrder([d.merchant.account.address, 0n, 0, ORDER_USDT, NULL_BUYER_INFO]);
+    {
+      const [, , rate, dl, , rv] = await d.c2cEscrow.read.getOrder([d.merchant.account.address, 0n, 0, 0n]);
+      const obh = computeOrderBindingHash({
+        escrow: d.c2cEscrow.address, chainId: CHAIN_ID,
+        merchant: d.merchant.account.address, buyer: d.buyer.account.address,
+        productId: 0n, orderId: 0n, assetType: 0,
+        amount: ORDER_USDT, rate, rateVersion: BigInt(rv), deadline: dl,
+        merchantNameHash: MERCHANT_NAME_HASH, merchantIdHash: MERCHANT_ID_HASH,
+        payeeNameHash: MERCHANT_NAME_HASH, payeeIdHash: MERCHANT_ID_HASH,
+      });
+      const contacts = await buildWiseContactsProof({ verifierWallet: d.verifierSigner, orderBindingHash: obh, chainId: CHAIN_ID, serverName: WISE_SERVER });
+      const transfer = await buildWiseTransferProof({
+        verifierWallet: d.verifierSigner, orderBindingHash: obh, chainId: CHAIN_ID, serverName: WISE_SERVER,
+        fields: { state: "OUTGOING_PAYMENT_SENT", targetAmount: AMOUNT_STR, targetCurrency: MYR_NAME, transferId: nextWiseTransferId(), dateMs: (dl - 60n) * 1000n },
+      });
+      await escrowBuyer.write.payOrderByPlatform([d.merchant.account.address, 0n, 0n, [contacts, transfer] as TLSNProof[]]);
+    }
+
+    // Place and pay USDC order (pid=1, oid=0)
+    await escrowBuyer.write.placeOrder([d.merchant.account.address, 1n, 0, ORDER_USDC, NULL_BUYER_INFO]);
+    {
+      const [, , rate, dl, , rv] = await d.c2cEscrow.read.getOrder([d.merchant.account.address, 1n, 0, 0n]);
+      const obh = computeOrderBindingHash({
+        escrow: d.c2cEscrow.address, chainId: CHAIN_ID,
+        merchant: d.merchant.account.address, buyer: d.buyer.account.address,
+        productId: 1n, orderId: 0n, assetType: 0,
+        amount: ORDER_USDC, rate, rateVersion: BigInt(rv), deadline: dl,
+        merchantNameHash: MERCHANT_NAME_HASH, merchantIdHash: MERCHANT_ID_HASH,
+        payeeNameHash: MERCHANT_NAME_HASH, payeeIdHash: MERCHANT_ID_HASH,
+      });
+      const contacts = await buildWiseContactsProof({ verifierWallet: d.verifierSigner, orderBindingHash: obh, chainId: CHAIN_ID, serverName: WISE_SERVER });
+      const transfer = await buildWiseTransferProof({
+        verifierWallet: d.verifierSigner, orderBindingHash: obh, chainId: CHAIN_ID, serverName: WISE_SERVER,
+        fields: { state: "OUTGOING_PAYMENT_SENT", targetAmount: AMOUNT_STR, targetCurrency: MYR_NAME, transferId: nextWiseTransferId(), dateMs: (dl - 60n) * 1000n },
+      });
+      await escrowBuyer.write.payOrderByPlatform([d.merchant.account.address, 1n, 0n, [contacts, transfer] as TLSNProof[]]);
+    }
+
+    // Buyer should have received both ORDER_USDT and ORDER_USDC
+    const buyerUsdtAfter = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    const buyerUsdcAfter = await usdc.read.balanceOf([d.buyer.account.address]);
+    assert.equal(buyerUsdtAfter - buyerUsdtBefore, ORDER_USDT, "buyer should receive ORDER_USDT");
+    assert.equal(buyerUsdcAfter - buyerUsdcBefore, ORDER_USDC, "buyer should receive ORDER_USDC");
+  });
+
+  it("maxOrderAmount cap is enforced for USDC (6 decimals)", async () => {
+    const d = await deployAll(viem);
+    const usdc = await viem.deployContract("MockERC20", ["USD Coin", "USDC", 6]);
+    await d.c2cAdmin.write.addCryptoInfo([usdc.address, true]);
+    const USDC_ID = 1n;
+
+    await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
+    const PLATFORM_ALIPAY = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
+    const adminMerchant = await viem.getContractAt("C2CAdmin", d.c2cAdmin.address, { client: { wallet: d.merchant } });
+    const escrowMerchant = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: d.merchant } });
+    const escrowBuyer = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: d.buyer } });
+    await adminMerchant.write.setMerchantPaymentInfoForPlatform([PLATFORM_ALIPAY, MERCHANT_NAME_HASH, MERCHANT_ID_HASH]);
+
+    const COLLATERAL_USDC = 2_000n * 10n ** 6n;
+    await usdc.write.mint([d.merchant.account.address, COLLATERAL_USDC]);
+    await usdc.write.mint([d.buyer.account.address, COLLATERAL_USDC]);
+    await (await viem.getContractAt("MockERC20", usdc.address, { client: { wallet: d.merchant } }))
+      .write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+    await (await viem.getContractAt("MockERC20", usdc.address, { client: { wallet: d.buyer } }))
+      .write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+
+    await escrowMerchant.write.listCryptoProduct([USDC_ID, 0n, COLLATERAL_USDC, true, PLATFORM_ALIPAY]);
+    await adminMerchant.write.publishRate([0n, 0, RATE_ALIPAY_CRYPTO, 0n]);
+    await adminMerchant.write.openNow([0n, 0]);
+
+    // 1001 USDC normalised = 1001 * 1e18 > 1000 * 1e18 → ExceedsUsdCap
+    await expectRevert(
+      escrowBuyer.write.placeOrder([d.merchant.account.address, 0n, 0, 1_001n * 10n ** 6n, NULL_BUYER_INFO]),
+      "ExceedsUsdCap",
+    );
+
+    // 999 USDC normalised = 999 * 1e18 ≤ 1000 * 1e18 → succeeds
+    await escrowBuyer.write.placeOrder([d.merchant.account.address, 0n, 0, 999n * 10n ** 6n, NULL_BUYER_INFO]);
+    const [buyer] = await d.c2cEscrow.read.getOrder([d.merchant.account.address, 0n, 0, 0n]);
+    assert.equal(buyer.toLowerCase(), d.buyer.account.address.toLowerCase());
+  });
+
+  it("resolveDisputeByMerchant fiatAmountX1000 matches receiveCryptoWithPlatformPayment", async () => {
+    const d = await deployAll(viem);
+    const pc = await viem.getPublicClient();
+
+    await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
+    const PLATFORM_WISE = await d.tlsnVerifier.read.PLATFORM_WISE();
+    const adminMerchant = await viem.getContractAt("C2CAdmin", d.c2cAdmin.address, { client: { wallet: d.merchant } });
+    const escrowMerchant = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: d.merchant } });
+    const escrowBuyer = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: d.buyer } });
+    await adminMerchant.write.setMerchantPaymentInfoForPlatform([PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH]);
+
+    await d.usdt.write.mint([d.merchant.account.address, 10n * 10n ** 18n]);
+    await d.usdt.write.mint([d.buyer.account.address, 5n * 10n ** 18n]);
+    await d.usdtAsMerchant.write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+    await (await viem.getContractAt("MockERC20", d.usdt.address, { client: { wallet: d.buyer } }))
+      .write.approve([d.c2cEscrow.address, 2n ** 256n - 1n]);
+
+    // List FIAT product (fiatId=1=MYR, cryptoId=0=USDT)
+    await escrowMerchant.write.listFiatProduct([1n, 0n, 5n * 10n ** 18n, true, PLATFORM_WISE]);
+    const expiry = (await pc.getBlock()).timestamp + 365n * 24n * 3600n;
+    await adminMerchant.write.publishRate([0n, 1, RATE_WISE_FIAT, expiry]);
+    await adminMerchant.write.openNow([0n, 1]);
+
+    await escrowBuyer.write.placeOrder([d.merchant.account.address, 0n, 1, TRADE_AMOUNT, BUYER_INFO]);
+    const [, , order_rate, order_dl, , order_rv] = await d.c2cEscrow.read.getOrder([d.merchant.account.address, 0n, 1, 0n]);
+
+    const fiatX1000 = calcFiatX1000(TRADE_AMOUNT, order_rate);
+    const AMOUNT_STR = toAmountX1000String(fiatX1000);
+
+    const obh = computeOrderBindingHash({
+      escrow: d.c2cEscrow.address, chainId: CHAIN_ID,
+      merchant: d.merchant.account.address, buyer: d.buyer.account.address,
+      productId: 0n, orderId: 0n, assetType: 1,
+      amount: TRADE_AMOUNT, rate: order_rate, rateVersion: BigInt(order_rv), deadline: order_dl,
+      merchantNameHash: MERCHANT_NAME_HASH, merchantIdHash: MERCHANT_ID_HASH,
+      payeeNameHash: BUYER_NAME_HASH, payeeIdHash: BUYER_ID_HASH,
+    });
+
+    const buildProofs = async () => {
+      const contacts = await buildWiseContactsProof({ verifierWallet: d.verifierSigner, orderBindingHash: obh, chainId: CHAIN_ID, sessionId: nextSession(), serverName: WISE_SERVER });
+      const transfer = await buildWiseTransferProof({
+        verifierWallet: d.verifierSigner, orderBindingHash: obh, chainId: CHAIN_ID, sessionId: nextSession(), serverName: WISE_SERVER,
+        fields: { state: "OUTGOING_PAYMENT_SENT", targetAmount: AMOUNT_STR, targetCurrency: MYR_NAME, transferId: nextWiseTransferId(), dateMs: (order_dl - 60n) * 1000n },
+      });
+      return [contacts, transfer] as TLSNProof[];
+    };
+
+    // Advance past ORDER_TIMEOUT and open dispute
+    await advanceTime(testClient, Number(ORDER_TIMEOUT + 1n));
+    await escrowBuyer.write.requestRefund([d.merchant.account.address, 0n, 0n]);
+
+    const merchantUsdtBefore = await d.usdt.read.balanceOf([d.merchant.account.address]);
+
+    // resolveDisputeByMerchant with same amount — must succeed
+    await escrowMerchant.write.resolveDisputeByMerchant([0n, 0n, await buildProofs()]);
+
+    // Merchant should receive TRADE_AMOUNT USDT from the dispute resolution
+    const merchantUsdtAfter = await d.usdt.read.balanceOf([d.merchant.account.address]);
+    assert.equal(merchantUsdtAfter - merchantUsdtBefore, TRADE_AMOUNT, "merchant should receive TRADE_AMOUNT after resolveDisputeByMerchant");
   });
 });

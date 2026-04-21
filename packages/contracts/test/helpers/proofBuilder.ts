@@ -5,8 +5,14 @@
  *   hashValue = keccak256(concat(utf8(value), blinder_bytes))
  *   commitmentsHash = keccak256(concat(all hashValues))
  *
- * Verifier signature (mirrors TLSNVerifier._recoverVerifierSigner):
- *   messageHash = keccak256(abi.encodePacked(chainId, keccak256(sessionId), commitmentsHash, orderBindingHash))
+ * Verifier signature v2 (mirrors TLSNVerifier._recoverVerifierSigner):
+ *   preimage (136 bytes) =
+ *     chainId (uint64, 8 bytes BE)
+ *     || keccak256(sessionId as UTF-8) (32 bytes)
+ *     || commitmentsHash (32 bytes)
+ *     || orderBindingHash (32 bytes, bytes32(0) if absent)
+ *     || policyVersionHash (32 bytes, bytes32(0) if absent)
+ *   messageHash = keccak256(preimage)
  *   signature   = eth_sign(messageHash)  ← adds Ethereum Signed Message prefix
  */
 
@@ -15,6 +21,8 @@ import {
   keccak256, encodePacked, toBytes, stringToHex, concat, toHex,
   type WalletClient,
 } from "viem";
+
+const ZERO_HASH = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`;
 
 // ── Types matching the contract structs ───────────────────────────────────────
 
@@ -44,6 +52,7 @@ export interface TLSNProof {
   sessionId:           string;
   commitmentsHash:     `0x${string}`;
   orderBindingHash:    `0x${string}`;
+  policyVersionHash:   `0x${string}`;
   verifierSignature:   `0x${string}`;
   revealedItems:       TLSNRevealedItem[];
   commitmentOpenings:  TLSNCommitmentOpening[];
@@ -63,19 +72,20 @@ function commitHash(value: string, blinder: `0x${string}`): `0x${string}` {
   return keccak256(concat([stringToHex(value), blinder]));
 }
 
-/** Sign the verifier message with eth_sign prefix */
+/** Sign the verifier message with eth_sign prefix (v2: 5-item 136-byte preimage) */
 async function signVerifier(
   wallet: WalletClient,
   chainId: bigint,
   sessionId: string,
   commitmentsHash: `0x${string}`,
   orderBindingHash: `0x${string}`,
+  policyVersionHash: `0x${string}`,
 ): Promise<`0x${string}`> {
   const sessionIdHash = keccak256(toHex(toBytes(sessionId)));
   const messageHash = keccak256(
     encodePacked(
-      ["uint64", "bytes32", "bytes32", "bytes32"],
-      [chainId, sessionIdHash, commitmentsHash, orderBindingHash],
+      ["uint64", "bytes32", "bytes32", "bytes32", "bytes32"],
+      [chainId, sessionIdHash, commitmentsHash, orderBindingHash, policyVersionHash],
     ),
   );
   return wallet.signMessage({
@@ -92,6 +102,7 @@ async function assembleProof(params: {
   orderBindingHash: `0x${string}`;
   verifierWallet:   WalletClient;
   serverName:       string;
+  policyVersionHash?: `0x${string}`;    // default bytes32(0)
   /** override specific commitments (for tamper tests) */
   overrideCommitments?: TLSNCommitment[];
   /** override commitmentsHash (for tamper tests) */
@@ -99,6 +110,7 @@ async function assembleProof(params: {
   /** override verifierSignature (for tamper tests) */
   overrideSignature?: `0x${string}`;
 }): Promise<TLSNProof> {
+  const policyVersionHash = params.policyVersionHash ?? ZERO_HASH;
   const blinders = params.fieldValues.map(() => randomBlinder());
   const hashValues = params.fieldValues.map((v, i) => commitHash(v, blinders[i]));
 
@@ -114,6 +126,7 @@ async function assembleProof(params: {
       params.sessionId,
       commitmentsHash,
       params.orderBindingHash,
+      policyVersionHash,
     );
 
   const revealedItems: TLSNRevealedItem[] = params.fieldValues.map((v, i) => ({
@@ -144,6 +157,7 @@ async function assembleProof(params: {
     sessionId:          params.sessionId,
     commitmentsHash,
     orderBindingHash:   params.orderBindingHash,
+    policyVersionHash,
     verifierSignature:  signature,
     revealedItems,
     commitmentOpenings,
@@ -187,7 +201,7 @@ export async function buildKYBProof(p: {
   const startV = 1n;
   const endV   = 9n; // 1 + "verified".length = 9
 
-  const orderBindingHash = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`;
+  const orderBindingHash = ZERO_HASH;
   const sessionId  = p.sessionId ?? nextSession();
   const blinder    = `0x${randomBytes(32).toString("hex")}` as `0x${string}`;
   const hashValue  = keccak256(concat([stringToHex(kybValue), blinder]));
@@ -196,8 +210,8 @@ export async function buildKYBProof(p: {
   const sessionIdHash = keccak256(toHex(toBytes(sessionId)));
   const messageHash   = keccak256(
     encodePacked(
-      ["uint64", "bytes32", "bytes32", "bytes32"],
-      [p.chainId, sessionIdHash, commitmentsHash, orderBindingHash],
+      ["uint64", "bytes32", "bytes32", "bytes32", "bytes32"],
+      [p.chainId, sessionIdHash, commitmentsHash, orderBindingHash, ZERO_HASH],
     ),
   );
   const signature = p.overrideSignature ??
@@ -217,6 +231,7 @@ export async function buildKYBProof(p: {
     sessionId,
     commitmentsHash,
     orderBindingHash,
+    policyVersionHash: ZERO_HASH,
     verifierSignature: signature,
     revealedItems: [{
       handlerType:      "RECV",
@@ -257,13 +272,13 @@ export async function buildKYBProofBadStatus(p: {
   const hashValue  = keccak256(concat([stringToHex(kybValue), blinder]));
   const commitmentsHash = keccak256(hashValue);
   const sessionId  = p.sessionId ?? nextSession();
-  const orderBindingHash = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`;
+  const orderBindingHash = ZERO_HASH;
 
   const sessionIdHash = keccak256(toHex(toBytes(sessionId)));
   const messageHash   = keccak256(
     encodePacked(
-      ["uint64", "bytes32", "bytes32", "bytes32"],
-      [p.chainId, sessionIdHash, commitmentsHash, orderBindingHash],
+      ["uint64", "bytes32", "bytes32", "bytes32", "bytes32"],
+      [p.chainId, sessionIdHash, commitmentsHash, orderBindingHash, ZERO_HASH],
     ),
   );
   const signature = await p.verifierWallet.signMessage({
@@ -276,6 +291,7 @@ export async function buildKYBProofBadStatus(p: {
     sessionId,
     commitmentsHash,
     orderBindingHash,
+    policyVersionHash: ZERO_HASH,
     verifierSignature: signature,
     revealedItems: [{
       handlerType:      "RECV",

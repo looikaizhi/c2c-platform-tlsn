@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it, before } from "node:test";
 import { network } from "hardhat";
-import { parseUnits, zeroAddress } from "viem";
+import { parseUnits, zeroAddress, keccak256, encodePacked, toHex, toBytes, concat, stringToHex } from "viem";
 
 import { deployAll, type DeployResult } from "./helpers/deploy.js";
 import {
@@ -557,6 +557,140 @@ describe("TLSNVerifier", async function () {
         ]),
         d.tlsnVerifier,
         "PlatformPaymentVerified",
+      );
+    });
+  });
+
+  // ================================================================
+  //  e2e-sig-format — Real verifier signature format (v2, 5-item)
+  // ================================================================
+
+  describe("e2e-sig-format", async () => {
+    const ZERO_HASH = ("0x" + "00".repeat(32)) as `0x${string}`;
+
+    /**
+     * Build a KYB proof using the exact same 136-byte preimage the Rust verifier produces:
+     *   chainId(8) || keccak256(sessionId)(32) || commitmentsHash(32)
+     *   || orderBindingHash(32) || policyVersionHash(32)
+     * This simulates the real verifier output end-to-end.
+     */
+    async function buildE2EProof(sessionId: string) {
+      const chainId = 31337n;
+      const kybValue = '"verified"';
+
+      // Commitment
+      const blinder = ("0x" + "cc".repeat(32)) as `0x${string}`;
+      const hashValue = keccak256(concat([stringToHex(kybValue), blinder]));
+      const commitmentsHash = keccak256(hashValue);
+      const orderBindingHash = ZERO_HASH;
+      const policyVersionHash = ZERO_HASH;
+
+      // 5-item 136-byte preimage (mirrors Rust verifier sign_commitments v2)
+      const sessionIdHash = keccak256(toHex(toBytes(sessionId)));
+      const messageHash = keccak256(
+        encodePacked(
+          ["uint64", "bytes32", "bytes32", "bytes32", "bytes32"],
+          [chainId, sessionIdHash, commitmentsHash, orderBindingHash, policyVersionHash],
+        ),
+      );
+      const verifierSignature = await d.verifierSigner.signMessage({
+        account: d.verifierSigner.account!,
+        message: { raw: toBytes(messageHash) },
+      }) as `0x${string}`;
+
+      return {
+        chainId,
+        sessionId,
+        commitmentsHash,
+        orderBindingHash,
+        policyVersionHash,
+        verifierSignature,
+        revealedItems: [{
+          handlerType: "RECV",
+          part: "BODY",
+          value: kybValue,
+          commitment_index: 0n,
+          start_item: 0n,
+          end_item: BigInt(kybValue.length),
+          start_value: 1n,
+          end_value: 9n,
+        }],
+        commitmentOpenings: [{ blinderHex: blinder }],
+        commitments: [{
+          direction: "Recv",
+          hashAlg: "Keccak256",
+          hashValue,
+        }],
+        serverName: "kyb.example.com",
+      };
+    }
+
+    it("e2e-sig-format — real verifier 5-item format passes contract verification", async () => {
+      const proof = await buildE2EProof(`e2e-pass-${Date.now()}`);
+      await viem.assertions.emit(
+        d.tlsnVerifier.write.verifyProof([proof]),
+        d.tlsnVerifier,
+        "TLSNProofVerified",
+      );
+    });
+
+    it("e2e-sig-format — old 4-item signature is rejected with UntrustedVerifier", async () => {
+      const chainId = 31337n;
+      const kybValue = '"verified"';
+      const sessionId = `e2e-reject-${Date.now()}`;
+
+      // Commitment
+      const blinder = ("0x" + "dd".repeat(32)) as `0x${string}`;
+      const hashValue = keccak256(concat([stringToHex(kybValue), blinder]));
+      const commitmentsHash = keccak256(hashValue);
+      const orderBindingHash = ZERO_HASH;
+      const policyVersionHash = ZERO_HASH;
+
+      // Old 4-item preimage — does NOT include policyVersionHash
+      const sessionIdHash = keccak256(toHex(toBytes(sessionId)));
+      const oldMessageHash = keccak256(
+        encodePacked(
+          ["uint64", "bytes32", "bytes32", "bytes32"],
+          [chainId, sessionIdHash, commitmentsHash, orderBindingHash],
+        ),
+      );
+      const oldSignature = await d.verifierSigner.signMessage({
+        account: d.verifierSigner.account!,
+        message: { raw: toBytes(oldMessageHash) },
+      }) as `0x${string}`;
+
+      // Submit with policyVersionHash field in struct (contract requires it),
+      // but signature was computed without it — contract recovers a wrong address.
+      const proof = {
+        chainId,
+        sessionId,
+        commitmentsHash,
+        orderBindingHash,
+        policyVersionHash,
+        verifierSignature: oldSignature,
+        revealedItems: [{
+          handlerType: "RECV",
+          part: "BODY",
+          value: kybValue,
+          commitment_index: 0n,
+          start_item: 0n,
+          end_item: BigInt(kybValue.length),
+          start_value: 1n,
+          end_value: 9n,
+        }],
+        commitmentOpenings: [{ blinderHex: blinder }],
+        commitments: [{
+          direction: "Recv",
+          hashAlg: "Keccak256",
+          hashValue,
+        }],
+        serverName: "kyb.example.com",
+      };
+
+      await viem.assertions.revertWithCustomError(
+        d.tlsnVerifier.write.verifyProof([proof]),
+        d.tlsnVerifier,
+        "UntrustedVerifier",
       );
     });
   });

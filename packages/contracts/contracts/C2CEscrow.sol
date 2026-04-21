@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 import "./C2CTypes.sol";
@@ -40,11 +41,13 @@ contract C2CEscrow {
         address buyer;
         uint256 amount;
         uint256 rate;
-        uint32  rateVersion;  // 下单时汇率版本快照
+        uint32  rateVersion;       // 下单时汇率版本快照
+        uint64  disputeDeadline;   // dispute 期截止时间，0 表示未进入争议；与 rateVersion 打包同一 slot
         uint256 deadline;
         OrderStatus status;
         bytes32 merchantNameHash;  // 下单时商家支付信息快照
         bytes32 merchantIdHash;
+        bytes32 platformTxId;      // 平台侧交易 ID，结算后写入
     }
 
     struct Product {
@@ -87,6 +90,12 @@ contract C2CEscrow {
 
     uint256 public constant MAX_PENDING_ORDERS = 200;
     uint256 private constant ORDER_TIMEOUT = 15 minutes;
+    uint256 private constant DISPUTE_WINDOW = 24 hours;
+
+    /// @dev rate = fiat_price_per_whole_token × 10^RATE_PRECISION_EXP
+    ///      fiatAmountX1000 = mulDiv(amount_raw × 1000, rate, 10^(tokenDecimals + RATE_PRECISION_EXP))
+    ///      Works for any ERC20 token decimals (USDC=6, USDT=18, etc.)
+    uint256 private constant RATE_PRECISION_EXP = 8;
 
     // ================================================================
     //                          Events
@@ -168,6 +177,35 @@ contract C2CEscrow {
         uint256 orderId,
         OrderStatus status
     );
+    event DisputeOpened(
+        address indexed buyer,
+        address indexed merchant,
+        uint256 indexed orderId,
+        uint256 productId,
+        uint256 disputeDeadline
+    );
+    event DisputeResolvedByMerchant(
+        address indexed buyer,
+        address indexed merchant,
+        uint256 indexed orderId,
+        uint256 productId,
+        bytes32 platformTxId
+    );
+    event DisputeFinalizedAsExpired(
+        address indexed buyer,
+        address indexed merchant,
+        uint256 indexed orderId,
+        uint256 productId,
+        uint256 compensationAmount
+    );
+    event OrderProofLinked(
+        address indexed buyer,
+        address indexed merchant,
+        uint256 indexed orderId,
+        uint256 productId,
+        bytes32 platformTxId,
+        string  sessionId
+    );
 
     // ================================================================
     //                         Modifiers
@@ -193,6 +231,20 @@ contract C2CEscrow {
 
     function _getTokenAddress(uint256 _cryptoID) internal view returns (address) {
         return adminContract.getCryptoTokenAddress(_cryptoID);
+    }
+
+    /// @dev Compute fiat amount × 1000 from raw token amount and rate.
+    ///      rate must be encoded as: fiat_price_per_whole_token × 10^RATE_PRECISION_EXP
+    ///      Works for any ERC20 token regardless of its decimal count.
+    function _computeFiatAmountX1000(
+        uint256 amountRaw,
+        uint256 rate,
+        uint256 cryptoID
+    ) internal view returns (uint256) {
+        address tokenAddr = _getTokenAddress(cryptoID);
+        uint8 decimals = IERC20Metadata(tokenAddr).decimals();
+        uint256 denominator = 10 ** (uint256(decimals) + RATE_PRECISION_EXP);
+        return Math.mulDiv(amountRaw * 1000, rate, denominator);
     }
 
     /**
@@ -407,8 +459,15 @@ contract C2CEscrow {
         if (_amount == 0) revert ZeroAmount();
         if (_availableAmount(p) < _amount) revert InsufficientAvailable();
 
-        // 2. USD 上限校验（D-5：1:1，直接比较代币数量）
-        if (_amount > adminContract.maxOrderAmount()) revert ExceedsUsdCap();
+        // 2. USD 上限校验 — normalise to 18 decimals for token-agnostic comparison
+        {
+            address tokenAddr = _getTokenAddress(p.cryptoID);
+            uint8 dec = IERC20Metadata(tokenAddr).decimals();
+            uint256 normalised = dec <= 18
+                ? _amount * (10 ** (18 - dec))
+                : _amount / (10 ** (dec - 18));
+            if (normalised > adminContract.maxOrderAmount()) revert ExceedsUsdCap();
+        }
 
         // 3. 读取链上汇率
         MerchantRate memory mr = adminContract.getMerchantRate(_merchant, _productId, uint8(_assetType));
@@ -431,10 +490,12 @@ contract C2CEscrow {
                 amount:           _amount,
                 rate:             mr.rate,
                 rateVersion:      mr.version,
+                disputeDeadline:  0,
                 deadline:         deadline,
                 status:           OrderStatus.PENDING,
                 merchantNameHash: merchantPayInfo.nameHash,
-                merchantIdHash:   merchantPayInfo.idHash
+                merchantIdHash:   merchantPayInfo.idHash,
+                platformTxId:     bytes32(0)
             });
             p.pendingOrderIds.enqueue(oid);
             p.pendingAmount += _amount;
@@ -457,10 +518,12 @@ contract C2CEscrow {
                 amount:           _amount,
                 rate:             mr.rate,
                 rateVersion:      mr.version,
+                disputeDeadline:  0,
                 deadline:         deadline,
                 status:           OrderStatus.WAITING,
                 merchantNameHash: merchantPayInfo.nameHash,
-                merchantIdHash:   merchantPayInfo.idHash
+                merchantIdHash:   merchantPayInfo.idHash,
+                platformTxId:     bytes32(0)
             });
             p.pendingOrderIds.enqueue(oid);
             p.pendingAmount += _amount;
@@ -518,9 +581,6 @@ contract C2CEscrow {
      * @param proofs      Array of TLSNProofs (platform-specific count:
      *                      Wise → [contactsProof, transferProof]
      *                      Alipay → [paymentProof])
-     *
-     * @dev fiatAmountX1000 = mulDiv(amount, rate, 1e33)
-     *      assumes token is 18 decimals and rate is 18-decimal precision.
      */
     function payOrderByPlatform(
         address _merchant,
@@ -532,9 +592,10 @@ contract C2CEscrow {
         Order storage o = p.orders[_orderId];
         _requireBuyerPending(o);
         if (block.timestamp > o.deadline) revert OutOfDeadline();
+        if (o.status == OrderStatus.DISPUTED) revert OrderInDispute();
 
         // Verify orderBindingHash on each proof
-        uint256 fiatAmountX1000 = Math.mulDiv(o.amount, o.rate, 1e33);
+        uint256 fiatAmountX1000 = _computeFiatAmountX1000(o.amount, o.rate, p.cryptoID);
         string memory targetCurrency = adminContract.getSupportFiatInfo(p.fiatID).fiatName;
 
         bytes32 expectedBinding = _computeOrderBindingHash(
@@ -555,7 +616,8 @@ contract C2CEscrow {
             o.deadline - ORDER_TIMEOUT
         );
 
-        verifier.verifyAndDelegate(p.platformId, false, proofs, paramsData);
+        bytes32 txId = verifier.verifyAndDelegate(p.platformId, false, proofs, paramsData);
+        o.platformTxId = txId;
 
         // Release crypto to buyer
         address tokenAddress = _getTokenAddress(p.cryptoID);
@@ -566,6 +628,7 @@ contract C2CEscrow {
         p.activeOrderCount--;
         o.status = OrderStatus.COMPLETED;
 
+        emit OrderProofLinked(o.buyer, _merchant, _orderId, _productId, txId, proofs[proofs.length - 1].sessionId);
         emit OrderStatusChanged(o.buyer, _merchant, _orderId, _productId, AssetType.CRYPTO, OrderStatus.COMPLETED, o.deadline);
         emit ProductCollateralChanged(
             _merchant, p.productID, AssetType.CRYPTO,
@@ -587,9 +650,6 @@ contract C2CEscrow {
      * @param _productId  Product ID (FIAT asset type)
      * @param _orderId    Order ID
      * @param proofs      Array of TLSNProofs (platform-specific count)
-     *
-     * @dev fiatAmountX1000 = mulDiv(amount, rate * 10, 1e18)
-     *      FIAT product uses 2-decimal integer rate (e.g. 250 = 2.50 CNY/USDT).
      */
     function receiveCryptoWithPlatformPayment(
         uint256 _productId,
@@ -601,12 +661,13 @@ contract C2CEscrow {
         Order storage o = p.orders[_orderId];
         if (block.timestamp > o.deadline) revert OutOfDeadline();
         if (o.status != OrderStatus.WAITING) revert NotWaiting();
+        if (o.status == OrderStatus.DISPUTED) revert OrderInDispute();
 
         BuyerPaymentInfo storage buyerInfo = buyerOrderPaymentInfo[_merchant][_productId][_orderId];
         if (!buyerInfo.isSet) revert BuyerPaymentInfoNotSet();
 
         // Verify orderBindingHash on each proof
-        uint256 fiatAmountX1000 = Math.mulDiv(o.amount, o.rate * 10, 1e18);
+        uint256 fiatAmountX1000 = _computeFiatAmountX1000(o.amount, o.rate, p.cryptoID);
         string memory targetCurrency = adminContract.getSupportFiatInfo(p.fiatID).fiatName;
 
         bytes32 expectedBinding = _computeOrderBindingHash(
@@ -627,7 +688,8 @@ contract C2CEscrow {
             o.deadline - ORDER_TIMEOUT
         );
 
-        verifier.verifyAndDelegate(p.platformId, true, proofs, paramsData);
+        bytes32 txId = verifier.verifyAndDelegate(p.platformId, true, proofs, paramsData);
+        o.platformTxId = txId;
 
         // Release escrowed crypto to merchant
         address tokenAddress = _getTokenAddress(p.cryptoID);
@@ -640,6 +702,7 @@ contract C2CEscrow {
 
         delete buyerOrderPaymentInfo[_merchant][_productId][_orderId];
 
+        emit OrderProofLinked(o.buyer, _merchant, _orderId, _productId, txId, proofs[proofs.length - 1].sessionId);
         emit OrderStatusChanged(o.buyer, _merchant, _orderId, _productId, AssetType.FIAT, OrderStatus.COMPLETED, o.deadline);
         emit ProductCollateralChanged(
             _merchant, p.productID, AssetType.FIAT,
@@ -649,15 +712,96 @@ contract C2CEscrow {
         _cleanupExpired(p, _merchant);
     }
 
-    function claimRefundAfterTimeout(
+    /// @notice 买家在超时后申请退款，进入争议窗口而非立即赔付。
+    ///         商家有 DISPUTE_WINDOW 时间提交支付证明。
+    function requestRefund(
         address _merchant,
         uint256 _productId,
         uint256 _orderId
     ) external {
         Product storage p = _getProduct(_merchant, _productId, AssetType.FIAT);
         Order storage o = p.orders[_orderId];
+        if (msg.sender != o.buyer) revert BuyerMismatch();
         _requireBuyerWaiting(o);
         if (block.timestamp <= o.deadline) revert NotYetExpired();
+        if (o.disputeDeadline != 0) revert AlreadyDisputed();
+
+        o.status = OrderStatus.DISPUTED;
+        o.disputeDeadline = uint64(block.timestamp + DISPUTE_WINDOW);
+
+        emit DisputeOpened(o.buyer, _merchant, _orderId, _productId, o.disputeDeadline);
+        emit OrderStatusChanged(o.buyer, _merchant, _orderId, _productId, AssetType.FIAT, OrderStatus.DISPUTED, o.deadline);
+    }
+
+    /// @notice 商家在争议窗口内提交 TLSN 支付证明，验证通过后完成结算。
+    function resolveDisputeByMerchant(
+        uint256 _productId,
+        uint256 _orderId,
+        TLSNProof[] calldata proofs
+    ) external {
+        address _merchant = msg.sender;
+        Product storage p = _getProduct(_merchant, _productId, AssetType.FIAT);
+        Order storage o = p.orders[_orderId];
+        if (o.status != OrderStatus.DISPUTED) revert NotDisputedOrder();
+        if (block.timestamp > o.disputeDeadline) revert OutOfDeadline();
+
+        BuyerPaymentInfo storage buyerInfo = buyerOrderPaymentInfo[_merchant][_productId][_orderId];
+        if (!buyerInfo.isSet) revert BuyerPaymentInfoNotSet();
+
+        uint256 fiatAmountX1000 = _computeFiatAmountX1000(o.amount, o.rate, p.cryptoID);
+        string memory targetCurrency = adminContract.getSupportFiatInfo(p.fiatID).fiatName;
+
+        bytes32 expectedBinding = _computeOrderBindingHash(
+            _merchant, o.buyer, _productId, _orderId,
+            AssetType.FIAT, o.amount, o.rate, o.rateVersion, o.deadline,
+            o.merchantNameHash, o.merchantIdHash,
+            buyerInfo.nameHash, buyerInfo.idHash
+        );
+        for (uint256 i = 0; i < proofs.length; i++) {
+            _requireOrderBinding(proofs[i], expectedBinding);
+        }
+
+        bytes memory paramsData = abi.encode(
+            fiatAmountX1000,
+            targetCurrency,
+            o.deadline,
+            o.deadline - ORDER_TIMEOUT
+        );
+
+        bytes32 txId = verifier.verifyAndDelegate(p.platformId, true, proofs, paramsData);
+        o.platformTxId = txId;
+
+        address tokenAddress = _getTokenAddress(p.cryptoID);
+        IERC20(tokenAddress).safeTransfer(_merchant, o.amount);
+
+        p.pendingAmount -= o.amount;
+        p.buyerEscrowedAmount -= o.amount;
+        p.activeOrderCount--;
+        o.status = OrderStatus.COMPLETED;
+
+        delete buyerOrderPaymentInfo[_merchant][_productId][_orderId];
+
+        emit OrderProofLinked(o.buyer, _merchant, _orderId, _productId, txId, proofs[proofs.length - 1].sessionId);
+        emit DisputeResolvedByMerchant(o.buyer, _merchant, _orderId, _productId, txId);
+        emit OrderStatusChanged(o.buyer, _merchant, _orderId, _productId, AssetType.FIAT, OrderStatus.COMPLETED, o.deadline);
+        emit ProductCollateralChanged(
+            _merchant, p.productID, AssetType.FIAT,
+            0, p.collateralAmount, p.pendingAmount, p.buyerEscrowedAmount
+        );
+        _releaseActive(o.buyer, _merchant, p.assetType, _productId);
+        _cleanupExpired(p, _merchant);
+    }
+
+    /// @notice 争议窗口到期且商家未提供证明，执行 ×2 赔付并关闭订单。
+    function finalizeExpiredDispute(
+        address _merchant,
+        uint256 _productId,
+        uint256 _orderId
+    ) external {
+        Product storage p = _getProduct(_merchant, _productId, AssetType.FIAT);
+        Order storage o = p.orders[_orderId];
+        if (o.status != OrderStatus.DISPUTED) revert NotDisputedOrder();
+        if (block.timestamp <= o.disputeDeadline) revert DisputeWindowNotExpired();
 
         _claimCompensation(p, o, _merchant, _orderId);
 
@@ -667,7 +811,46 @@ contract C2CEscrow {
 
         delete buyerOrderPaymentInfo[_merchant][_productId][_orderId];
 
+        emit DisputeFinalizedAsExpired(o.buyer, _merchant, _orderId, _productId, o.amount * 2);
         emit OrderStatusChanged(o.buyer, _merchant, _orderId, _productId, AssetType.FIAT, OrderStatus.EXPIRED, o.deadline);
+        _releaseActive(o.buyer, _merchant, p.assetType, _productId);
+        _cleanupExpired(p, _merchant);
+    }
+
+    /// @notice Admin 强制裁决争议订单。
+    /// @dev May only be called after `disputeDeadline` has passed, preserving the merchant's
+    ///      evidence window. This prevents the admin from pre-empting a legitimate proof
+    ///      submission while `resolveDisputeByMerchant` is still available.
+    /// @param settleToMerchant true = 释放给商家；false = 赔付给买家（×2）
+    function adminForceSettle(
+        address _merchant,
+        uint256 _productId,
+        uint256 _orderId,
+        bool settleToMerchant
+    ) external {
+        if (adminContract.admin() != msg.sender) revert OnlyAdmin();
+
+        Product storage p = _getProduct(_merchant, _productId, AssetType.FIAT);
+        Order storage o = p.orders[_orderId];
+        if (o.status != OrderStatus.DISPUTED) revert NotDisputedOrder();
+        if (block.timestamp <= o.disputeDeadline) revert DisputeWindowNotExpired();
+
+        if (settleToMerchant) {
+            address tokenAddress = _getTokenAddress(p.cryptoID);
+            IERC20(tokenAddress).safeTransfer(_merchant, o.amount);
+            p.buyerEscrowedAmount -= o.amount;
+            o.status = OrderStatus.COMPLETED;
+            emit OrderStatusChanged(o.buyer, _merchant, _orderId, _productId, AssetType.FIAT, OrderStatus.COMPLETED, o.deadline);
+        } else {
+            _claimCompensation(p, o, _merchant, _orderId);
+            o.status = OrderStatus.EXPIRED;
+            emit DisputeFinalizedAsExpired(o.buyer, _merchant, _orderId, _productId, o.amount * 2);
+            emit OrderStatusChanged(o.buyer, _merchant, _orderId, _productId, AssetType.FIAT, OrderStatus.EXPIRED, o.deadline);
+        }
+
+        p.pendingAmount -= o.amount;
+        p.activeOrderCount--;
+        delete buyerOrderPaymentInfo[_merchant][_productId][_orderId];
         _releaseActive(o.buyer, _merchant, p.assetType, _productId);
         _cleanupExpired(p, _merchant);
     }
@@ -694,11 +877,12 @@ contract C2CEscrow {
         uint256 rate,
         uint256 deadline,
         uint8 status,
-        uint32 rateVersion
+        uint32 rateVersion,
+        bytes32 platformTxId
     ) {
         Product storage p = _getProduct(_merchant, _productId, AssetType(_assetType));
         Order storage o = p.orders[_orderId];
-        return (o.buyer, o.amount, o.rate, o.deadline, uint8(o.status), o.rateVersion);
+        return (o.buyer, o.amount, o.rate, o.deadline, uint8(o.status), o.rateVersion, o.platformTxId);
     }
 
     /**
@@ -739,6 +923,12 @@ contract C2CEscrow {
             Order storage o = p.orders[oid];
 
             if (o.status != OrderStatus.PENDING && o.status != OrderStatus.WAITING) {
+                // 仅清理 PENDING / WAITING / EXPIRED 的过期订单，DISPUTED 需人工介入
+                if (o.status == OrderStatus.DISPUTED) {
+                    p.pendingOrderIds.dequeue();
+                    steps++;
+                    continue;
+                }
                 p.pendingOrderIds.dequeue();
                 delete buyerOrderPaymentInfo[merchant][p.productID][oid];
                 delete p.orders[oid];
