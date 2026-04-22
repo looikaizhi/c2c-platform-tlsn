@@ -2,12 +2,15 @@
 // Exchange-style advertisement list — shows all registered products from the contract.
 // Click a row to open ProductDetailModal with full info, order form, and confirmation.
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { keccak256, toBytes, parseAbiItem } from 'viem';
 import type { Hex } from 'viem';
-import { publicClient, userClients, USER_ADDRESSES } from '../utils/hardhatAccounts';
+import { publicClient, getUserClientByAddress } from '../utils/hardhatAccounts';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+import { getDemoUserAddresses } from '../utils/demoUsers';
+import { decodeContractError, formatContractAwareError } from '../utils/contractErrors';
+import { buildProofDebugSnapshot } from '../utils/proofTransformer';
 import {
   placeWiseCryptoOrder,
   placeWiseFiatOrder,
@@ -214,6 +217,10 @@ function fiatEstimate(rate: bigint, assetType: 0 | 1, usdtAmount: number, curr: 
   return `≈ ${fiat.toFixed(2)} ${curr}`;
 }
 
+function formatUserFacingError(err: unknown): string {
+  return formatContractAwareError(err);
+}
+
 function Spinner({ size = 14 }: { size?: number }) {
   return (
     <span style={{ display: 'inline-block', width: size, height: size }}>
@@ -251,13 +258,15 @@ function SkeletonRow() {
 function ConfirmDialog({
   card,
   amount,
-  userIdx,
+  userIndex,
+  userAddress,
   onConfirm,
   onCancel,
 }: {
   card:     ProductCard;
   amount:   string;
-  userIdx:  number;
+  userIndex: number;
+  userAddress: Hex;
   onConfirm: () => void;
   onCancel:  () => void;
 }) {
@@ -291,7 +300,7 @@ function ConfirmDialog({
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ color: COLOR.textSecondary }}>User</span>
-            <span>User {userIdx + 1} ({USER_ADDRESSES[userIdx].slice(0, 10)}…)</span>
+            <span>User {userIndex + 1} ({userAddress.slice(0, 10)}…)</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ color: COLOR.textSecondary }}>Amount</span>
@@ -333,7 +342,8 @@ function ProductDetailModal({
   card:    ProductCard;
   onClose: () => void;
 }) {
-  const [userIdx, setUserIdx]         = useState(0);
+  const demoUserAddresses = useMemo(() => getDemoUserAddresses(), []);
+  const [selectedUserAddress, setSelectedUserAddress] = useState<Hex | ''>(demoUserAddresses[0] ?? '');
   const [amount, setAmount]           = useState('1');
   const [buyerName, setBuyerName]     = useState('');
   const [buyerHandle, setBuyerHandle] = useState('');
@@ -342,6 +352,16 @@ function ProductDetailModal({
   const [showConfirm, setShowConfirm] = useState(false);
   const [done, setDone]               = useState(false);
   const [tokenDecimals, setTokenDecimals] = useState(18);
+
+  useEffect(() => {
+    if (demoUserAddresses.length === 0) {
+      setSelectedUserAddress('');
+      return;
+    }
+    const exists = !!selectedUserAddress
+      && demoUserAddresses.some((a) => a.toLowerCase() === selectedUserAddress.toLowerCase());
+    if (!exists) setSelectedUserAddress(demoUserAddresses[0]);
+  }, [demoUserAddresses, selectedUserAddress]);
 
   useEffect(() => {
     if (!c2cConfig.usdtAddress || c2cConfig.usdtAddress.length < 3) return;
@@ -355,71 +375,169 @@ function ProductDetailModal({
   const curr     = getCurrencyForPlatform(card.platformId);
   const usdtAmt  = parseFloat(amount) || 0;
   const estimate = fiatEstimate(card.rate, card.assetType, usdtAmt, curr);
+  const selectedUserIndex = demoUserAddresses.findIndex(
+    (a) => !!selectedUserAddress && a.toLowerCase() === selectedUserAddress.toLowerCase(),
+  );
 
   function addLog(msg: string, type: 'info' | 'error' | 'success' = 'info') {
     setLog((p) => [...p, { msg, type }]);
   }
 
   function validateForm(): string | null {
+    if (demoUserAddresses.length === 0) return 'No demo users found in .env. Deploy contracts first.';
+    if (!selectedUserAddress) return 'Please select a valid user.';
     if (!amount || usdtAmt <= 0) return 'Please enter a valid USDT amount.';
     if (card.direction === 'Fiat' && !buyerName.trim()) return `Please enter your ${card.platformName} display name.`;
     if (card.direction === 'Fiat' && !buyerHandle.trim()) return `Please enter your ${card.platformName} ${card.platformId === PLATFORM_WISE ? 'handle' : 'account'}.`;
     return null;
   }
 
-  function handlePlaceOrderClick() {
+  type PrecheckResult =
+    | {
+        ok: true;
+        buyerClient: any;
+        buyerAddr: Hex;
+        amountBig: bigint;
+      }
+    | {
+        ok: false;
+        message: string;
+      };
+
+  async function precheckOrder(): Promise<PrecheckResult> {
+    if (!selectedUserAddress) {
+      return { ok: false, message: 'Please select a user before placing the order.' };
+    }
+
+    const buyerClient = getUserClientByAddress(selectedUserAddress);
+    if (!buyerClient) {
+      return {
+        ok: false,
+        message: `Selected user ${selectedUserAddress.slice(0, 10)}… has no local signer mapping.`,
+      };
+    }
+
+    const amountBig = BigInt(Math.floor(usdtAmt * 10 ** tokenDecimals));
+    if (amountBig <= 0n) {
+      return { ok: false, message: 'Please enter a valid USDT amount.' };
+    }
+
+    if (!c2cConfig.usdtAddress || c2cConfig.usdtAddress.length < 3) {
+      return { ok: false, message: 'USDT contract address is missing. Re-deploy demo state first.' };
+    }
+
+    const [ethBalance, usdtBalance] = await Promise.all([
+      publicClient.getBalance({ address: selectedUserAddress }),
+      publicClient.readContract({
+        address: c2cConfig.usdtAddress,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [selectedUserAddress],
+      }) as Promise<bigint>,
+    ]);
+
+    if (ethBalance <= 0n) {
+      return {
+        ok: false,
+        message: `Selected user ${selectedUserAddress.slice(0, 10)}… has 0 ETH for gas.`,
+      };
+    }
+
+    if (usdtBalance < amountBig) {
+      return {
+        ok: false,
+        message: `Insufficient USDT balance. Need ${amountBig.toString()} raw units, have ${usdtBalance.toString()}.`,
+      };
+    }
+
+    if (card.direction === 'Fiat') {
+      const allowance = await publicClient.readContract({
+        address: c2cConfig.usdtAddress,
+        abi: ERC20_ABI,
+        functionName: 'allowance',
+        args: [selectedUserAddress, c2cConfig.escrowAddress],
+      }) as bigint;
+      if (allowance < amountBig) {
+        return {
+          ok: false,
+          message: `USDT allowance to escrow is too low (${allowance.toString()}). Required: ${amountBig.toString()}.`,
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      buyerClient,
+      buyerAddr: selectedUserAddress,
+      amountBig,
+    };
+  }
+
+  async function handlePlaceOrderClick() {
     const err = validateForm();
     if (err) { addLog(`⚠ ${err}`, 'error'); return; }
+
+    const precheck = await precheckOrder();
+    if (!precheck.ok) { addLog(`⚠ ${precheck.message}`, 'error'); return; }
+
     setShowConfirm(true);
   }
 
   async function handleConfirmedOrder() {
     setShowConfirm(false);
     setRunning(true);
+    let proofDiagnostics: unknown[] = [];
     try {
-      const buyerClient = userClients[userIdx] as any;
-      const buyerAddr   = USER_ADDRESSES[userIdx] as Hex;
-      const amountBig   = BigInt(Math.floor(usdtAmt * 10 ** tokenDecimals));
+      const precheck = await precheckOrder();
+      if (!precheck.ok) {
+        throw new Error(precheck.message);
+      }
+      const { buyerClient, buyerAddr, amountBig } = precheck;
 
       addLog(`Placing ${card.platformName}-${card.direction} order…`);
 
       if (card.platformId === PLATFORM_WISE && card.direction === 'Crypto') {
-        const { orderId, deadline: dl } = await placeWiseCryptoOrder(buyerClient, card.merchantAddr, amountBig);
+        const { orderId, deadline: dl } = await placeWiseCryptoOrder(buyerClient, card.merchantAddr, card.productId, amountBig);
         addLog(`Order placed — orderId=${orderId}  deadline=${new Date(Number(dl) * 1000).toLocaleTimeString()}`);
         addLog('Building binding context (reads rateVersion from chain)…');
-        const ctx = await makeWiseCryptoBindingContext(card.merchantAddr, buyerAddr, amountBig, orderId);
+        const ctx = await makeWiseCryptoBindingContext(card.merchantAddr, buyerAddr, card.productId, amountBig, orderId);
         addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
         addLog('Launching TLSN Wise plugin (contacts + transfer)…');
         const { contacts, transfer } = await generateWiseCryptoProof(ctx);
+        proofDiagnostics = await Promise.all([
+          buildProofDebugSnapshot(contacts),
+          buildProofDebugSnapshot(transfer),
+        ]);
         addLog('Proofs generated, submitting to contract…');
-        const txHash = await submitWiseCryptoProof(buyerClient, card.merchantAddr, orderId, contacts, transfer);
+        const txHash = await submitWiseCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, contacts, transfer);
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
         setDone(true);
 
       } else if (card.platformId === PLATFORM_WISE && card.direction === 'Fiat') {
         const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
         const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
-        const { orderId } = await placeWiseFiatOrder(buyerClient, card.merchantAddr, amountBig, buyerNameHash, buyerIdHash);
+        const { orderId } = await placeWiseFiatOrder(buyerClient, card.merchantAddr, card.productId, amountBig, buyerNameHash, buyerIdHash);
         addLog(`Order placed — orderId=${orderId}  USDT locked.`);
         addLog('Merchant must now pay MYR and submit Wise proof (see Merchant Panel).', 'success');
         setDone(true);
 
       } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Crypto') {
-        const { orderId } = await placeAlipayCryptoOrder(buyerClient, card.merchantAddr, amountBig);
+        const { orderId } = await placeAlipayCryptoOrder(buyerClient, card.merchantAddr, card.productId, amountBig);
         addLog(`Order placed — orderId=${orderId}`);
-        const ctx = await makeAlipayCryptoBindingContext(card.merchantAddr, buyerAddr, amountBig, orderId);
+        const ctx = await makeAlipayCryptoBindingContext(card.merchantAddr, buyerAddr, card.productId, amountBig, orderId);
         addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
         addLog('Launching TLSN Alipay plugin…');
         const proof = await generateAlipayCryptoProof(ctx);
+        proofDiagnostics = [await buildProofDebugSnapshot(proof)];
         addLog('Proof generated, submitting to contract…');
-        const txHash = await submitAlipayCryptoProof(buyerClient, card.merchantAddr, orderId, proof);
+        const txHash = await submitAlipayCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, proof);
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
         setDone(true);
 
       } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Fiat') {
         const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
         const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
-        const { orderId } = await placeAlipayFiatOrder(buyerClient, card.merchantAddr, amountBig, buyerNameHash, buyerIdHash);
+        const { orderId } = await placeAlipayFiatOrder(buyerClient, card.merchantAddr, card.productId, amountBig, buyerNameHash, buyerIdHash);
         addLog(`Order placed — orderId=${orderId}  USDT locked.`);
         addLog('Merchant must now pay CNY and submit Alipay proof (see Merchant Panel).', 'success');
         setDone(true);
@@ -427,8 +545,24 @@ function ProductDetailModal({
       } else {
         addLog(`Unsupported platform: ${card.platformName} (${card.platformId})`, 'error');
       }
-    } catch (err: any) {
-      addLog(`Error: ${err?.shortMessage ?? err?.message ?? String(err)}`, 'error');
+    } catch (err: unknown) {
+      if (proofDiagnostics.length > 0) {
+        for (let i = 0; i < proofDiagnostics.length; i += 1) {
+          addLog(`Proof#${i + 1} diagnostics: ${JSON.stringify(proofDiagnostics[i])}`, 'info');
+        }
+      }
+      const decoded = decodeContractError(err);
+      if (decoded) {
+        addLog(
+          `Contract revert decoded: ${decoded.errorName ?? 'UnknownCustomError'} (${decoded.selector})`,
+          'error',
+        );
+      }
+      const msg = formatUserFacingError(err);
+      addLog(`Error: ${msg}`, 'error');
+      if (card.direction === 'Crypto') {
+        addLog('If auto-submission failed, open UserPanel → Active Orders and use "Generate Payment Proof" to retry.', 'info');
+      }
     } finally {
       setRunning(false);
     }
@@ -506,14 +640,16 @@ function ProductDetailModal({
             <div>
               <label style={S.label}>Acting as user</label>
               <select
-                value={userIdx}
-                onChange={(e) => setUserIdx(Number(e.target.value))}
+                value={selectedUserAddress}
+                onChange={(e) => setSelectedUserAddress(e.target.value as Hex)}
                 style={{ ...S.select, width: '100%' }}
                 disabled={running}
               >
-                {USER_ADDRESSES.map((a, i) => (
-                  <option key={i} value={i}>User {i + 1} ({a.slice(0, 10)}…)</option>
-                ))}
+                {demoUserAddresses.length === 0
+                  ? <option value="">No users available</option>
+                  : demoUserAddresses.map((a, i) => (
+                      <option key={a} value={a}>User {i + 1} ({a.slice(0, 10)}…)</option>
+                    ))}
               </select>
             </div>
             <div>
@@ -564,13 +700,13 @@ function ProductDetailModal({
 
           {/* Action buttons */}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: log.length > 0 ? 16 : 0 }}>
-            <button
-              style={S.btn(COLOR.primary, running || !card.isOpen)}
-              disabled={running || !card.isOpen}
-              onClick={handlePlaceOrderClick}
-            >
-              {running ? <><Spinner />Processing…</> : 'Place Order'}
-            </button>
+              <button
+                style={S.btn(COLOR.primary, running || !card.isOpen || demoUserAddresses.length === 0)}
+                disabled={running || !card.isOpen || demoUserAddresses.length === 0}
+                onClick={handlePlaceOrderClick}
+              >
+                {running ? <><Spinner />Processing…</> : 'Place Order'}
+              </button>
             {!card.isOpen && (
               <span style={{ fontSize: 12, color: COLOR.danger }}>Merchant is currently closed</span>
             )}
@@ -612,7 +748,8 @@ function ProductDetailModal({
         <ConfirmDialog
           card={card}
           amount={amount}
-          userIdx={userIdx}
+          userIndex={selectedUserIndex >= 0 ? selectedUserIndex : 0}
+          userAddress={selectedUserAddress || (demoUserAddresses[0] as Hex)}
           onConfirm={handleConfirmedOrder}
           onCancel={() => setShowConfirm(false)}
         />

@@ -1,12 +1,23 @@
-import { useState, useEffect } from 'react';
-import { buildContractProof, type ExtensionProveResponse } from '../utils/proofTransformer';
-import { submitProofToContract, type SubmitAction } from '../utils/contractSubmitter';
-import { isContractConfigured } from '../utils/contractConfig';
-import { discoverWallets, type EIP6963ProviderDetail } from '../utils/walletDiscovery';
-import { config } from '../config';
+import { useEffect, useMemo, useState } from 'react';
 import type { Hex } from 'viem';
 
+import { config } from '../config';
+import {
+    buildContractProof,
+    buildProofDebugSnapshot,
+    type ExtensionProveResponse,
+} from '../utils/proofTransformer';
+import { submitProofToContract, type SubmitAction } from '../utils/contractSubmitter';
+import { isContractConfigured } from '../utils/contractConfig';
+import { formatContractAwareError } from '../utils/contractErrors';
+import { discoverWallets, type EIP6963ProviderDetail } from '../utils/walletDiscovery';
+
 type SubmitStatus = 'idle' | 'building' | 'confirming' | 'pending' | 'success' | 'error';
+
+type SubmitActionInput =
+    | { type: 'registerMerchant' }
+    | { type: 'payOrderByPlatform'; merchant: Hex; productId: bigint; orderId: bigint }
+    | { type: 'receiveCryptoWithPlatformPayment'; productId: bigint; orderId: bigint };
 
 interface ContractSubmitProps {
     proveResponse?: ExtensionProveResponse;
@@ -15,97 +26,243 @@ interface ContractSubmitProps {
         transfer: ExtensionProveResponse;
     };
     pluginKey: string;
+    submitAction?: SubmitActionInput;
 }
 
-export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKey }: ContractSubmitProps) {
+interface BuiltActionResult {
+    action: SubmitAction;
+    patchProofs: ExtensionProveResponse[];
+}
+
+function formatError(err: unknown): string {
+    return formatContractAwareError(err);
+}
+
+function collectSessionIds(proofs: ExtensionProveResponse[]): string[] {
+    const ids = new Set<string>();
+    for (const p of proofs) {
+        const sid = p.verifierSignature?.sessionId;
+        if (sid) ids.add(sid);
+    }
+    return [...ids];
+}
+
+function actionLabel(action?: SubmitActionInput): string {
+    if (!action) return 'N/A';
+    if (action.type === 'registerMerchant') return 'registerMerchant';
+    if (action.type === 'payOrderByPlatform') {
+        return `payOrderByPlatform(productId=${action.productId}, orderId=${action.orderId})`;
+    }
+    return `receiveCryptoWithPlatformPayment(productId=${action.productId}, orderId=${action.orderId})`;
+}
+
+function isProofReady(proof?: ExtensionProveResponse): boolean {
+    return !!proof?.verifierSignature && (proof?.transcriptCommitOpenings?.length ?? 0) > 0;
+}
+
+async function patchProofTxBacklink(
+    proofs: ExtensionProveResponse[],
+    txHash: Hex,
+    chainId: number,
+): Promise<{ patched: number; failed: number }> {
+    const sessionIds = collectSessionIds(proofs);
+    if (!sessionIds.length) return { patched: 0, failed: 0 };
+
+    let patched = 0;
+    let failed = 0;
+
+    await Promise.all(
+        sessionIds.map(async (sessionId) => {
+            try {
+                const resp = await fetch(`${config.verifierUrl}/proof/${sessionId}/tx`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ txHash, chainId }),
+                });
+                if (!resp.ok) {
+                    failed += 1;
+                    return;
+                }
+                patched += 1;
+            } catch {
+                failed += 1;
+            }
+        }),
+    );
+
+    return { patched, failed };
+}
+
+export function ContractSubmit({ proveResponse, wiseProofs, pluginKey, submitAction }: ContractSubmitProps) {
     const [status, setStatus] = useState<SubmitStatus>('idle');
     const [txHash, setTxHash] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [note, setNote] = useState<string | null>(null);
 
     const [wallets, setWallets] = useState<EIP6963ProviderDetail[]>([]);
     const [selectedWallet, setSelectedWallet] = useState<EIP6963ProviderDetail | null>(null);
 
     useEffect(() => {
-        // Small delay so wallets have time to announce via EIP-6963
         const timer = setTimeout(() => {
             const found = discoverWallets();
             setWallets(found);
-            // Auto-select MetaMask if available, otherwise first wallet
             const mm = found.find((w) => w.info.rdns === 'io.metamask');
             setSelectedWallet(mm ?? found[0] ?? null);
         }, 200);
         return () => clearTimeout(timer);
     }, []);
 
-    const singleProof = proveResponse;
-    const hasWiseProofs = wiseProofs?.contacts && wiseProofs?.transfer;
+    const hasWiseProofs = !!(wiseProofs?.contacts && wiseProofs?.transfer);
+    const hasSingleProof = !!proveResponse;
+
+    const proofReady = hasWiseProofs
+        ? isProofReady(wiseProofs?.contacts) && isProofReady(wiseProofs?.transfer)
+        : isProofReady(proveResponse);
+
+    const actionValidationError = useMemo(() => {
+        if (!hasWiseProofs && !hasSingleProof) {
+            return 'No proof available for submission.';
+        }
+
+        if (hasWiseProofs) {
+            if (!submitAction) {
+                return 'Wise proof submission requires submitAction context (merchant/productId/orderId).';
+            }
+            if (submitAction.type === 'registerMerchant') {
+                return 'Wise proof cannot be submitted with registerMerchant action.';
+            }
+            return null;
+        }
+
+        if (!submitAction && pluginKey !== 'binance') {
+            return 'Missing submitAction context for payment proof submission.';
+        }
+
+        return null;
+    }, [hasSingleProof, hasWiseProofs, pluginKey, submitAction]);
 
     const canSubmit =
         isContractConfigured() &&
-        (hasWiseProofs
-            ? wiseProofs.transfer.verifierSignature &&
-              (wiseProofs.transfer.transcriptCommitOpenings?.length ?? 0) > 0 &&
-              wiseProofs.contacts.verifierSignature &&
-              (wiseProofs.contacts.transcriptCommitOpenings?.length ?? 0) > 0
-            : singleProof?.verifierSignature &&
-              (singleProof?.transcriptCommitOpenings?.length ?? 0) > 0);
+        proofReady &&
+        !actionValidationError &&
+        !!selectedWallet?.provider;
+
+    function buildSubmitAction(): BuiltActionResult {
+        if (hasWiseProofs) {
+            if (!submitAction || submitAction.type === 'registerMerchant') {
+                throw new Error('Wise proof submission requires a payment action with order context.');
+            }
+
+            const contactsProof = buildContractProof(wiseProofs!.contacts);
+            const transferProof = buildContractProof(wiseProofs!.transfer);
+            const proofs = [contactsProof, transferProof];
+
+            if (submitAction.type === 'payOrderByPlatform') {
+                return {
+                    action: {
+                        type: 'payOrderByPlatform',
+                        merchant: submitAction.merchant,
+                        productId: submitAction.productId,
+                        orderId: submitAction.orderId,
+                        proofs,
+                    },
+                    patchProofs: [wiseProofs!.contacts, wiseProofs!.transfer],
+                };
+            }
+
+            return {
+                action: {
+                    type: 'receiveCryptoWithPlatformPayment',
+                    productId: submitAction.productId,
+                    orderId: submitAction.orderId,
+                    proofs,
+                },
+                patchProofs: [wiseProofs!.contacts, wiseProofs!.transfer],
+            };
+        }
+
+        if (!proveResponse) {
+            throw new Error('No proof to submit.');
+        }
+
+        const proof = buildContractProof(proveResponse);
+        const effectiveAction: SubmitActionInput = submitAction ?? { type: 'registerMerchant' };
+
+        if (effectiveAction.type === 'registerMerchant') {
+            return {
+                action: { type: 'registerMerchant', proof },
+                patchProofs: [proveResponse],
+            };
+        }
+
+        if (effectiveAction.type === 'payOrderByPlatform') {
+            return {
+                action: {
+                    type: 'payOrderByPlatform',
+                    merchant: effectiveAction.merchant,
+                    productId: effectiveAction.productId,
+                    orderId: effectiveAction.orderId,
+                    proofs: [proof],
+                },
+                patchProofs: [proveResponse],
+            };
+        }
+
+        return {
+            action: {
+                type: 'receiveCryptoWithPlatformPayment',
+                productId: effectiveAction.productId,
+                orderId: effectiveAction.orderId,
+                proofs: [proof],
+            },
+            patchProofs: [proveResponse],
+        };
+    }
 
     const handleSubmit = async () => {
+        let debugSnapshots: unknown[] = [];
         try {
             setError(null);
+            setNote(null);
+            setTxHash(null);
             setStatus('building');
 
             const provider = selectedWallet?.provider;
+            if (!provider) {
+                throw new Error('No wallet selected. Please select an available wallet first.');
+            }
 
-            // Fetch chainId once and reuse for both PATCH calls (EIP-1193)
+            const { action, patchProofs } = buildSubmitAction();
+            try {
+                debugSnapshots = await Promise.all(patchProofs.map((proof) => buildProofDebugSnapshot(proof)));
+            } catch {
+                debugSnapshots = [];
+            }
+            setStatus('confirming');
+
             const chainIdHex = await provider.request({ method: 'eth_chainId' });
             const chainId = parseInt(chainIdHex as string, 16);
 
-            if (hasWiseProofs) {
-                const contactsContractProof = buildContractProof(wiseProofs.contacts);
-                const transferContractProof = buildContractProof(wiseProofs.transfer);
+            const { hash, waitForReceipt } = await submitProofToContract(action, provider);
+            setTxHash(hash);
+            setStatus('pending');
+            await waitForReceipt();
 
-                setStatus('confirming');
-
-                const action: SubmitAction = {
-                    type: 'payOrderByWise',
-                    merchant: '0x0000000000000000000000000000000000000000' as Hex,
-                    productId: 0n,
-                    orderId: 0n,
-                    contactsProof: contactsContractProof,
-                };
-
-                const { hash } = await submitProofToContract(transferContractProof, action, provider);
-                setTxHash(hash);
-                const attestationId = wiseProofs?.transfer?.verifierSignature?.sessionId;
-                if (attestationId) {
-                    await fetch(`${config.verifierUrl}/proof/${attestationId}/tx`, {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ txHash: hash, chainId }),
-                    });
-                }
-            } else if (singleProof) {
-                const contractProof = buildContractProof(singleProof);
-
-                setStatus('confirming');
-
-                const action: SubmitAction = { type: 'registerMerchant' };
-                const { hash } = await submitProofToContract(contractProof, action, provider);
-                setTxHash(hash);
-                const attestationId = proveResponse?.verifierSignature?.sessionId;
-                if (attestationId) {
-                    await fetch(`${config.verifierUrl}/proof/${attestationId}/tx`, {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ txHash: hash, chainId }),
-                    });
-                }
+            const patchResult = await patchProofTxBacklink(patchProofs, hash, chainId);
+            if (patchResult.failed > 0) {
+                setNote(
+                    `Transaction submitted, but verifier tx backlink failed for ${patchResult.failed} proof session(s).`,
+                );
+            } else if (patchResult.patched > 0) {
+                setNote(`Verifier tx backlink updated for ${patchResult.patched} session(s).`);
             }
 
             setStatus('success');
-        } catch (err: any) {
-            setError(err.shortMessage || err.message || String(err));
+        } catch (err) {
+            setError(formatError(err));
+            if (debugSnapshots.length > 0) {
+                setNote(`Proof diagnostics: ${JSON.stringify(debugSnapshots)}`);
+            }
             setStatus('error');
         }
     };
@@ -129,7 +286,7 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
         );
     }
 
-    if (!canSubmit) {
+    if (!proofReady) {
         return (
             <div
                 style={{
@@ -149,6 +306,24 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
         );
     }
 
+    if (actionValidationError) {
+        return (
+            <div
+                style={{
+                    marginTop: '8px',
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    backgroundColor: '#fff3cd',
+                    color: '#856404',
+                    fontSize: '12px',
+                    border: '1px solid #ffeeba',
+                }}
+            >
+                {actionValidationError}
+            </div>
+        );
+    }
+
     const statusLabels: Record<SubmitStatus, string> = {
         idle: 'Submit to Contract',
         building: 'Building proof...',
@@ -162,7 +337,6 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
 
     return (
         <div style={{ marginTop: '8px' }}>
-            {/* Wallet selector */}
             {wallets.length > 1 && (
                 <div
                     style={{
@@ -204,7 +378,6 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
                 </div>
             )}
 
-            {/* Selected wallet indicator (when only 1 wallet) */}
             {wallets.length === 1 && selectedWallet && (
                 <div
                     style={{
@@ -225,9 +398,23 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
                 </div>
             )}
 
+            <div
+                style={{
+                    marginBottom: '8px',
+                    padding: '6px 8px',
+                    borderRadius: '4px',
+                    backgroundColor: '#f8f9fa',
+                    border: '1px solid #dee2e6',
+                    fontSize: '11px',
+                    color: '#6c757d',
+                }}
+            >
+                Action: {actionLabel(submitAction ?? (pluginKey === 'binance' ? { type: 'registerMerchant' } : undefined))}
+            </div>
+
             <button
                 onClick={handleSubmit}
-                disabled={isProcessing}
+                disabled={isProcessing || !canSubmit}
                 style={{
                     width: '100%',
                     padding: '8px 12px',
@@ -236,18 +423,19 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
                         status === 'success'
                             ? '#28a745'
                             : status === 'error'
-                              ? '#dc3545'
-                              : '#0d6efd',
+                                ? '#dc3545'
+                                : '#0d6efd',
                     color: 'white',
                     border: 'none',
-                    cursor: isProcessing ? 'not-allowed' : 'pointer',
+                    cursor: isProcessing || !canSubmit ? 'not-allowed' : 'pointer',
                     fontWeight: '600',
                     fontSize: '13px',
-                    opacity: isProcessing ? 0.7 : 1,
+                    opacity: isProcessing || !canSubmit ? 0.7 : 1,
                 }}
             >
                 {statusLabels[status]}
             </button>
+
             {txHash && (
                 <div
                     style={{
@@ -264,6 +452,24 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey: _pluginKe
                     TX: {txHash}
                 </div>
             )}
+
+            {note && (
+                <div
+                    style={{
+                        marginTop: '6px',
+                        padding: '6px 10px',
+                        borderRadius: '4px',
+                        backgroundColor: '#e7f1ff',
+                        color: '#084298',
+                        fontSize: '11px',
+                        wordBreak: 'break-word',
+                        border: '1px solid #b6d4fe',
+                    }}
+                >
+                    {note}
+                </div>
+            )}
+
             {error && (
                 <div
                     style={{

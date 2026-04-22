@@ -19,6 +19,7 @@ const PATH = '/enterprise/fundReportDetailQuery.json';
 const FULL_URL = `https://${HOST}${PATH}`;
 const LANDING_URL = 'https://b.alipay.com/page/mbillexprod/fund/business/operate/detail';
 const METHOD = 'POST'
+const TLSN_POLICY_VERSION = 'v1.0.0';
 
 // Following 0xtsukino's approach from issue #263
 function getJsonBody(request: any) {
@@ -43,7 +44,7 @@ function getFormBody(request: any) {
 const config = {
     name: 'Alipay Payment Detail',
     description: 'Verify Alipay payment transaction details: payer, payee, amount, status, and timestamp (selective disclosure of bizInfo fields).',
-    policyVersion: 'v1.0.0',
+    policyVersion: TLSN_POLICY_VERSION,
     requests: [
         {
             method: METHOD,

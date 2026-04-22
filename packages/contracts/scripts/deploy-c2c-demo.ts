@@ -24,7 +24,18 @@
  */
 
 import { network } from "hardhat";
-import { parseUnits, keccak256, toBytes } from "viem";
+import {
+  parseUnits,
+  parseEther,
+  keccak256,
+  toBytes,
+  createWalletClient,
+  createPublicClient,
+  http,
+  type Hex,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { hardhat as hardhatChain } from "viem/chains";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -33,8 +44,24 @@ import { performance } from "perf_hooks";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Rust verifier server signing address (accounts[9] — from KEYS in deployDemoState.ts)
-const VERIFIER_SIGNER_ADDRESS = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65";
+const RPC_URL = "http://127.0.0.1:8545";
+
+// Must stay aligned with packages/demo/src/utils/hardhatAccounts.ts
+const HARDHAT_PRIVATE_KEYS: Hex[] = [
+  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", // [0] Admin
+  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d", // [1] Merchant_1
+  "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a", // [2] Merchant_2
+  "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6", // [3] Merchant_3
+  "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a", // [4] User_1
+  "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba", // [5] User_2
+  "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e", // [6] User_3
+  "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356", // [7] User_4
+  "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97", // [8] User_5
+  "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6", // [9] verifierSigner
+];
+
+const VERIFIER_SIGNER_ADDRESS = privateKeyToAccount(HARDHAT_PRIVATE_KEYS[9]).address;
+const MIN_FUNDED_ETH = parseEther("20");
 
 // ── Rate constants (RATE_PRECISION_EXP = 8, so 4.5 MYR/USDT = 450_000_000) ──
 const RATE_WISE_CRYPTO   = 450_000_000n;  // 4.5  MYR / USDT
@@ -61,24 +88,31 @@ function elapsed(label: string, start: number): number {
   return ms;
 }
 
+function makeFixedWallet(index: number) {
+  return createWalletClient({
+    account: privateKeyToAccount(HARDHAT_PRIVATE_KEYS[index]),
+    chain: hardhatChain,
+    transport: http(RPC_URL),
+  });
+}
+
 async function main() {
   const tScript = performance.now();
 
   // ── Hardhat init ─────────────────────────────────────────────────────────────
   const tInit = performance.now();
   const { viem } = await network.connect();
-  const wallets = await viem.getWalletClients();
+  const rpcPublicClient = createPublicClient({
+    chain: hardhatChain,
+    transport: http(RPC_URL),
+  });
+  const nodeWallets = await viem.getWalletClients();
   elapsed("Hardhat init (connect + fetch wallet clients via RPC)", tInit);
 
-  // ── Account layout ───────────────────────────────────────────────────────────
-  const [
-    adminWallet,
-    merchant1Wallet, merchant2Wallet, merchant3Wallet,
-    user1Wallet, user2Wallet, user3Wallet, user4Wallet, user5Wallet,
-  ] = wallets;
-
-  const merchantWallets = [merchant1Wallet, merchant2Wallet, merchant3Wallet];
-  const userWallets     = [user1Wallet, user2Wallet, user3Wallet, user4Wallet, user5Wallet];
+  // Use node admin for deployment, but fixed private keys for merchant/user accounts.
+  const adminWallet = nodeWallets[0];
+  const merchantWallets = [makeFixedWallet(1), makeFixedWallet(2), makeFixedWallet(3)];
+  const userWallets     = [makeFixedWallet(4), makeFixedWallet(5), makeFixedWallet(6), makeFixedWallet(7), makeFixedWallet(8)];
 
   const adminAddr       = adminWallet.account.address;
   const merchantAddrs   = merchantWallets.map((w) => w.account.address);
@@ -90,6 +124,17 @@ async function main() {
   userAddrs.forEach((a, i) => console.log(`User ${i + 1}:     `, a));
   console.log("Verifier Signer:", VERIFIER_SIGNER_ADDRESS);
   console.log("");
+
+  // Ensure fixed merchant/user addresses are funded for tx gas.
+  const fundingTargets = [...merchantAddrs, ...userAddrs];
+  for (const target of fundingTargets) {
+    const bal = await rpcPublicClient.getBalance({ address: target });
+    if (bal >= MIN_FUNDED_ETH) continue;
+    const topUp = MIN_FUNDED_ETH - bal;
+    const txHash = await adminWallet.sendTransaction({ to: target, value: topUp });
+    await rpcPublicClient.waitForTransactionReceipt({ hash: txHash });
+  }
+  console.log(`✅ Ensured gas balances for ${fundingTargets.length} fixed merchant/user addresses`);
 
   const t0 = performance.now();
 
@@ -241,6 +286,20 @@ async function main() {
   console.log("✅ .env written to packages/demo/.env");
   console.log("=".repeat(60));
   console.log(envContent);
+
+  const expectedUserAddrs = HARDHAT_PRIVATE_KEYS.slice(4, 9).map((key) => privateKeyToAccount(key).address);
+  let allMatch = true;
+  console.log("Frontend expected users vs .env users:");
+  expectedUserAddrs.forEach((expected, i) => {
+    const written = userAddrs[i];
+    const ok = expected.toLowerCase() === written.toLowerCase();
+    if (!ok) allMatch = false;
+    console.log(`  User ${i + 1}: expected=${expected} written=${written} ${ok ? "✅" : "❌"}`);
+  });
+  if (!allMatch) {
+    throw new Error("User address mismatch: generated .env does not match frontend fixed signer keys.");
+  }
+  console.log("✅ User address consistency check passed");
 
   console.log("─".repeat(60));
   elapsed("TOTAL deployment only (t0 → .env written)", t0);

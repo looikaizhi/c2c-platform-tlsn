@@ -18,6 +18,7 @@ const TRANSFER_ORDER_BINDING_HASH = '0x00000000000000000000000000000000000000000
 const HOST = 'wise.com';
 const METHOD = 'GET';
 const LANDING_URL = 'https://wise.com/home';
+const TLSN_POLICY_VERSION = 'v1.0.0';
 
 const CONTACTS_PATHNAME = '/gateway/v2/profiles/*/contacts';
 const TRANSFER_PATHNAME = '/gateway/v3/profiles/*/transfers/*';
@@ -29,7 +30,7 @@ type Endpoint = typeof ENDPOINT_CONTACTS | typeof ENDPOINT_TRANSFER;
 const config = {
     name: 'Wise Contacts + Transfer Prover',
     description: 'Prove your Wise contacts and transfer responses.',
-    policyVersion: 'v1.0.0',
+    policyVersion: TLSN_POLICY_VERSION,
     requests: [
         {
             method: METHOD,

@@ -3,7 +3,7 @@
  * TLSNProof struct that can be submitted to the smart contract.
  */
 
-import { keccak256, encodePacked } from 'viem';
+import { encodePacked, hashMessage, keccak256, recoverAddress, toBytes } from 'viem';
 import type { Hex } from 'viem';
 
 // ── Types matching the contract's TLSNProof struct ──
@@ -66,6 +66,10 @@ export interface ExtensionProveResponse {
         commitmentsHash: string;
         /** Order-binding hash echoed from verifier (0x-prefixed). Present when plugin passed it in sessionData. */
         orderBindingHash?: string;
+        /** Policy version string used by verifier, e.g. "v1.0.0". */
+        policyVersion?: string;
+        /** keccak256(policyVersion UTF-8), 0x-prefixed bytes32. */
+        policyVersionHash?: string;
         signature: string;
         verifierAddress: string;
     };
@@ -231,6 +235,59 @@ function ensureHexPrefix(hex: string): Hex {
     return (hex.startsWith('0x') ? hex : `0x${hex}`) as Hex;
 }
 
+function isBytes32Hex(value: string): value is Hex {
+    return /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+
+function resolvePolicyVersionHash(sig: NonNullable<ExtensionProveResponse['verifierSignature']>): {
+    policyVersionHash: Hex;
+    policyVersion?: string;
+} {
+    const policyVersion = sig.policyVersion?.trim();
+    const rawPolicyHash = sig.policyVersionHash?.trim();
+
+    let providedHash: Hex | undefined;
+    if (rawPolicyHash) {
+        const normalized = ensureHexPrefix(rawPolicyHash);
+        if (!isBytes32Hex(normalized)) {
+            throw new Error(
+                `verifierSignature.policyVersionHash must be a valid bytes32 hex string, got: ${rawPolicyHash}`,
+            );
+        }
+        providedHash = normalized.toLowerCase() as Hex;
+    }
+
+    if (providedHash && policyVersion) {
+        const computed = keccak256(toBytes(policyVersion)).toLowerCase() as Hex;
+        if (computed !== providedHash) {
+            throw new Error(
+                [
+                    'Policy version signature mismatch.',
+                    `policyVersion=${policyVersion}`,
+                    `computedHash=${computed}`,
+                    `providedHash=${providedHash}`,
+                ].join(' '),
+            );
+        }
+        return { policyVersionHash: providedHash, policyVersion };
+    }
+
+    if (providedHash) {
+        return { policyVersionHash: providedHash, policyVersion };
+    }
+
+    if (policyVersion) {
+        return {
+            policyVersionHash: keccak256(toBytes(policyVersion)).toLowerCase() as Hex,
+            policyVersion,
+        };
+    }
+
+    throw new Error(
+        'Missing verifier policy metadata: neither verifierSignature.policyVersionHash nor verifierSignature.policyVersion is present.',
+    );
+}
+
 function mapDirection(dir: string): string {
     // Extension outputs "SENT"/"RECV", contract tests use "Sent"/"Recv"
     if (dir === 'RECV') return 'Recv';
@@ -260,6 +317,7 @@ export function buildContractProof(response: ExtensionProveResponse): ContractTL
     }
 
     const sig = response.verifierSignature;
+    const { policyVersionHash } = resolvePolicyVersionHash(sig);
 
     const revealedItems = response.results.map((r) => ({
         handlerType: r.type,
@@ -287,12 +345,64 @@ export function buildContractProof(response: ExtensionProveResponse): ContractTL
         sessionId: sig.sessionId,
         commitmentsHash: ensureHexPrefix(sig.commitmentsHash),
         orderBindingHash: ensureHexPrefix(sig.orderBindingHash ?? ''),
-        policyVersionHash: ((sig as any).policyVersionHash
-            ?? ('0x' + '0'.repeat(64))) as Hex,
+        policyVersionHash,
         verifierSignature: ensureHexPrefix(sig.signature),
         revealedItems,
         commitmentOpenings,
         commitments,
         serverName: response.serverName ?? '',
     };
+}
+
+export interface ProofDebugSnapshot {
+    sessionId: string;
+    chainId: string;
+    orderBindingHash: Hex;
+    policyVersion?: string;
+    policyVersionHash: Hex;
+    recoveredSigner?: Hex;
+    recoveryError?: string;
+}
+
+export async function recoverVerifierSignerFromProof(proof: ContractTLSNProof): Promise<Hex> {
+    const sessionIdHash = keccak256(toBytes(proof.sessionId));
+    const messageHash = keccak256(
+        encodePacked(
+            ['uint64', 'bytes32', 'bytes32', 'bytes32', 'bytes32'],
+            [
+                proof.chainId,
+                sessionIdHash,
+                proof.commitmentsHash,
+                proof.orderBindingHash,
+                proof.policyVersionHash,
+            ],
+        ),
+    );
+    const ethSignedMessageHash = hashMessage({ raw: messageHash });
+    const recovered = await recoverAddress({
+        hash: ethSignedMessageHash,
+        signature: proof.verifierSignature,
+    });
+    return recovered.toLowerCase() as Hex;
+}
+
+export async function buildProofDebugSnapshot(response: ExtensionProveResponse): Promise<ProofDebugSnapshot> {
+    const sig = response.verifierSignature;
+    if (!sig) {
+        throw new Error('Cannot build proof diagnostics: verifierSignature is missing.');
+    }
+    const contractProof = buildContractProof(response);
+    const snapshot: ProofDebugSnapshot = {
+        sessionId: contractProof.sessionId,
+        chainId: contractProof.chainId.toString(),
+        orderBindingHash: contractProof.orderBindingHash,
+        policyVersion: sig.policyVersion,
+        policyVersionHash: contractProof.policyVersionHash,
+    };
+    try {
+        snapshot.recoveredSigner = await recoverVerifierSignerFromProof(contractProof);
+    } catch (err) {
+        snapshot.recoveryError = (err as any)?.message ?? String(err);
+    }
+    return snapshot;
 }

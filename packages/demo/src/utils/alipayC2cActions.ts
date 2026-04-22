@@ -10,7 +10,10 @@ import type { Hex } from 'viem';
 import { publicClient } from './hardhatAccounts';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from './c2cAbi';
 import { c2cConfig } from './c2cContractConfig';
+import { normalizeOrder, type OrderView } from './orderView';
+import { decodeContractError, formatContractAwareError } from './contractErrors';
 import {
+  buildProofDebugSnapshot,
   buildContractProof,
   computeOrderBindingHash,
   injectOrderBindingHash,
@@ -65,20 +68,14 @@ export async function getOrder(
   productId: bigint,
   assetType: 0 | 1,
   orderId: bigint,
-): Promise<{
-  buyer: `0x${string}`;
-  amount: bigint;
-  rate: bigint;
-  deadline: bigint;
-  status: number;
-  rateVersion: number;
-}> {
-  return publicClient.readContract({
+): Promise<OrderView> {
+  const raw = await publicClient.readContract({
     address: c2cConfig.escrowAddress,
     abi: C2C_ESCROW_ABI,
     functionName: 'getOrder',
     args: [merchantAddress, productId, assetType, orderId],
-  }) as Promise<any>;
+  });
+  return normalizeOrder(raw);
 }
 
 export async function getBuyerUsdtBalance(): Promise<bigint> {
@@ -108,13 +105,14 @@ export async function getMerchantUsdtBalance(): Promise<bigint> {
 export async function placeAlipayCryptoOrder(
   buyerClient: any,
   merchantAddress: `0x${string}`,
+  productId: bigint,
   amount: bigint,
 ): Promise<{ orderId: bigint; deadline: bigint; txHash: Hex }> {
   const hash = await buyerClient.writeContract({
     address: c2cConfig.escrowAddress,
     abi: C2C_ESCROW_ABI,
     functionName: 'placeOrder',
-    args: [merchantAddress, ALIPAY_CRYPTO_PRODUCT_ID, 0 /* CRYPTO */, amount, NULL_BUYER_INFO],
+    args: [merchantAddress, productId, 0 /* CRYPTO */, amount, NULL_BUYER_INFO],
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
@@ -137,12 +135,13 @@ export async function placeAlipayCryptoOrder(
 export async function makeAlipayCryptoBindingContext(
   merchantAddress: `0x${string}`,
   buyerAddress: `0x${string}`,
+  productId: bigint,
   amount: bigint,
   orderId: bigint,
 ): Promise<OrderBindingContext> {
   const [merchantInfo, order] = await Promise.all([
     getAlipayMerchantInfo(merchantAddress),
-    getOrder(merchantAddress, ALIPAY_CRYPTO_PRODUCT_ID, 0, orderId),
+    getOrder(merchantAddress, productId, 0, orderId),
   ]);
 
   return {
@@ -150,7 +149,7 @@ export async function makeAlipayCryptoBindingContext(
     chainId:          31337,
     merchant:         merchantAddress,
     buyer:            buyerAddress,
-    productId:        ALIPAY_CRYPTO_PRODUCT_ID,
+    productId,
     orderId,
     assetType:        0, // CRYPTO
     amount,
@@ -177,22 +176,34 @@ export async function generateAlipayCryptoProof(ctx: OrderBindingContext): Promi
 export async function submitAlipayCryptoProof(
   buyerClient: any,
   merchantAddress: `0x${string}`,
+  productId: bigint,
   orderId: bigint,
   proof: ExtensionProveResponse,
 ): Promise<Hex> {
-  const hash = await buyerClient.writeContract({
-    address: c2cConfig.escrowAddress,
-    abi: C2C_ESCROW_ABI,
-    functionName: 'payOrderByPlatform',
-    args: [
-      merchantAddress,
-      ALIPAY_CRYPTO_PRODUCT_ID,
-      orderId,
-      [buildContractProof(proof)] as any,
-    ],
-  });
-  await publicClient.waitForTransactionReceipt({ hash });
-  return hash;
+  const contractProofs = [buildContractProof(proof)] as any;
+  const diagnostics = [await buildProofDebugSnapshot(proof)];
+  try {
+    const hash = await buyerClient.writeContract({
+      address: c2cConfig.escrowAddress,
+      abi: C2C_ESCROW_ABI,
+      functionName: 'payOrderByPlatform',
+      args: [merchantAddress, productId, orderId, contractProofs],
+    });
+    await publicClient.waitForTransactionReceipt({ hash });
+    return hash;
+  } catch (err) {
+    const decoded = decodeContractError(err);
+    const summary = decoded
+      ? `${decoded.errorName ?? 'UnknownCustomError'} (${decoded.selector})`
+      : 'Unknown contract error';
+    throw new Error(
+      [
+        `payOrderByPlatform failed: ${summary}`,
+        `diagnostics=${JSON.stringify(diagnostics)}`,
+        `raw=${formatContractAwareError(err)}`,
+      ].join(' | '),
+    );
+  }
 }
 
 // ─── Flow B: Alipay-Fiat (buyer locks USDT, merchant pays CNY, receives USDT) ─
@@ -235,11 +246,12 @@ async function resolveFiatProductCryptoToken(
 export async function placeAlipayFiatOrder(
   buyerClient: any,
   merchantAddress: `0x${string}`,
+  productId: bigint,
   amount: bigint,
   buyerNameHash: `0x${string}`,
   buyerIdHash: `0x${string}`,
 ): Promise<{ orderId: bigint; deadline: bigint; txHash: Hex }> {
-  const tokenAddress = await resolveFiatProductCryptoToken(merchantAddress, ALIPAY_FIAT_PRODUCT_ID);
+  const tokenAddress = await resolveFiatProductCryptoToken(merchantAddress, productId);
   // Approve crypto token for escrow — FIAT branch locks tokens immediately in placeOrder
   await publicClient.waitForTransactionReceipt({
     hash: await buyerClient.writeContract({
@@ -255,7 +267,7 @@ export async function placeAlipayFiatOrder(
     address: c2cConfig.escrowAddress,
     abi: C2C_ESCROW_ABI,
     functionName: 'placeOrder',
-    args: [merchantAddress, ALIPAY_FIAT_PRODUCT_ID, 1 /* FIAT */, amount, buyerInfo],
+    args: [merchantAddress, productId, 1 /* FIAT */, amount, buyerInfo],
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
@@ -278,17 +290,18 @@ export async function placeAlipayFiatOrder(
 export async function makeAlipayFiatBindingContext(
   merchantAddress: `0x${string}`,
   buyerAddress: `0x${string}`,
+  productId: bigint,
   amount: bigint,
   orderId: bigint,
 ): Promise<OrderBindingContext> {
   const [merchantInfo, order, buyerInfo] = await Promise.all([
     getAlipayMerchantInfo(merchantAddress),
-    getOrder(merchantAddress, ALIPAY_FIAT_PRODUCT_ID, 1, orderId),
+    getOrder(merchantAddress, productId, 1, orderId),
     publicClient.readContract({
       address: c2cConfig.escrowAddress,
       abi: C2C_ESCROW_ABI,
       functionName: 'getBuyerPaymentInfo',
-      args: [merchantAddress, ALIPAY_FIAT_PRODUCT_ID, orderId],
+      args: [merchantAddress, productId, orderId],
     }) as Promise<{ nameHash: `0x${string}`; idHash: `0x${string}`; isSet: boolean }>,
   ]);
 
@@ -297,7 +310,7 @@ export async function makeAlipayFiatBindingContext(
     chainId:          31337,
     merchant:         merchantAddress,
     buyer:            buyerAddress,
-    productId:        ALIPAY_FIAT_PRODUCT_ID,
+    productId,
     orderId,
     assetType:        1, // FIAT
     amount,
@@ -323,17 +336,34 @@ export async function generateAlipayFiatProof(ctx: OrderBindingContext): Promise
  */
 export async function submitAlipayFiatProof(
   merchantClient: any,
+  productId: bigint,
   orderId: bigint,
   proof: ExtensionProveResponse,
 ): Promise<Hex> {
-  const hash = await merchantClient.writeContract({
-    address: c2cConfig.escrowAddress,
-    abi: C2C_ESCROW_ABI,
-    functionName: 'receiveCryptoWithPlatformPayment',
-    args: [ALIPAY_FIAT_PRODUCT_ID, orderId, [buildContractProof(proof)] as any],
-  });
-  await publicClient.waitForTransactionReceipt({ hash });
-  return hash;
+  const contractProofs = [buildContractProof(proof)] as any;
+  const diagnostics = [await buildProofDebugSnapshot(proof)];
+  try {
+    const hash = await merchantClient.writeContract({
+      address: c2cConfig.escrowAddress,
+      abi: C2C_ESCROW_ABI,
+      functionName: 'receiveCryptoWithPlatformPayment',
+      args: [productId, orderId, contractProofs],
+    });
+    await publicClient.waitForTransactionReceipt({ hash });
+    return hash;
+  } catch (err) {
+    const decoded = decodeContractError(err);
+    const summary = decoded
+      ? `${decoded.errorName ?? 'UnknownCustomError'} (${decoded.selector})`
+      : 'Unknown contract error';
+    throw new Error(
+      [
+        `receiveCryptoWithPlatformPayment failed: ${summary}`,
+        `diagnostics=${JSON.stringify(diagnostics)}`,
+        `raw=${formatContractAwareError(err)}`,
+      ].join(' | '),
+    );
+  }
 }
 
 // ─── Backward-compatible exports for legacy AlipayC2CDemoFlow ─────────────────
@@ -364,37 +394,37 @@ export async function setupCryptoToFiat(
 }
 
 export async function placeFiatToCryptoOrder(
-  _productId: bigint,
+  productId: bigint,
 ): Promise<{ orderId: bigint; deadline: bigint; txHash: Hex }> {
   const { buyerClient: bc, merchantClient: mc } = await import('./hardhatAccounts');
-  return placeAlipayCryptoOrder(bc, mc.account!.address, 1_000_000_000_000_000_000n);
+  return placeAlipayCryptoOrder(bc, mc.account!.address, productId, 1_000_000_000_000_000_000n);
 }
 
 export async function placeCryptoToFiatOrder(
-  _productId: bigint,
+  productId: bigint,
   buyerNameHash: `0x${string}`,
   buyerIdHash: `0x${string}`,
 ): Promise<{ orderId: bigint; deadline: bigint; txHash: Hex }> {
   const { buyerClient: bc, merchantClient: mc } = await import('./hardhatAccounts');
-  return placeAlipayFiatOrder(bc, mc.account!.address, 1_000_000_000_000_000_000n, buyerNameHash, buyerIdHash);
+  return placeAlipayFiatOrder(bc, mc.account!.address, productId, 1_000_000_000_000_000_000n, buyerNameHash, buyerIdHash);
 }
 
 export async function makeFiatToCryptoBindingContext(
-  _productId: bigint,
+  productId: bigint,
   orderId: bigint,
   _deadline: bigint,
 ): Promise<OrderBindingContext> {
   const { merchantClient: mc, buyerClient: bc } = await import('./hardhatAccounts');
-  return makeAlipayCryptoBindingContext(mc.account!.address, bc.account!.address, 1_000_000_000_000_000_000n, orderId);
+  return makeAlipayCryptoBindingContext(mc.account!.address, bc.account!.address, productId, 1_000_000_000_000_000_000n, orderId);
 }
 
 export async function makeCryptoToFiatBindingContext(
-  _productId: bigint,
+  productId: bigint,
   orderId: bigint,
   _deadline: bigint,
 ): Promise<OrderBindingContext> {
   const { merchantClient: mc, buyerClient: bc } = await import('./hardhatAccounts');
-  return makeAlipayFiatBindingContext(mc.account!.address, bc.account!.address, 1_000_000_000_000_000_000n, orderId);
+  return makeAlipayFiatBindingContext(mc.account!.address, bc.account!.address, productId, 1_000_000_000_000_000_000n, orderId);
 }
 
 export async function generateAlipayBuyerProof(ctx: OrderBindingContext): Promise<ExtensionProveResponse> {
@@ -407,20 +437,20 @@ export async function generateAlipayMerchantProof(ctx: OrderBindingContext): Pro
 
 export async function submitBuyerAlipayProof(
   proof: ExtensionProveResponse,
-  _productId: bigint,
+  productId: bigint,
   orderId: bigint,
 ): Promise<Hex> {
   const { buyerClient: bc, merchantClient: mc } = await import('./hardhatAccounts');
-  return submitAlipayCryptoProof(bc, mc.account!.address, orderId, proof);
+  return submitAlipayCryptoProof(bc, mc.account!.address, productId, orderId, proof);
 }
 
 export async function submitMerchantAlipayReceivedProof(
   proof: ExtensionProveResponse,
-  _productId: bigint,
+  productId: bigint,
   orderId: bigint,
 ): Promise<Hex> {
   const { merchantClient: mc } = await import('./hardhatAccounts');
-  return submitAlipayFiatProof(mc, orderId, proof);
+  return submitAlipayFiatProof(mc, productId, orderId, proof);
 }
 
 /** @deprecated escrowBuyerCrypto is now merged into placeOrder FIAT branch */

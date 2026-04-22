@@ -44,6 +44,18 @@ async fn main() {
         .with_line_number(true)
         .init();
 
+    // Load environment variables from .env (without overriding already-set env vars)
+    let _ = dotenvy::dotenv();
+
+    let verifier_address = match load_verifier_signer_from_env() {
+        Ok((_signing_key, address)) => address,
+        Err(e) => {
+            error!("Verifier signer initialization failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+    info!("Verifier signer address: {}", verifier_address);
+
     // Load configuration from YAML file
     let config = Config::load(StdPath::new("config.yaml"));
     info!(
@@ -282,6 +294,8 @@ struct VerifierSignature {
     /// Policy version locked into this signature (R.15)
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_version: Option<String>,
+    /// keccak256(policyVersion UTF-8), or 0x00..00 when policyVersion is absent
+    policy_version_hash: String,
 }
 
 // Verification result containing handler results
@@ -1657,61 +1671,48 @@ async fn run_verifier_task(
                 .then(|| summarize_verifier_transcript(&transcript));
 
             // Sign transcript commitments with verifier private key (optional) — BEFORE webhook
-            let verifier_signature = match std::env::var("VERIFIER_PRIVATE_KEY") {
-                Ok(hex_key) => {
-                    match hex::decode(&hex_key)
-                        .map_err(|e| eyre::eyre!("bad VERIFIER_PRIVATE_KEY hex: {}", e))
-                        .and_then(|b| {
-                            SigningKey::from_slice(&b)
-                                .map_err(|e| eyre::eyre!("invalid private key: {}", e))
-                        }) {
-                        Ok(signing_key) => {
-                            let chain_id: u64 = std::env::var("CHAIN_ID")
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(11155111); // Sepolia
+            let verifier_signature = match load_verifier_signer_from_env() {
+                Ok((signing_key, _verifier_address)) => {
+                    let chain_id: u64 = std::env::var("CHAIN_ID")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(11155111); // Sepolia
 
-                            match sign_commitments(
-                                &signing_key,
-                                chain_id,
-                                &session_id,
-                                &transcript_commitments,
-                                order_binding_hash_bytes,
-                                policy_version.as_deref(),
-                            ) {
-                                Ok(sig) => {
-                                    info!(
-                                        "[{}] ✅ Commitments signed, verifier={}",
-                                        session_id, sig.verifier_address
-                                    );
-                                    Some(sig)
-                                }
-                                Err(e) => {
-                                    error!("[{}] ❌ Sign failed: {}", session_id, e);
-                                    None
-                                }
-                            }
+                    match sign_commitments(
+                        &signing_key,
+                        chain_id,
+                        &session_id,
+                        &transcript_commitments,
+                        order_binding_hash_bytes,
+                        policy_version.as_deref(),
+                    ) {
+                        Ok(sig) => {
+                            info!(
+                                "[{}] ✅ Commitments signed, verifier={}",
+                                session_id, sig.verifier_address
+                            );
+                            Some(sig)
                         }
                         Err(e) => {
-                            error!("[{}] Key load failed: {}", session_id, e);
+                            error!("[{}] ❌ Sign failed: {}", session_id, e);
                             None
                         }
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     if order_binding_hash_bytes.is_some() {
                         error!(
-                            "[{}] ❌ VERIFIER_PRIVATE_KEY not set but orderBindingHash present — \
+                            "[{}] ❌ Verifier signing key unavailable ({}) but orderBindingHash present — \
                              refusing to produce unsigned proof for on-chain flow",
-                            session_id
+                            session_id, e
                         );
                         // Drop result_tx without sending → session handler delivers
                         // "Verification failed" error to the extension (fail-closed).
                         return;
                     } else {
                         warn!(
-                            "[{}] VERIFIER_PRIVATE_KEY not set, skipping signature (dev/test mode)",
-                            session_id
+                            "[{}] Verifier signing key unavailable ({}), skipping signature",
+                            session_id, e
                         );
                         None
                     }
@@ -2319,6 +2320,42 @@ pub(crate) async fn test_seed_proof_handler(
     }
 }
 
+/// Parse verifier private key from hex string into a secp256k1 signing key.
+/// Accepts either 64-hex chars or 0x-prefixed 64-hex chars.
+pub(crate) fn parse_verifier_private_key(raw: &str) -> Result<SigningKey, eyre::ErrReport> {
+    let normalized = raw.trim();
+    let hex_key = normalized
+        .strip_prefix("0x")
+        .or_else(|| normalized.strip_prefix("0X"))
+        .unwrap_or(normalized);
+
+    if hex_key.len() != 64 {
+        return Err(eyre::eyre!(
+            "VERIFIER_PRIVATE_KEY must be exactly 64 hex chars (32 bytes), got {}",
+            hex_key.len()
+        ));
+    }
+
+    if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(eyre::eyre!(
+            "VERIFIER_PRIVATE_KEY contains non-hex characters"
+        ));
+    }
+
+    let key_bytes = hex::decode(hex_key)
+        .map_err(|e| eyre::eyre!("bad VERIFIER_PRIVATE_KEY hex: {}", e))?;
+    SigningKey::from_slice(&key_bytes).map_err(|e| eyre::eyre!("invalid private key: {}", e))
+}
+
+/// Load verifier signing key from VERIFIER_PRIVATE_KEY and derive its Ethereum address.
+pub(crate) fn load_verifier_signer_from_env() -> Result<(SigningKey, String), eyre::ErrReport> {
+    let raw_key = std::env::var("VERIFIER_PRIVATE_KEY")
+        .map_err(|_| eyre::eyre!("VERIFIER_PRIVATE_KEY is not set"))?;
+    let signing_key = parse_verifier_private_key(&raw_key)?;
+    let verifier_address = eth_address_from_signing_key(&signing_key);
+    Ok((signing_key, verifier_address))
+}
+
 /// Derive an Ethereum address from a secp256k1 signing key.
 /// Address = keccak256(uncompressed_pubkey[1..])[12..] (last 20 bytes), 0x-prefixed.
 fn eth_address_from_signing_key(signing_key: &SigningKey) -> String {
@@ -2408,5 +2445,6 @@ pub(crate) fn sign_commitments(
         signature: hex::encode(&sig65),
         verifier_address: eth_address_from_signing_key(signing_key),
         policy_version: policy_version.map(|s| s.to_string()),
+        policy_version_hash: format!("0x{}", hex::encode(policy_version_hash)),
     })
 }

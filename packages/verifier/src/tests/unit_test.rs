@@ -1,9 +1,11 @@
 use crate::{
     build_slim_webhook_payload, compute_hmac_sha256, current_timestamp_str, format_rfc3339,
     init_db, insert_proof_record, get_proof_by_session_id, get_proof_by_tx_hash, patch_tx_hash,
-    record_to_response, retain_until_str, Handler, HandlerPart, HandlerResult, HandlerType,
-    ProofExportRecord, VerifierSignature,
+    load_verifier_signer_from_env, parse_verifier_private_key, record_to_response,
+    retain_until_str, Handler, HandlerPart, HandlerResult, HandlerType, ProofExportRecord,
+    VerifierSignature,
 };
+use std::sync::{Mutex, OnceLock};
 
 // ============================================================================
 // HMAC-SHA256 tests (R.11 webhook security)
@@ -253,6 +255,12 @@ fn test_sign_commitments_includes_policy_version() {
 
     assert_eq!(sig_with_pv.policy_version, Some("v1.0.0".to_string()));
     assert_eq!(sig_no_pv.policy_version, None);
+    assert_eq!(sig_no_pv.policy_version_hash, format!("0x{}", "00".repeat(32)));
+    assert_ne!(
+        sig_with_pv.policy_version_hash,
+        sig_no_pv.policy_version_hash,
+        "Different policyVersion must produce different policyVersionHash values",
+    );
     assert_ne!(sig_with_pv.signature, sig_no_pv.signature,
         "Different policyVersion must produce different signatures");
 }
@@ -271,8 +279,99 @@ fn test_sign_commitments_same_policy_version_is_deterministic() {
     let sig2 = sign_commitments(&signing_key, 1, "sess", &commitments, None, Some("v1.0.0"))
         .expect("signing should succeed");
 
+    assert_eq!(
+        sig1.policy_version_hash, sig2.policy_version_hash,
+        "Same policyVersion must produce same policyVersionHash",
+    );
     assert_eq!(sig1.signature, sig2.signature,
         "Same inputs must produce same signature (deterministic ECDSA)");
+}
+
+// ============================================================================
+// VERIFIER_PRIVATE_KEY parsing/loading tests
+// ============================================================================
+
+fn verifier_env_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct VerifierKeyEnvGuard {
+    original: Option<String>,
+}
+
+impl VerifierKeyEnvGuard {
+    fn set(temp_value: Option<&str>) -> Self {
+        let original = std::env::var("VERIFIER_PRIVATE_KEY").ok();
+        match temp_value {
+            Some(v) => std::env::set_var("VERIFIER_PRIVATE_KEY", v),
+            None => std::env::remove_var("VERIFIER_PRIVATE_KEY"),
+        }
+        Self { original }
+    }
+}
+
+impl Drop for VerifierKeyEnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(v) => std::env::set_var("VERIFIER_PRIVATE_KEY", v),
+            None => std::env::remove_var("VERIFIER_PRIVATE_KEY"),
+        }
+    }
+}
+
+#[test]
+fn test_parse_verifier_private_key_accepts_64_hex_without_prefix() {
+    let key = "2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6";
+    let result = parse_verifier_private_key(key);
+    assert!(result.is_ok(), "64-char hex key without prefix should parse");
+}
+
+#[test]
+fn test_parse_verifier_private_key_accepts_0x_prefixed_64_hex() {
+    let key = "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6";
+    let result = parse_verifier_private_key(key);
+    assert!(result.is_ok(), "0x-prefixed 64-char hex key should parse");
+}
+
+#[test]
+fn test_parse_verifier_private_key_rejects_invalid_length() {
+    let key = "ab".repeat(33); // 66 hex chars
+    let err = parse_verifier_private_key(&key).expect_err("invalid length must fail");
+    assert!(
+        err.to_string().contains("must be exactly 64 hex chars"),
+        "error should explain expected key length, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_parse_verifier_private_key_rejects_non_hex_chars() {
+    let key = "g".repeat(64);
+    let err = parse_verifier_private_key(&key).expect_err("non-hex key must fail");
+    assert!(
+        err.to_string().contains("non-hex"),
+        "error should mention non-hex characters, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_load_verifier_signer_from_env_derives_expected_address() {
+    let _lock = verifier_env_test_lock()
+        .lock()
+        .expect("env test lock must not be poisoned");
+    let _guard = VerifierKeyEnvGuard::set(Some(
+        "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
+    ));
+
+    let (_signing_key, address) =
+        load_verifier_signer_from_env().expect("env key should load successfully");
+    assert_eq!(
+        address.to_ascii_lowercase(),
+        "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720".to_ascii_lowercase(),
+        "derived address should match known Hardhat verifier signer"
+    );
 }
 
 // ============================================================================

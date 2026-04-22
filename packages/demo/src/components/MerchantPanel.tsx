@@ -6,6 +6,7 @@ import type { Hex, WalletClient } from 'viem';
 import { publicClient, merchantClients } from '../utils/hardhatAccounts';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+import { normalizeOrder } from '../utils/orderView';
 import {
   makeWiseFiatBindingContext,
   generateWiseFiatProof,
@@ -1133,23 +1134,24 @@ function FiatPendingOrders({ address, products, walletClient }: {
         const product   = fiatProducts.find((p) => p.productId === productId);
         if (!product) continue;
         try {
-          const order = await publicClient.readContract({
+          const rawOrder = await publicClient.readContract({
             address: c2cConfig.escrowAddress,
             abi: C2C_ESCROW_ABI,
             functionName: 'getOrder',
             args: [address, productId, 1, orderId],
-          }) as any;
-          const status = Number(order.status ?? order[4] ?? 99);
+          });
+          const order = normalizeOrder(rawOrder);
+          const status = order.status;
           if (status !== 0 && status !== 4) continue;
           pending.push({
             orderId,
             productId,
-            buyer:       (order.buyer      ?? order[0]) as Hex,
-            amount:      (order.amount     ?? order[1]) as bigint,
-            rate:        (order.rate       ?? order[2]) as bigint,
-            deadline:    (order.deadline   ?? order[3]) as bigint,
+            buyer:       order.buyer,
+            amount:      order.amount,
+            rate:        order.rate,
+            deadline:    order.deadline,
             status,
-            rateVersion: Number(order.rateVersion ?? order[5] ?? 0),
+            rateVersion: order.rateVersion,
             platformId:  product.platformId,
           });
         } catch { /* order may not exist yet */ }
@@ -1171,8 +1173,8 @@ function FiatPendingOrders({ address, products, walletClient }: {
       addLog(key, 'Building binding context…');
       const isWise = o.platformId === PLATFORM_WISE;
       const ctx = isWise
-        ? await makeWiseFiatBindingContext(address, o.buyer, o.amount, o.orderId)
-        : await makeAlipayFiatBindingContext(address, o.buyer, o.amount, o.orderId);
+        ? await makeWiseFiatBindingContext(address, o.buyer, o.productId, o.amount, o.orderId)
+        : await makeAlipayFiatBindingContext(address, o.buyer, o.productId, o.amount, o.orderId);
       addLog(key, `rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
       addLog(key, 'Launching TLSN plugin…');
 
@@ -1180,11 +1182,11 @@ function FiatPendingOrders({ address, products, walletClient }: {
       if (isWise) {
         const { contacts, transfer } = await generateWiseFiatProof(ctx);
         addLog(key, 'Proofs generated, submitting…');
-        txHash = await submitWiseFiatProof(walletClient, o.orderId, contacts, transfer);
+        txHash = await submitWiseFiatProof(walletClient, o.productId, o.orderId, contacts, transfer);
       } else {
         const proof = await generateAlipayFiatProof(ctx);
         addLog(key, 'Proof generated, submitting…');
-        txHash = await submitAlipayFiatProof(walletClient, o.orderId, proof);
+        txHash = await submitAlipayFiatProof(walletClient, o.productId, o.orderId, proof);
       }
       addLog(key, `✅ Done — tx=${txHash}`);
       setTimeout(loadOrders, 800);

@@ -16,16 +16,18 @@ import { contractConfig, chain } from './contractConfig';
 import { getProvider } from './walletDiscovery';
 
 export type SubmitAction =
-    | { type: 'registerMerchant' }
+    | { type: 'registerMerchant'; proof: ContractTLSNProof }
     | { type: 'payOrderByPlatform'; merchant: Hex; productId: bigint; orderId: bigint; proofs: ContractTLSNProof[] }
     | { type: 'receiveCryptoWithPlatformPayment'; productId: bigint; orderId: bigint; proofs: ContractTLSNProof[] };
 
 export async function submitProofToContract(
-    proof: ContractTLSNProof,
     action: SubmitAction,
     provider?: any,
-): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+): Promise<{ hash: Hex; waitForReceipt: () => Promise<TransactionReceipt> }> {
     const ethereum = provider ?? getProvider();
+    if (!ethereum) {
+        throw new Error('No wallet provider found (EIP-6963 / window.ethereum).');
+    }
 
     const walletClient = createWalletClient({
         chain,
@@ -46,12 +48,15 @@ export async function submitProofToContract(
                 address: contractConfig.c2cAdmin,
                 abi: C2C_ADMIN_ABI,
                 functionName: 'registerMerchant',
-                args: [proof] as any,
+                args: [action.proof] as any,
                 account,
             });
             break;
 
         case 'payOrderByPlatform':
+            if (!action.proofs.length) {
+                throw new Error('payOrderByPlatform requires at least one proof.');
+            }
             hash = await walletClient.writeContract({
                 address: contractConfig.c2cEscrow,
                 abi: C2C_ESCROW_ABI,
@@ -62,6 +67,9 @@ export async function submitProofToContract(
             break;
 
         case 'receiveCryptoWithPlatformPayment':
+            if (!action.proofs.length) {
+                throw new Error('receiveCryptoWithPlatformPayment requires at least one proof.');
+            }
             hash = await walletClient.writeContract({
                 address: contractConfig.c2cEscrow,
                 abi: C2C_ESCROW_ABI,
@@ -72,6 +80,8 @@ export async function submitProofToContract(
             break;
     }
 
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    return { hash, receipt };
+    return {
+        hash,
+        waitForReceipt: () => publicClient.waitForTransactionReceipt({ hash }),
+    };
 }

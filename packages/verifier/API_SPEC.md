@@ -143,6 +143,7 @@ Handler `label` values follow the Travel Rule field vocabulary (R.16):
     "commitmentsHash": "<hex>",
     "orderBindingHash": "0x<hex>",
     "policyVersion": "v1.0.0",
+    "policyVersionHash": "0x<32-byte-hex>",
     "signature": "<65-byte-hex>",
     "verifierAddress": "0x<20-byte-hex>"
   }
@@ -306,6 +307,7 @@ preimage = chainId(8 BE) || keccak256(sessionId)(32)
 ```
 
 Where `policyVersionHash = keccak256(policyVersion UTF-8)` or `[0x00; 32]` if absent.
+`policyVersionHash` is returned explicitly in `verifierSignature` for direct on-chain submission.
 
 `commitmentsHash = keccak256(hashHex[0] || hashHex[1] || ...)` over all commitment hashes.
 
