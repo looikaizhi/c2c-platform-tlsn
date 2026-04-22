@@ -41,6 +41,7 @@ const STATUS_STYLE: Record<number, { bg: string; color: string; label: string }>
   2: { bg: '#fff1f0', color: '#ff4d4f', label: 'EXPIRED'   },
   3: { bg: '#f6ffed', color: '#52c41a', label: 'COMPLETED' },
   4: { bg: '#fff7e6', color: '#fa8c16', label: 'WAITING'   },
+  5: { bg: '#fff7e6', color: '#d46b08', label: 'DISPUTED'  },
 };
 
 // ── User addresses from deployment env vars (authoritative source) ─────────────
@@ -138,7 +139,7 @@ async function loadUser(userAddress: Hex): Promise<UserData> {
   for (let i = 0; i < combos.length; i++) {
     if (!hasActive[i]) continue;
     const { merchantAddress, productId, assetType } = combos[i];
-    for (let oid = 0n; oid < 20n; oid++) {
+    for (let oid = 0n; oid < 200n; oid++) {
       try {
         const order: any = await publicClient.readContract({
           address: c2cConfig.escrowAddress, abi: C2C_ESCROW_ABI,
@@ -146,7 +147,7 @@ async function loadUser(userAddress: Hex): Promise<UserData> {
         });
         if (
           getAddress(order.buyer) === checkedAddress &&
-          (Number(order.status) === 0 || Number(order.status) === 4)
+          (Number(order.status) === 0 || Number(order.status) === 4 || Number(order.status) === 5)
         ) {
           activeOrders.push({
             merchantAddress, productId, assetType, orderId: oid,

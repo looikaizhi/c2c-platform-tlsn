@@ -3,10 +3,10 @@
 // Click a row to open ProductDetailModal with full info, order form, and confirmation.
 
 import { useState, useEffect, useCallback } from 'react';
-import { keccak256, toBytes } from 'viem';
+import { keccak256, toBytes, parseAbiItem } from 'viem';
 import type { Hex } from 'viem';
-import { publicClient, userClients, MERCHANT_ADDRESSES, USER_ADDRESSES } from '../utils/hardhatAccounts';
-import { C2C_ADMIN_ABI } from '../utils/c2cAbi';
+import { publicClient, userClients, USER_ADDRESSES } from '../utils/hardhatAccounts';
+import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
 import {
   placeWiseCryptoOrder,
@@ -14,6 +14,7 @@ import {
   makeWiseCryptoBindingContext,
   generateWiseCryptoProof,
   submitWiseCryptoProof,
+  PLATFORM_WISE,
 } from '../utils/wiseC2cActions';
 import {
   placeAlipayCryptoOrder,
@@ -21,20 +22,21 @@ import {
   makeAlipayCryptoBindingContext,
   generateAlipayCryptoProof,
   submitAlipayCryptoProof,
+  PLATFORM_ALIPAY,
 } from '../utils/alipayC2cActions';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Platform  = 'Wise' | 'Alipay';
-type Direction = 'Crypto' | 'Fiat';
-type SortKey   = 'rate' | 'rateVersion' | 'merchantIdx';
-type SortDir   = 'asc' | 'desc';
+type Direction    = 'Crypto' | 'Fiat';
+type SortKey      = 'rate' | 'rateVersion' | 'merchantIdx';
+type SortDir      = 'asc' | 'desc';
 type FilterStatus = '' | 'open' | 'closed';
 
 interface ProductCard {
   merchantIdx:  number;
   merchantAddr: Hex;
-  platform:     Platform;
+  platformId:   Hex;      // bytes32 from getProductPlatformId
+  platformName: string;   // human-readable label derived from platformId
   direction:    Direction;
   productId:    bigint;
   assetType:    0 | 1;
@@ -188,17 +190,27 @@ const S = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function resolvePlatformName(platformId: Hex): string {
+  if (platformId === PLATFORM_WISE)   return 'Wise';
+  if (platformId === PLATFORM_ALIPAY) return 'Alipay';
+  return platformId.slice(0, 10) + '…';
+}
+
+function getCurrencyForPlatform(platformId: Hex): string {
+  if (platformId === PLATFORM_WISE)   return 'MYR';
+  if (platformId === PLATFORM_ALIPAY) return 'CNY';
+  return 'FIAT';
+}
+
 function rateDisplay(c: ProductCard): string {
-  const curr = c.platform === 'Wise' ? 'MYR' : 'CNY';
-  if (c.assetType === 0) return `${(Number(c.rate) / 1e18).toFixed(3)} ${curr}/USDT`;
-  return `${(Number(c.rate) / 1000).toFixed(3)} ${curr}/USDT`;
+  const curr = getCurrencyForPlatform(c.platformId);
+  return `${(Number(c.rate) / 1e8).toFixed(3)} ${curr}/USDT`;
 }
 
 function fiatEstimate(rate: bigint, assetType: 0 | 1, usdtAmount: number, curr: string): string {
   if (!usdtAmount || usdtAmount <= 0) return '—';
-  const fiat = assetType === 0
-    ? usdtAmount * (Number(rate) / 1e18)
-    : usdtAmount * (Number(rate) / 1000);
+  void assetType;
+  const fiat = usdtAmount * (Number(rate) / 1e8);
   return `≈ ${fiat.toFixed(2)} ${curr}`;
 }
 
@@ -249,7 +261,7 @@ function ConfirmDialog({
   onConfirm: () => void;
   onCancel:  () => void;
 }) {
-  const curr        = card.platform === 'Wise' ? 'MYR' : 'CNY';
+  const curr        = getCurrencyForPlatform(card.platformId);
   const usdtAmt     = parseFloat(amount) || 0;
   const estimate    = fiatEstimate(card.rate, card.assetType, usdtAmt, curr);
   const dirLabel    = card.direction === 'Crypto'
@@ -271,7 +283,7 @@ function ConfirmDialog({
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ color: COLOR.textSecondary }}>Platform</span>
-            <strong>{card.platform}-{card.direction}</strong>
+            <strong>{card.platformName}-{card.direction}</strong>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ color: COLOR.textSecondary }}>Merchant</span>
@@ -329,8 +341,18 @@ function ProductDetailModal({
   const [running, setRunning]         = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [done, setDone]               = useState(false);
+  const [tokenDecimals, setTokenDecimals] = useState(18);
 
-  const curr     = card.platform === 'Wise' ? 'MYR' : 'CNY';
+  useEffect(() => {
+    if (!c2cConfig.usdtAddress || c2cConfig.usdtAddress.length < 3) return;
+    publicClient.readContract({
+      address: c2cConfig.usdtAddress,
+      abi: ERC20_ABI,
+      functionName: 'decimals',
+    }).then((d) => setTokenDecimals(Number(d))).catch(() => {});
+  }, []);
+
+  const curr     = getCurrencyForPlatform(card.platformId);
   const usdtAmt  = parseFloat(amount) || 0;
   const estimate = fiatEstimate(card.rate, card.assetType, usdtAmt, curr);
 
@@ -340,8 +362,8 @@ function ProductDetailModal({
 
   function validateForm(): string | null {
     if (!amount || usdtAmt <= 0) return 'Please enter a valid USDT amount.';
-    if (card.direction === 'Fiat' && !buyerName.trim()) return `Please enter your ${card.platform} display name.`;
-    if (card.direction === 'Fiat' && !buyerHandle.trim()) return `Please enter your ${card.platform} ${card.platform === 'Wise' ? 'handle' : 'account'}.`;
+    if (card.direction === 'Fiat' && !buyerName.trim()) return `Please enter your ${card.platformName} display name.`;
+    if (card.direction === 'Fiat' && !buyerHandle.trim()) return `Please enter your ${card.platformName} ${card.platformId === PLATFORM_WISE ? 'handle' : 'account'}.`;
     return null;
   }
 
@@ -357,11 +379,11 @@ function ProductDetailModal({
     try {
       const buyerClient = userClients[userIdx] as any;
       const buyerAddr   = USER_ADDRESSES[userIdx] as Hex;
-      const amountBig   = BigInt(Math.floor(usdtAmt * 1e18));
+      const amountBig   = BigInt(Math.floor(usdtAmt * 10 ** tokenDecimals));
 
-      addLog(`Placing ${card.platform}-${card.direction} order…`);
+      addLog(`Placing ${card.platformName}-${card.direction} order…`);
 
-      if (card.platform === 'Wise' && card.direction === 'Crypto') {
+      if (card.platformId === PLATFORM_WISE && card.direction === 'Crypto') {
         const { orderId, deadline: dl } = await placeWiseCryptoOrder(buyerClient, card.merchantAddr, amountBig);
         addLog(`Order placed — orderId=${orderId}  deadline=${new Date(Number(dl) * 1000).toLocaleTimeString()}`);
         addLog('Building binding context (reads rateVersion from chain)…');
@@ -374,7 +396,7 @@ function ProductDetailModal({
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
         setDone(true);
 
-      } else if (card.platform === 'Wise' && card.direction === 'Fiat') {
+      } else if (card.platformId === PLATFORM_WISE && card.direction === 'Fiat') {
         const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
         const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
         const { orderId } = await placeWiseFiatOrder(buyerClient, card.merchantAddr, amountBig, buyerNameHash, buyerIdHash);
@@ -382,7 +404,7 @@ function ProductDetailModal({
         addLog('Merchant must now pay MYR and submit Wise proof (see Merchant Panel).', 'success');
         setDone(true);
 
-      } else if (card.platform === 'Alipay' && card.direction === 'Crypto') {
+      } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Crypto') {
         const { orderId } = await placeAlipayCryptoOrder(buyerClient, card.merchantAddr, amountBig);
         addLog(`Order placed — orderId=${orderId}`);
         const ctx = await makeAlipayCryptoBindingContext(card.merchantAddr, buyerAddr, amountBig, orderId);
@@ -394,13 +416,16 @@ function ProductDetailModal({
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
         setDone(true);
 
-      } else if (card.platform === 'Alipay' && card.direction === 'Fiat') {
+      } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Fiat') {
         const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
         const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
         const { orderId } = await placeAlipayFiatOrder(buyerClient, card.merchantAddr, amountBig, buyerNameHash, buyerIdHash);
         addLog(`Order placed — orderId=${orderId}  USDT locked.`);
         addLog('Merchant must now pay CNY and submit Alipay proof (see Merchant Panel).', 'success');
         setDone(true);
+
+      } else {
+        addLog(`Unsupported platform: ${card.platformName} (${card.platformId})`, 'error');
       }
     } catch (err: any) {
       addLog(`Error: ${err?.shortMessage ?? err?.message ?? String(err)}`, 'error');
@@ -418,7 +443,7 @@ function ProductDetailModal({
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
             <div>
               <h3 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 700 }}>
-                {card.platform}
+                {card.platformName}
                 <span style={{ color: COLOR.textSecondary, fontWeight: 400, fontSize: 14, marginLeft: 6 }}>
                   {card.direction === 'Crypto' ? 'Buy USDT' : 'Sell USDT'}
                 </span>
@@ -510,7 +535,7 @@ function ProductDetailModal({
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
               <div>
                 <label style={S.label}>
-                  {card.platform} display name <span style={{ color: COLOR.danger }}>*</span>
+                  {card.platformName} display name <span style={{ color: COLOR.danger }}>*</span>
                 </label>
                 <input
                   type="text"
@@ -523,13 +548,13 @@ function ProductDetailModal({
               </div>
               <div>
                 <label style={S.label}>
-                  {card.platform} {card.platform === 'Wise' ? 'handle' : 'account'} <span style={{ color: COLOR.danger }}>*</span>
+                  {card.platformName} {card.platformId === PLATFORM_WISE ? 'handle' : 'account'} <span style={{ color: COLOR.danger }}>*</span>
                 </label>
                 <input
                   type="text"
                   value={buyerHandle}
                   onChange={(e) => setBuyerHandle(e.target.value)}
-                  placeholder={card.platform === 'Wise' ? '@handle' : 'phone/email'}
+                  placeholder={card.platformId === PLATFORM_WISE ? '@handle' : 'phone/email'}
                   style={S.input}
                   disabled={running}
                 />
@@ -609,67 +634,122 @@ function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
 // ─── TradingHall ──────────────────────────────────────────────────────────────
 
 export function TradingHall() {
-  const [cards, setCards]           = useState<ProductCard[]>([]);
-  const [loading, setLoading]       = useState(false);
-  const [filterPlatform, setFilterP]  = useState<'' | Platform>('');
-  const [filterDir, setFilterDir]     = useState<'' | Direction>('');
+  const [cards, setCards]               = useState<ProductCard[]>([]);
+  const [loading, setLoading]           = useState(false);
+  const [filterPlatform, setFilterP]    = useState('');
+  const [filterDir, setFilterDir]       = useState<'' | Direction>('');
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('');
-  const [sortKey, setSortKey]       = useState<SortKey>('merchantIdx');
-  const [sortDir, setSortDir]       = useState<SortDir>('asc');
+  const [sortKey, setSortKey]           = useState<SortKey>('merchantIdx');
+  const [sortDir, setSortDir]           = useState<SortDir>('asc');
   const [selectedCard, setSelectedCard] = useState<ProductCard | null>(null);
-  const [hoveredRow, setHoveredRow] = useState<string | null>(null);
+  const [hoveredRow, setHoveredRow]     = useState<string | null>(null);
 
   const loadCards = useCallback(async () => {
     if (!isC2CConfigured()) return;
     setLoading(true);
     try {
-      const newCards: ProductCard[] = [];
-      const defs: Array<{ platform: Platform; direction: Direction; productId: bigint; assetType: 0 | 1 }> = [
-        { platform: 'Wise',   direction: 'Crypto', productId: 0n, assetType: 0 },
-        { platform: 'Wise',   direction: 'Fiat',   productId: 0n, assetType: 1 },
-        { platform: 'Alipay', direction: 'Crypto', productId: 1n, assetType: 0 },
-        { platform: 'Alipay', direction: 'Fiat',   productId: 1n, assetType: 1 },
+      // ── Phase 1: Discover all registered merchants from contract events ──
+      const merchantLogs = await publicClient.getLogs({
+        address: c2cConfig.adminAddress,
+        event: parseAbiItem('event MerchantRegistered(address indexed merchant, uint256 registeredAt)'),
+        fromBlock: 0n,
+        toBlock: 'latest',
+      });
+      const merchantAddresses = [
+        ...new Map(
+          merchantLogs.map((l) => [(l.args as any).merchant as string, (l.args as any).merchant as Hex])
+        ).values(),
       ];
 
-      for (let mi = 0; mi < MERCHANT_ADDRESSES.length; mi++) {
-        const merchantAddr = MERCHANT_ADDRESSES[mi] as Hex;
-        for (const def of defs) {
+      if (merchantAddresses.length === 0) {
+        setCards([]);
+        return;
+      }
+
+      // ── Phase 2: Discover all listed products from contract events ──
+      const productLogs = await publicClient.getLogs({
+        address: c2cConfig.escrowAddress,
+        event: parseAbiItem('event ProductListed(address indexed merchant, uint256 indexed productId, uint8 indexed assetType, uint256 cryptoID, uint256 fiatID, uint256 collateralAmount, bool isActive)'),
+        fromBlock: 0n,
+        toBlock: 'latest',
+      });
+
+      // Deduplicate by (merchant, productId, assetType) — keep the latest listing
+      const merchantSet = new Set(merchantAddresses.map((a) => a.toLowerCase()));
+      const tupleMap = new Map<string, typeof productLogs[0]>();
+      for (const log of productLogs) {
+        const args = log.args as any;
+        const merchant = (args.merchant as string).toLowerCase();
+        if (!merchantSet.has(merchant)) continue;
+        const key = `${merchant}-${args.productId}-${args.assetType}`;
+        tupleMap.set(key, log);
+      }
+
+      // ── Phase 3: Enrich each (merchant, productId, assetType) tuple ──
+      const newCards: ProductCard[] = [];
+      await Promise.all(
+        [...tupleMap.values()].map(async (log) => {
+          const args        = log.args as any;
+          const merchantAddr = args.merchant as Hex;
+          const productId   = args.productId as bigint;
+          const assetType   = args.assetType as 0 | 1;
+          const merchantIdx = merchantAddresses.findIndex(
+            (a) => a.toLowerCase() === merchantAddr.toLowerCase()
+          );
+
           try {
-            const [rateInfo, isOpen] = await Promise.all([
+            const [rateInfo, isOpen, platformId] = await Promise.all([
               publicClient.readContract({
                 address: c2cConfig.adminAddress,
                 abi: C2C_ADMIN_ABI,
                 functionName: 'getMerchantRate',
-                args: [merchantAddr, def.productId, def.assetType],
+                args: [merchantAddr, productId, assetType],
               }).then((r: any) => r),
               publicClient.readContract({
                 address: c2cConfig.adminAddress,
                 abi: C2C_ADMIN_ABI,
                 functionName: 'isMerchantOpen',
-                args: [merchantAddr, def.productId, def.assetType],
+                args: [merchantAddr, productId, assetType],
+              }),
+              publicClient.readContract({
+                address: c2cConfig.escrowAddress,
+                abi: C2C_ESCROW_ABI,
+                functionName: 'getProductPlatformId',
+                args: [merchantAddr, productId, assetType],
               }),
             ]);
 
-            const rate: bigint       = rateInfo?.rate    ?? 0n;
+            const rate: bigint        = rateInfo?.rate    ?? 0n;
             const rateVersion: number = rateInfo?.version ?? 0;
 
-            // Skip products not registered in the contract (rate=0 and version=0 means unregistered)
-            if (rate === 0n && rateVersion === 0) continue;
+            // Skip products not yet priced (unregistered in rate table)
+            if (rate === 0n && rateVersion === 0) return;
 
             newCards.push({
-              merchantIdx: mi,
+              merchantIdx,
               merchantAddr,
-              ...def,
+              platformId:   platformId as Hex,
+              platformName: resolvePlatformName(platformId as Hex),
+              direction:    assetType === 0 ? 'Crypto' : 'Fiat',
+              productId,
+              assetType,
               rate,
               rateVersion,
               isOpen: isOpen as boolean,
               collateral: 0n,
             });
           } catch {
-            // Product does not exist for this merchant, skip silently
+            // Product enrichment failed — skip silently
           }
-        }
-      }
+        })
+      );
+
+      // Sort by merchantIdx then productId for stable initial order
+      newCards.sort((a, b) =>
+        a.merchantIdx !== b.merchantIdx
+          ? a.merchantIdx - b.merchantIdx
+          : Number(a.productId - b.productId)
+      );
       setCards(newCards);
     } finally {
       setLoading(false);
@@ -678,9 +758,12 @@ export function TradingHall() {
 
   useEffect(() => { loadCards(); }, [loadCards]);
 
+  // ── Derive available platform names for filter dropdown ──
+  const availablePlatforms = [...new Set(cards.map((c) => c.platformName))].sort();
+
   // ── Filter ──
   const filtered = cards.filter((c) => {
-    if (filterPlatform && c.platform !== filterPlatform) return false;
+    if (filterPlatform && c.platformName !== filterPlatform) return false;
     if (filterDir && c.direction !== filterDir) return false;
     if (filterStatus === 'open' && !c.isOpen) return false;
     if (filterStatus === 'closed' && c.isOpen) return false;
@@ -757,12 +840,13 @@ export function TradingHall() {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <select
               value={filterPlatform}
-              onChange={(e) => setFilterP(e.target.value as '' | Platform)}
+              onChange={(e) => setFilterP(e.target.value)}
               style={S.select}
             >
               <option value="">All platforms</option>
-              <option value="Wise">Wise</option>
-              <option value="Alipay">Alipay</option>
+              {availablePlatforms.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
             </select>
 
             <select
@@ -863,7 +947,7 @@ export function TradingHall() {
                   </tr>
                 ) : (
                   sorted.map((c) => {
-                    const rowKey = `${c.merchantIdx}-${c.platform}-${c.direction}`;
+                    const rowKey  = `${c.merchantIdx}-${c.platformId}-${c.productId}-${c.assetType}`;
                     const isHovered = hoveredRow === rowKey;
                     return (
                       <tr
@@ -889,14 +973,14 @@ export function TradingHall() {
                           }}>
                             <span style={{
                               width: 24, height: 24, borderRadius: '50%',
-                              background: c.platform === 'Wise' ? '#9de0fb' : '#1677ff',
+                              background: c.platformId === PLATFORM_WISE ? '#9de0fb' : '#1677ff',
                               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                               fontSize: 10, fontWeight: 800, color: '#fff',
                               flexShrink: 0,
                             }}>
-                              {c.platform === 'Wise' ? 'W' : 'A'}
+                              {c.platformName.charAt(0).toUpperCase()}
                             </span>
-                            {c.platform}
+                            {c.platformName}
                           </span>
                         </td>
 

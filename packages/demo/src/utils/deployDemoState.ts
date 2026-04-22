@@ -71,10 +71,10 @@ const MERCHANT_ALI_HANDLES   = ['kel***@hotmail.com', 'ali2@example.com', 'ali3@
 
 // ─── Rate constants ───────────────────────────────────────────────────────────
 
-const RATE_WISE_CRYPTO   = 4_500_000_000_000_000_000n;
-const RATE_WISE_FIAT     = 450n;
-const RATE_ALIPAY_CRYPTO = 7_200_000_000_000_000_000n;
-const RATE_ALIPAY_FIAT   = 720n;
+const RATE_WISE_CRYPTO   = 450_000_000n;  // 4.5  MYR / USDT (RATE_PRECISION_EXP = 8)
+const RATE_WISE_FIAT     = 450_000_000n;  // 4.5  MYR / USDT
+const RATE_ALIPAY_CRYPTO = 720_000_000n;  // 7.2  CNY / USDT
+const RATE_ALIPAY_FIAT   = 720_000_000n;  // 7.2  CNY / USDT
 const MAX_UINT           = (2n ** 256n) - 1n;
 
 // ─── Contract ABIs (minimal, for deploy script use) ──────────────────────────
@@ -140,7 +140,7 @@ function loadArtifact(name: string): ArtifactJson {
   // Resolve relative to packages/contracts/artifacts
   const base = path.resolve(
     new URL('.', import.meta.url).pathname,
-    '../../../../../contracts/artifacts/contracts',
+    '../../../contracts/artifacts/contracts',
   );
   const candidates = [
     path.join(base, `${name}.sol`, `${name}.json`),
@@ -166,6 +166,8 @@ export interface DeployResult {
   daiAddress:  `0x${string}`;
   adminAddress:  `0x${string}`;
   escrowAddress: `0x${string}`;
+  tlsnVerifierAddress: `0x${string}`;
+  verifierSignerAddress: `0x${string}`;
   merchantAddresses: `0x${string}`[];
   userAddresses: `0x${string}`[];
 }
@@ -312,6 +314,8 @@ export async function deployDemoState(
     daiAddress,
     adminAddress,
     escrowAddress,
+    tlsnVerifierAddress: tlsnAddress,
+    verifierSignerAddress: verifierWallet.account!.address,
     merchantAddresses,
     userAddresses,
   };
@@ -347,9 +351,12 @@ export function writeEnvFile(result: DeployResult): void {
     `VITE_USER5_ADDRESS=${result.userAddresses[4]}`,
     // Legacy buyer alias
     `VITE_BUYER_ADDRESS=${result.userAddresses[0]}`,
+    `VITE_TLSN_VERIFIER_ADDRESS=${result.tlsnVerifierAddress}`,
+    `VITE_VERIFIER_SIGNER_ADDRESS=${result.verifierSignerAddress}`,
+
   ];
 
-  const envPath = path.resolve(new URL('.', import.meta.url).pathname, '../../../../.env');
+  const envPath = path.resolve(new URL('.', import.meta.url).pathname, '../../.env');
   fs.writeFileSync(envPath, lines.join('\n') + '\n');
   console.log(`Written to ${envPath}`);
 }

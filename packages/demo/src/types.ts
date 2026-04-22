@@ -7,9 +7,9 @@ export interface Plugin {
 }
 
 export interface PluginResult {
-    results: Array<{
-        value: string;
-    }>;
+    results?: Array<{ value: string; [key: string]: any }>;
+    displayResults?: Array<{ value: string; [key: string]: any }>;
+    [key: string]: any;
 }
 
 export interface ConsoleEntry {

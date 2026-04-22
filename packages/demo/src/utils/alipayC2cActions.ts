@@ -29,7 +29,7 @@ export const PLATFORM_ALIPAY = keccak256(stringToBytes('alipay')) as `0x${string
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-// productId 1 is used for Alipay (after Wise took productId 0 per assetType counter)
+// productId from env (defaults: 1 for both Alipay products)
 export const ALIPAY_CRYPTO_PRODUCT_ID = 1n;
 export const ALIPAY_FIAT_PRODUCT_ID   = 1n;
 
@@ -198,8 +198,39 @@ export async function submitAlipayCryptoProof(
 // ─── Flow B: Alipay-Fiat (buyer locks USDT, merchant pays CNY, receives USDT) ─
 
 /**
- * Buyer places a FIAT order (locks USDT directly in placeOrder).
- * Approves USDT before calling.
+ * Resolve the crypto token address for a FIAT product by reading the crypto support list.
+ * Falls back to USDT if lookup fails.
+ */
+async function resolveFiatProductCryptoToken(
+  merchantAddress: `0x${string}`,
+  productId: bigint,
+): Promise<`0x${string}`> {
+  try {
+    const { parseAbiItem } = await import('viem');
+    const logs = await publicClient.getLogs({
+      address: c2cConfig.escrowAddress,
+      event: parseAbiItem('event ProductListed(address indexed merchant, uint256 indexed productId, uint8 indexed assetType, uint256 cryptoID, uint256 fiatID, uint256 collateralAmount, bool isActive)'),
+      args: { merchant: merchantAddress, productId, assetType: 1 } as any,
+      fromBlock: 0n,
+    });
+    if (logs.length === 0) return c2cConfig.usdtAddress;
+    const cryptoID = (logs[logs.length - 1].args as any).cryptoID as bigint;
+    const cryptoList = await publicClient.readContract({
+      address: c2cConfig.adminAddress,
+      abi: C2C_ADMIN_ABI,
+      functionName: 'getSupportCryptoList',
+      args: [],
+    }) as any[];
+    const match = cryptoList.find((c: any) => BigInt(c.id ?? c[0]) === cryptoID);
+    return (match?.tokenAddress ?? match?.[2] ?? c2cConfig.usdtAddress) as `0x${string}`;
+  } catch {
+    return c2cConfig.usdtAddress;
+  }
+}
+
+/**
+ * Buyer places a FIAT order (locks crypto token directly in placeOrder).
+ * Dynamically resolves the crypto token for the FIAT product.
  */
 export async function placeAlipayFiatOrder(
   buyerClient: any,
@@ -208,10 +239,11 @@ export async function placeAlipayFiatOrder(
   buyerNameHash: `0x${string}`,
   buyerIdHash: `0x${string}`,
 ): Promise<{ orderId: bigint; deadline: bigint; txHash: Hex }> {
-  // Approve USDT for escrow — FIAT branch locks tokens immediately in placeOrder
+  const tokenAddress = await resolveFiatProductCryptoToken(merchantAddress, ALIPAY_FIAT_PRODUCT_ID);
+  // Approve crypto token for escrow — FIAT branch locks tokens immediately in placeOrder
   await publicClient.waitForTransactionReceipt({
     hash: await buyerClient.writeContract({
-      address: c2cConfig.usdtAddress,
+      address: tokenAddress,
       abi: ERC20_ABI,
       functionName: 'approve',
       args: [c2cConfig.escrowAddress, amount],

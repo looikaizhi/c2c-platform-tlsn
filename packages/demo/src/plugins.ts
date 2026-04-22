@@ -2,12 +2,14 @@ import { Plugin } from './types';
 
 export const plugins: Record<string, Plugin> = {
     alipay: {
-        name: 'Alipay Login Account',
-        description: 'Prove Alipay merchant logonName and masterCustomerId',
+        name: 'Alipay Payment Detail',
+        description: 'Verify Alipay payment transaction details: payer, payee, amount, status, and timestamp (selective disclosure).',
         logo: '💰',
         file: '/plugins/alipay.js',
         parseResult: (json) => {
-            return json.results[json.results.length - 1].value
+            const r = (json as any).results;
+            if (!r?.length) return 'Proof committed (Pedersen — no revealed plaintext)';
+            return r[r.length - 1].value;
         },
     },
     binance: {
@@ -16,7 +18,9 @@ export const plugins: Record<string, Plugin> = {
         logo: 'BNB',
         file: '/plugins/binance.js',
         parseResult: (json) => {
-            return json.results[json.results.length - 1].value;
+            const r = json.results;
+            if (!r?.length) return 'Proof generated (no revealed values)';
+            return r[r.length - 1].value;
         },
     },
     wise: {

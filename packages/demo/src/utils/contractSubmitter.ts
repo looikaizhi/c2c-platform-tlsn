@@ -17,17 +17,8 @@ import { getProvider } from './walletDiscovery';
 
 export type SubmitAction =
     | { type: 'registerMerchant' }
-    | { type: 'payOrderByFiat'; merchant: Hex; productId: bigint; orderId: bigint }
-    | {
-          type: 'payOrderByWise';
-          merchant: Hex;
-          productId: bigint;
-          orderId: bigint;
-          contactsProof: ContractTLSNProof;
-      }
-    | { type: 'payOrderByAlipay'; merchant: Hex; productId: bigint; orderId: bigint }
-    | { type: 'receiveCryptoWithPayment'; productId: bigint; orderId: bigint }
-    | { type: 'receiveCryptoWithAlipayPayment'; productId: bigint; orderId: bigint };
+    | { type: 'payOrderByPlatform'; merchant: Hex; productId: bigint; orderId: bigint; proofs: ContractTLSNProof[] }
+    | { type: 'receiveCryptoWithPlatformPayment'; productId: bigint; orderId: bigint; proofs: ContractTLSNProof[] };
 
 export async function submitProofToContract(
     proof: ContractTLSNProof,
@@ -60,58 +51,22 @@ export async function submitProofToContract(
             });
             break;
 
-        case 'payOrderByFiat':
+        case 'payOrderByPlatform':
             hash = await walletClient.writeContract({
                 address: contractConfig.c2cEscrow,
                 abi: C2C_ESCROW_ABI,
-                functionName: 'payOrderByFiat',
-                args: [action.merchant, action.productId, action.orderId, proof] as any,
+                functionName: 'payOrderByPlatform',
+                args: [action.merchant, action.productId, action.orderId, action.proofs] as any,
                 account,
             });
             break;
 
-        case 'payOrderByWise':
+        case 'receiveCryptoWithPlatformPayment':
             hash = await walletClient.writeContract({
                 address: contractConfig.c2cEscrow,
                 abi: C2C_ESCROW_ABI,
-                functionName: 'payOrderByWise',
-                args: [
-                    action.merchant,
-                    action.productId,
-                    action.orderId,
-                    action.contactsProof,
-                    proof,
-                ] as any,
-                account,
-            });
-            break;
-
-        case 'payOrderByAlipay':
-            hash = await walletClient.writeContract({
-                address: contractConfig.c2cEscrow,
-                abi: C2C_ESCROW_ABI,
-                functionName: 'payOrderByAlipay',
-                args: [action.merchant, action.productId, action.orderId, proof] as any,
-                account,
-            });
-            break;
-
-        case 'receiveCryptoWithPayment':
-            hash = await walletClient.writeContract({
-                address: contractConfig.c2cEscrow,
-                abi: C2C_ESCROW_ABI,
-                functionName: 'receiveCryptoWithPayment',
-                args: [action.productId, action.orderId, proof] as any,
-                account,
-            });
-            break;
-
-        case 'receiveCryptoWithAlipayPayment':
-            hash = await walletClient.writeContract({
-                address: contractConfig.c2cEscrow,
-                abi: C2C_ESCROW_ABI,
-                functionName: 'receiveCryptoWithAlipayPayment',
-                args: [action.productId, action.orderId, proof] as any,
+                functionName: 'receiveCryptoWithPlatformPayment',
+                args: [action.productId, action.orderId, action.proofs] as any,
                 account,
             });
             break;

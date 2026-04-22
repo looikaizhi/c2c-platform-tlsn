@@ -7,6 +7,7 @@ const tlsnProofComponents = [
   { name: 'sessionId',         type: 'string'  as const },
   { name: 'commitmentsHash',   type: 'bytes32' as const },
   { name: 'orderBindingHash',  type: 'bytes32' as const },
+  { name: 'policyVersionHash', type: 'bytes32' as const },
   { name: 'verifierSignature', type: 'bytes'   as const },
   {
     name: 'revealedItems', type: 'tuple[]' as const,

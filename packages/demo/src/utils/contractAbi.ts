@@ -9,6 +9,8 @@ const tlsnProofTuple = {
         { name: 'chainId', type: 'uint64' as const },
         { name: 'sessionId', type: 'string' as const },
         { name: 'commitmentsHash', type: 'bytes32' as const },
+        { name: 'orderBindingHash', type: 'bytes32' as const },
+        { name: 'policyVersionHash', type: 'bytes32' as const },
         { name: 'verifierSignature', type: 'bytes' as const },
         {
             name: 'revealedItems',
@@ -46,6 +48,10 @@ function proofParam(name: string) {
     return { ...tlsnProofTuple, name };
 }
 
+function proofArrayParam(name: string) {
+    return { name, type: 'tuple[]' as const, components: tlsnProofTuple.components };
+}
+
 export const C2C_ADMIN_ABI = [
     {
         type: 'function' as const,
@@ -59,59 +65,23 @@ export const C2C_ADMIN_ABI = [
 export const C2C_ESCROW_ABI = [
     {
         type: 'function' as const,
-        name: 'payOrderByFiat',
+        name: 'payOrderByPlatform',
         inputs: [
             { name: '_merchant', type: 'address' as const },
             { name: '_productId', type: 'uint256' as const },
             { name: '_orderId', type: 'uint256' as const },
-            proofParam('proof'),
+            proofArrayParam('proofs'),
         ],
         outputs: [],
         stateMutability: 'nonpayable' as const,
     },
     {
         type: 'function' as const,
-        name: 'payOrderByWise',
-        inputs: [
-            { name: '_merchant', type: 'address' as const },
-            { name: '_productId', type: 'uint256' as const },
-            { name: '_orderId', type: 'uint256' as const },
-            proofParam('contactsProof'),
-            proofParam('transferProof'),
-        ],
-        outputs: [],
-        stateMutability: 'nonpayable' as const,
-    },
-    {
-        type: 'function' as const,
-        name: 'payOrderByAlipay',
-        inputs: [
-            { name: '_merchant', type: 'address' as const },
-            { name: '_productId', type: 'uint256' as const },
-            { name: '_orderId', type: 'uint256' as const },
-            proofParam('proof'),
-        ],
-        outputs: [],
-        stateMutability: 'nonpayable' as const,
-    },
-    {
-        type: 'function' as const,
-        name: 'receiveCryptoWithPayment',
+        name: 'receiveCryptoWithPlatformPayment',
         inputs: [
             { name: '_productId', type: 'uint256' as const },
             { name: '_orderId', type: 'uint256' as const },
-            proofParam('proof'),
-        ],
-        outputs: [],
-        stateMutability: 'nonpayable' as const,
-    },
-    {
-        type: 'function' as const,
-        name: 'receiveCryptoWithAlipayPayment',
-        inputs: [
-            { name: '_productId', type: 'uint256' as const },
-            { name: '_orderId', type: 'uint256' as const },
-            proofParam('proof'),
+            proofArrayParam('proofs'),
         ],
         outputs: [],
         stateMutability: 'nonpayable' as const,

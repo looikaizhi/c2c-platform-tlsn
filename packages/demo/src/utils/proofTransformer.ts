@@ -17,6 +17,7 @@ export interface ContractTLSNProof {
      * Must match the binding hash signed by the TLSN verifier server.
      */
     orderBindingHash: Hex;
+    policyVersionHash: Hex;
     verifierSignature: Hex;
     revealedItems: Array<{
         handlerType: string;
@@ -286,6 +287,8 @@ export function buildContractProof(response: ExtensionProveResponse): ContractTL
         sessionId: sig.sessionId,
         commitmentsHash: ensureHexPrefix(sig.commitmentsHash),
         orderBindingHash: ensureHexPrefix(sig.orderBindingHash ?? ''),
+        policyVersionHash: ((sig as any).policyVersionHash
+            ?? ('0x' + '0'.repeat(64))) as Hex,
         verifierSignature: ensureHexPrefix(sig.signature),
         revealedItems,
         commitmentOpenings,

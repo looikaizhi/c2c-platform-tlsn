@@ -1,11 +1,21 @@
 // packages/demo/src/components/MerchantPanel.tsx
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { formatUnits, keccak256, stringToBytes, parseUnits, parseAbiItem } from 'viem';
 import type { Hex, WalletClient } from 'viem';
 import { publicClient, merchantClients } from '../utils/hardhatAccounts';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+import {
+  makeWiseFiatBindingContext,
+  generateWiseFiatProof,
+  submitWiseFiatProof,
+} from '../utils/wiseC2cActions';
+import {
+  makeAlipayFiatBindingContext,
+  generateAlipayFiatProof,
+  submitAlipayFiatProof,
+} from '../utils/alipayC2cActions';
 
 // ── Platform constants ────────────────────────────────────────────────────────
 const PLATFORM_WISE   = keccak256(stringToBytes('wise'))   as Hex;
@@ -16,6 +26,9 @@ const PLATFORMS = [
 ] as const;
 
 // ── Event ABIs ────────────────────────────────────────────────────────────────
+const ORDER_PLACED_ABI = parseAbiItem(
+  'event OrderPlaced(address indexed buyer, address indexed merchant, uint256 indexed orderId, uint256 productId, uint8 assetType, uint256 amount, uint256 rate, uint256 deadline, uint256 salt)',
+);
 const MERCHANT_REGISTERED_ABI = parseAbiItem(
   'event MerchantRegistered(address indexed merchant, uint256 registeredAt)',
 );
@@ -149,7 +162,7 @@ function BalCard({ label, amount, symbol, decimals = 18 }: {
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
-interface CryptoAsset { id: bigint; symbol: string; tokenAddress: Hex; isActive: boolean; }
+interface CryptoAsset { id: bigint; symbol: string; tokenAddress: Hex; isActive: boolean; decimals: number; }
 interface FiatAsset   { id: bigint; name: string;   isActive: boolean; }
 interface PayInfo     { nameHash: Hex; idHash: Hex; isSet: boolean; }
 
@@ -221,9 +234,18 @@ async function loadSupportLists(): Promise<{ cryptos: CryptoAsset[]; fiats: Fiat
     publicClient.readContract({ address: c2cConfig.adminAddress, abi: C2C_ADMIN_ABI, functionName: 'getSupportCryptoList', args: [] }),
     publicClient.readContract({ address: c2cConfig.adminAddress, abi: C2C_ADMIN_ABI, functionName: 'getSupportFiatList',   args: [] }),
   ]);
-  const cryptos: CryptoAsset[] = (cryptoRaw as any[]).map((r) => ({
+  const cryptosBase = (cryptoRaw as any[]).map((r) => ({
     id: r.id, symbol: r.tokenSymbol, tokenAddress: r.tokenAddress, isActive: r.isActive,
   }));
+  const decimalsArr = await Promise.all(
+    cryptosBase.map((c) =>
+      c.tokenAddress && c.tokenAddress.length > 5
+        ? publicClient.readContract({ address: c.tokenAddress, abi: ERC20_ABI, functionName: 'decimals', args: [] })
+            .then((r) => Number(r)).catch(() => 18)
+        : Promise.resolve(18),
+    ),
+  );
+  const cryptos: CryptoAsset[] = cryptosBase.map((c, i) => ({ ...c, decimals: decimalsArr[i] }));
   const fiats: FiatAsset[] = (fiatRaw as any[]).map((r) => ({
     id: r.id, name: r.fiatName, isActive: r.isActive,
   }));
@@ -350,6 +372,27 @@ async function loadMerchantData(address: Hex): Promise<MerchantData> {
   };
 }
 
+// ── HashRow ───────────────────────────────────────────────────────────────────
+
+function HashRow({ label, hash }: { label: string; hash: Hex }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+      <span style={{ fontSize: 10, color: '#9ca3af', fontWeight: 600, minWidth: 64, flexShrink: 0 }}>{label}</span>
+      <span style={{ ...MONO, fontSize: 10, color: '#374151', flex: 1 }}>
+        {hash.slice(0, 18)}…{hash.slice(-6)}
+      </span>
+      <button
+        onClick={() => navigator.clipboard.writeText(hash).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}
+        title={copied ? 'Copied!' : hash}
+        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px 4px', color: copied ? '#16a34a' : '#9ca3af', fontSize: 11, borderRadius: 3 }}
+      >
+        {copied ? '✓' : '⧉'}
+      </button>
+    </div>
+  );
+}
+
 // ── PayInfoForm ───────────────────────────────────────────────────────────────
 
 function PayInfoForm({ platform, platformLabel, info, walletClient, onDone }: {
@@ -387,11 +430,6 @@ function PayInfoForm({ platform, platformLabel, info, walletClient, onDone }: {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: '#374151', minWidth: 72 }}>{platformLabel}</span>
         <Badge v={info.isSet ? 'success' : 'neutral'} text={info.isSet ? 'Set' : 'Not set'} />
-        {info.isSet && (
-          <span style={{ ...MONO, fontSize: 11, color: '#9ca3af' }}>
-            name: {info.nameHash.slice(0, 12)}… / id: {info.idHash.slice(0, 12)}…
-          </span>
-        )}
         {result === 'ok' && <Badge v="success" text="Saved" />}
         {walletClient && (
           <button style={btnStyle('ghost', { padding: '3px 10px', fontSize: 11 })} onClick={() => setOpen((o) => !o)}>
@@ -399,6 +437,12 @@ function PayInfoForm({ platform, platformLabel, info, walletClient, onDone }: {
           </button>
         )}
       </div>
+      {info.isSet && !open && (
+        <div style={{ marginTop: 6, marginLeft: 82, background: '#f9fafb', borderRadius: 6, padding: '8px 12px', border: '1px solid #f0f0f0' }}>
+          <HashRow label="Name Hash" hash={info.nameHash} />
+          <HashRow label="ID Hash"   hash={info.idHash} />
+        </div>
+      )}
       {open && (
         <div style={{ marginTop: 10, background: '#f9fafb', borderRadius: 8, padding: 14, border: '1px solid #e5e7eb' }}>
           <div style={GRID2}>
@@ -438,17 +482,13 @@ function RateEdit({ product, walletClient, onDone }: {
   const [loading, setLoading]         = useState(false);
   const [err, setErr]                 = useState<string | null>(null);
 
-  const displayRate = product.assetType === 0
-    ? (Number(product.rate) / 1e18).toFixed(4)
-    : (Number(product.rate) / 1000).toFixed(4);
+  const displayRate = (Number(product.rate) / 1e8).toFixed(4);
 
   const submit = async () => {
     if (!walletClient || !rateInput || (!noExpiry && !expiresInput)) return;
     setLoading(true); setErr(null);
     try {
-      const rate = product.assetType === 0
-        ? BigInt(Math.round(parseFloat(rateInput) * 1e18))
-        : BigInt(Math.round(parseFloat(rateInput) * 1000));
+      const rate = BigInt(Math.round(parseFloat(rateInput) * 1e8));
       const expiresAt = noExpiry
         ? 0n
         : BigInt(Math.floor(new Date(expiresInput).getTime() / 1000));
@@ -692,8 +732,8 @@ function BusinessHoursPanel({ product, walletClient, onDone }: {
 
 // ── CollateralPanel — Fix #4 ──────────────────────────────────────────────────
 
-function CollateralPanel({ product, cryptos, walletClient, onDone }: {
-  product: Product; cryptos: CryptoAsset[];
+function CollateralPanel({ product, cryptos, decimals, walletClient, onDone }: {
+  product: Product; cryptos: CryptoAsset[]; decimals: number;
   walletClient: WalletClient | undefined; onDone: () => void;
 }) {
   const [open, setOpen]       = useState(false);
@@ -702,7 +742,7 @@ function CollateralPanel({ product, cryptos, walletClient, onDone }: {
   const [loading, setLoading] = useState(false);
   const [err, setErr]         = useState<string | null>(null);
 
-  const displayCollateral = parseFloat(formatUnits(product.collateralAmount, 18)).toFixed(2);
+  const displayCollateral = parseFloat(formatUnits(product.collateralAmount, decimals)).toFixed(2);
 
   const handleWithdraw = async () => {
     if (!walletClient || !amount) return;
@@ -711,7 +751,7 @@ function CollateralPanel({ product, cryptos, walletClient, onDone }: {
       const { request } = await publicClient.simulateContract({
         address: c2cConfig.escrowAddress, abi: C2C_ESCROW_ABI,
         functionName: 'takeAmount',
-        args: [product.productId, product.assetType, parseUnits(amount, 18)],
+        args: [product.productId, product.assetType, parseUnits(amount, decimals)],
         account: walletClient.account!,
       });
       await walletClient.writeContract(request);
@@ -728,7 +768,7 @@ function CollateralPanel({ product, cryptos, walletClient, onDone }: {
     try {
       const cryptoAsset = cryptos.find((c) => String(c.id) === String(product.cryptoID));
       const tokenAddr   = cryptoAsset?.tokenAddress ?? c2cConfig.usdtAddress;
-      const amt         = parseUnits(amount, 18);
+      const amt         = parseUnits(amount, decimals);
 
       const { request: approveReq } = await publicClient.simulateContract({
         address: tokenAddr, abi: ERC20_ABI, functionName: 'approve',
@@ -772,7 +812,7 @@ function CollateralPanel({ product, cryptos, walletClient, onDone }: {
           <input
             style={{ ...INPUT_STYLE, marginBottom: 8 }}
             type="number" min="0" step="0.01"
-            placeholder="Amount (tokens, 18 decimals)"
+            placeholder={`Amount (tokens, ${decimals} decimals)`}
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
@@ -803,9 +843,10 @@ function ProductRow({ p, cryptoMap, fiatMap, now, cryptos, walletClient, onRefre
   walletClient: WalletClient | undefined;
   onRefresh: () => void;
 }) {
-  const isNeverExpiry = p.expiresAt === 0n;
-  const expired       = !isNeverExpiry && p.expiresAt < now;
-  const expStr        = new Date(Number(p.expiresAt) * 1000).toLocaleString();
+  const isNeverExpiry  = p.expiresAt === 0n;
+  const expired        = !isNeverExpiry && p.expiresAt < now;
+  const expStr         = new Date(Number(p.expiresAt) * 1000).toLocaleString();
+  const tokenDecimals  = cryptos.find((c) => String(c.id) === String(p.cryptoID))?.decimals ?? 18;
 
   const TD: React.CSSProperties = {
     padding: '10px 10px', verticalAlign: 'top' as const,
@@ -834,7 +875,7 @@ function ProductRow({ p, cryptoMap, fiatMap, now, cryptos, walletClient, onRefre
       </td>
       {/* Fix #4: Collateral with manage panel */}
       <td style={TD}>
-        <CollateralPanel product={p} cryptos={cryptos} walletClient={walletClient} onDone={onRefresh} />
+        <CollateralPanel product={p} cryptos={cryptos} decimals={tokenDecimals} walletClient={walletClient} onDone={onRefresh} />
       </td>
       {/* Fix #5: Rate with no-expiry */}
       <td style={TD}>
@@ -946,11 +987,11 @@ function NewProductForm({ walletClient, cryptos, fiats, onDone }: {
     if (!walletClient || !cryptoId || !fiatId || !collateral) return;
     setLoading(true); setErr(null);
     try {
-      const amount      = parseUnits(collateral, 18);
       const cid         = BigInt(cryptoId);
       const fid         = BigInt(fiatId);
       const cryptoAsset = cryptos.find((c) => String(c.id) === cryptoId);
       const tokenAddr   = cryptoAsset?.tokenAddress ?? c2cConfig.usdtAddress;
+      const amount      = parseUnits(collateral, cryptoAsset?.decimals ?? 18);
 
       const { request: approveReq } = await publicClient.simulateContract({
         address: tokenAddr, abi: ERC20_ABI, functionName: 'approve',
@@ -1041,6 +1082,203 @@ function NewProductForm({ walletClient, cryptos, fiats, onDone }: {
   );
 }
 
+// ── FiatPendingOrders ─────────────────────────────────────────────────────────
+
+interface FiatOrderItem {
+  orderId: bigint;
+  productId: bigint;
+  buyer: Hex;
+  amount: bigint;
+  rate: bigint;
+  deadline: bigint;
+  status: number;
+  rateVersion: number;
+  platformId: Hex;
+}
+
+const STATUS_LABELS: Record<number, string> = { 0: 'PENDING', 4: 'WAITING' };
+
+function FiatPendingOrders({ address, products, walletClient }: {
+  address: Hex;
+  products: Product[];
+  walletClient: WalletClient | undefined;
+}) {
+  const [orders, setOrders]       = useState<FiatOrderItem[]>([]);
+  const [loading, setLoading]     = useState(false);
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [logs, setLogs]           = useState<Record<string, string[]>>({});
+
+  const fiatProducts = useMemo(() => products.filter((p) => p.assetType === 1), [products]);
+
+  const addLog = (key: string, msg: string) =>
+    setLogs((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), msg] }));
+
+  const loadOrders = useCallback(async () => {
+    if (!isC2CConfigured() || fiatProducts.length === 0) { setOrders([]); return; }
+    setLoading(true);
+    try {
+      const placedLogs = await publicClient.getLogs({
+        address: c2cConfig.escrowAddress,
+        event: ORDER_PLACED_ABI,
+        args: { merchant: address } as any,
+        fromBlock: 0n,
+      });
+
+      const pending: FiatOrderItem[] = [];
+      for (const pl of placedLogs) {
+        const a = pl.args as any;
+        if (Number(a.assetType) !== 1) continue;
+        const productId = a.productId as bigint;
+        const orderId   = a.orderId   as bigint;
+        const product   = fiatProducts.find((p) => p.productId === productId);
+        if (!product) continue;
+        try {
+          const order = await publicClient.readContract({
+            address: c2cConfig.escrowAddress,
+            abi: C2C_ESCROW_ABI,
+            functionName: 'getOrder',
+            args: [address, productId, 1, orderId],
+          }) as any;
+          const status = Number(order.status ?? order[4] ?? 99);
+          if (status !== 0 && status !== 4) continue;
+          pending.push({
+            orderId,
+            productId,
+            buyer:       (order.buyer      ?? order[0]) as Hex,
+            amount:      (order.amount     ?? order[1]) as bigint,
+            rate:        (order.rate       ?? order[2]) as bigint,
+            deadline:    (order.deadline   ?? order[3]) as bigint,
+            status,
+            rateVersion: Number(order.rateVersion ?? order[5] ?? 0),
+            platformId:  product.platformId,
+          });
+        } catch { /* order may not exist yet */ }
+      }
+      setOrders(pending);
+    } finally {
+      setLoading(false);
+    }
+  }, [address, fiatProducts]);
+
+  useEffect(() => { loadOrders(); }, [loadOrders]);
+
+  async function handleSubmitProof(o: FiatOrderItem) {
+    if (!walletClient) return;
+    const key = `${o.productId}-${o.orderId}`;
+    setRunningId(key);
+    setLogs((p) => ({ ...p, [key]: [] }));
+    try {
+      addLog(key, 'Building binding context…');
+      const isWise = o.platformId === PLATFORM_WISE;
+      const ctx = isWise
+        ? await makeWiseFiatBindingContext(address, o.buyer, o.amount, o.orderId)
+        : await makeAlipayFiatBindingContext(address, o.buyer, o.amount, o.orderId);
+      addLog(key, `rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
+      addLog(key, 'Launching TLSN plugin…');
+
+      let txHash: Hex;
+      if (isWise) {
+        const { contacts, transfer } = await generateWiseFiatProof(ctx);
+        addLog(key, 'Proofs generated, submitting…');
+        txHash = await submitWiseFiatProof(walletClient, o.orderId, contacts, transfer);
+      } else {
+        const proof = await generateAlipayFiatProof(ctx);
+        addLog(key, 'Proof generated, submitting…');
+        txHash = await submitAlipayFiatProof(walletClient, o.orderId, proof);
+      }
+      addLog(key, `✅ Done — tx=${txHash}`);
+      setTimeout(loadOrders, 800);
+    } catch (e: any) {
+      addLog(key, `❌ ${e?.shortMessage ?? e?.message ?? String(e)}`);
+    } finally {
+      setRunningId(null);
+    }
+  }
+
+  if (fiatProducts.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <SectionHdr>
+        FIAT Pending Orders
+        <button
+          style={btnStyle('ghost', { padding: '2px 8px', fontSize: 10, marginLeft: 8 })}
+          onClick={loadOrders}
+          disabled={loading}
+        >
+          {loading ? '…' : '↻'}
+        </button>
+      </SectionHdr>
+
+      {loading && <p style={{ fontSize: 12, color: '#9ca3af' }}>Loading…</p>}
+
+      {!loading && orders.length === 0 && (
+        <div style={{ padding: '14px 0', fontSize: 12, color: '#9ca3af' }}>
+          No pending FIAT orders.
+        </div>
+      )}
+
+      {orders.map((o) => {
+        const key      = `${o.productId}-${o.orderId}`;
+        const isRunning = runningId === key;
+        const orderLogs = logs[key] ?? [];
+        const dl = new Date(Number(o.deadline) * 1000).toLocaleString();
+        const isWise = o.platformId === PLATFORM_WISE;
+
+        return (
+          <div key={key} style={{
+            background: '#fafafa', borderRadius: 8, padding: '12px 14px',
+            border: '1px solid #e5e7eb', marginBottom: 10,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ fontSize: 13 }}>
+                <span style={{ fontWeight: 700 }}>
+                  {isWise ? 'Wise' : 'Alipay'}-FIAT
+                </span>
+                {' '}
+                <span style={{ ...MONO, fontSize: 11, color: '#6b7280' }}>
+                  P{String(o.productId)} / Ord#{String(o.orderId)}
+                </span>
+                <Badge v={o.status === 0 ? 'warning' : 'info'} text={STATUS_LABELS[o.status] ?? String(o.status)} />
+                <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
+                  Buyer: <span style={MONO}>{o.buyer.slice(0, 12)}…</span>
+                  {' · '}
+                  Amount: <strong>{parseFloat(formatUnits(o.amount, 18)).toFixed(4)} USDT</strong>
+                  {' · '}
+                  Rate v{o.rateVersion}: {(Number(o.rate) / 1e8).toFixed(4)}
+                  {' · '}
+                  Deadline: {dl}
+                </div>
+              </div>
+              {walletClient && (
+                <button
+                  style={btnStyle('primary', { fontSize: 11, padding: '4px 12px' })}
+                  onClick={() => handleSubmitProof(o)}
+                  disabled={isRunning}
+                >
+                  {isRunning ? 'Running…' : 'Submit FIAT Proof'}
+                </button>
+              )}
+            </div>
+            {orderLogs.length > 0 && (
+              <div style={{
+                marginTop: 8, background: '#1a1a2e', borderRadius: 6, padding: '8px 10px',
+                fontFamily: 'monospace', fontSize: 11, lineHeight: 1.6,
+              }}>
+                {orderLogs.map((l, i) => (
+                  <div key={i} style={{ color: l.startsWith('❌') ? '#ff6b6b' : l.startsWith('✅') ? '#69db7c' : '#c8d6e5' }}>
+                    {l}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── MerchantTab ───────────────────────────────────────────────────────────────
 
 function MerchantTab({ address, cryptos, fiats }: {
@@ -1124,6 +1362,9 @@ function MerchantTab({ address, cryptos, fiats }: {
         </div>
         {!wc && <p style={{ fontSize: 11, color: '#9ca3af', marginTop: 6 }}>Read-only — this address is not a known test account.</p>}
       </div>
+
+      {/* ── FIAT Pending Orders ── */}
+      <FiatPendingOrders address={address} products={data.products} walletClient={wc} />
 
       {/* ── Products ── */}
       <div>

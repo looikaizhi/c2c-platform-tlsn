@@ -152,9 +152,9 @@ async function onClick() {
                 ],
                 handlers: [
                     // Reveal the URL
-                    { type: 'SENT', part: 'START_LINE', action: 'PEDERSEN'},
+                    { type: 'SENT', part: 'START_LINE', action: 'REVEAL' },
                     // Reveal response status start line
-                    { type: 'RECV', part: 'START_LINE', action: 'PEDERSEN', hideKey: true },
+                    { type: 'RECV', part: 'START_LINE', action: 'REVEAL' },
                     // Selectively reveal key bizInfo fields from result.bizInfo.*
                     // (Note: Parser only supports top-level JSON paths; nested paths not yet supported,
                     //  so we use regex patterns to match specific fields within the JSON body.)
@@ -352,7 +352,7 @@ function main() {
                 const requestBody = jsonBody
                     ? (typeof jsonBody === 'string' ? jsonBody : JSON.stringify(jsonBody))
                     : formBody
-                        ? new URLSearchParams(formBody).toString().replaceAll('%20', '+')
+                        ? new URLSearchParams(formBody).toString().split('%20').join('+')
                         : null;
 
                 if (request.url && !cachedRequestUrl) {

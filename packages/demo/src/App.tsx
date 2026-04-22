@@ -90,11 +90,15 @@ export function App() {
 
             const json: PluginResultType = JSON.parse(result);
 
+            const debugData = (json as any).results
+                ?? (json as any).displayResults
+                ?? json;
+
             setPluginResults((prev) => ({
                 ...prev,
                 [pluginKey]: {
                     resultHtml: plugin.parseResult(json),
-                    debugJson: JSON.stringify(json.results, null, 2),
+                    debugJson: JSON.stringify(debugData, null, 2),
                 },
             }));
 

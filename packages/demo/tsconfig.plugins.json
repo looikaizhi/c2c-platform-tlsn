@@ -8,8 +8,8 @@
         "isolatedModules": false
     },
     "include": [
-        "src/plugins/**/*.ts",
-        "src/plugins/plugin-globals.d.ts"
+        "plugins/**/*.ts",
+        "plugins/plugin-globals.d.ts"
     ],
     "exclude": []
 }

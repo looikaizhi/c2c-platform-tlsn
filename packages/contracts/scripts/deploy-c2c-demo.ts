@@ -1,13 +1,13 @@
 /**
  * Deploy the C2C Demo contracts and fully initialize state.
- * Writes contract addresses to packages/demo/.env after deployment.
+ * Writes contract addresses + product IDs to packages/demo/.env after deployment.
  *
  * Account layout (Hardhat deterministic accounts):
  *   accounts[0]   → Admin (deployer)
  *   accounts[1-3] → Merchant 1 / 2 / 3
  *   accounts[4-8] → User 1 / 2 / 3 / 4 / 5
  *
- * Tokens deployed (all 3 minted to wallets):
+ * Tokens deployed (all minted to wallets):
  *   USDT (18 decimals) — registered in contract as cryptoId=0
  *   USDC (6  decimals) — wallet-only, NOT registered in contract
  *   DAI  (18 decimals) — wallet-only, NOT registered in contract
@@ -16,12 +16,15 @@
  *   Crypto: USDT (cryptoId=0)
  *   Fiat:   MYR  (fiatId=0)
  *
+ * Products per merchant:
+ *   productId=0 CRYPTO → Wise   (USDT cryptoId=0, MYR fiatId=0)
+ *
  * Usage:
  *   npx hardhat run scripts/deploy-c2c-demo.ts --network localhost
  */
 
 import { network } from "hardhat";
-import { parseUnits } from "viem";
+import { parseUnits, keccak256, toBytes } from "viem";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -30,19 +33,27 @@ import { performance } from "perf_hooks";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Rust verifier server signing address (from packages/verifier VERIFIER_PRIVATE_KEY)
-const VERIFIER_SIGNER_ADDRESS = "0x5BC034e03584e20a81Aa0c36A2974c338Dd8A368";
+// Rust verifier server signing address (accounts[9] — from KEYS in deployDemoState.ts)
+const VERIFIER_SIGNER_ADDRESS = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65";
 
-// Mint amount: 1000 of each token to every merchant and user
-const MINT_18 = parseUnits("1000", 18); // USDT / DAI (18 dec)
-const MINT_6  = parseUnits("1000",  6); // USDC (6 dec)
+// ── Rate constants (RATE_PRECISION_EXP = 8, so 4.5 MYR/USDT = 450_000_000) ──
+const RATE_WISE_CRYPTO   = 450_000_000n;  // 4.5  MYR / USDT
 
-// Merchant 1 collateral for USDT product
-const COLLATERAL_USDT = parseUnits("100", 18);
+// ── Product IDs (auto-incremented per merchant per assetType during listing) ──
+const WISE_CRYPTO_PRODUCT_ID   = 0n;
 
-// Rate: 1 USDT = 2.5 MYR
-const RATE       = parseUnits("2.5", 18);
-const BUY_AMOUNT = parseUnits("1",   18);
+// ── Token amounts ──────────────────────────────────────────────────────────────
+const MINT_18      = parseUnits("2000", 18);  // USDT / DAI (18 dec)
+const MINT_6       = parseUnits("2000",  6);  // USDC (6 dec)
+const COLLATERAL   = parseUnits("100",  18);  // 100 USDT collateral per product
+const MAX_UINT256  = (2n ** 256n) - 1n;
+
+// ── Merchant identities ────────────────────────────────────────────────────────
+const MERCHANT_WISE_NAMES   = ["KAI XU LOOI",       "MERCHANT TWO",    "MERCHANT THREE"];
+const MERCHANT_WISE_HANDLES = ["@kaixul1",            "@merchant2wise",  "@merchant3wise"];
+
+// ── Never-expiring rate ─────────────────────────────────────────────────────────
+const RATE_EXPIRY_NEVER = 0n;
 
 function elapsed(label: string, start: number): number {
   const ms = Math.round(performance.now() - start);
@@ -51,56 +62,47 @@ function elapsed(label: string, start: number): number {
 }
 
 async function main() {
-  const tScript = performance.now(); // true script start (inside Hardhat runtime)
+  const tScript = performance.now();
 
-  // ── Hardhat init (connect + fetch wallet clients) ─────────────────────────
+  // ── Hardhat init ─────────────────────────────────────────────────────────────
   const tInit = performance.now();
   const { viem } = await network.connect();
   const wallets = await viem.getWalletClients();
-  elapsed("Hardhat init (connect + fetch 20 wallet clients via RPC)", tInit);
+  elapsed("Hardhat init (connect + fetch wallet clients via RPC)", tInit);
 
-  // ── Account layout ───────────────────────────────────────────────────────
+  // ── Account layout ───────────────────────────────────────────────────────────
   const [
     adminWallet,
     merchant1Wallet, merchant2Wallet, merchant3Wallet,
     user1Wallet, user2Wallet, user3Wallet, user4Wallet, user5Wallet,
   ] = wallets;
 
-  const adminAddr     = adminWallet.account.address;
-  const merchant1Addr = merchant1Wallet.account.address;
-  const merchant2Addr = merchant2Wallet.account.address;
-  const merchant3Addr = merchant3Wallet.account.address;
-  const user1Addr     = user1Wallet.account.address;
-  const user2Addr     = user2Wallet.account.address;
-  const user3Addr     = user3Wallet.account.address;
-  const user4Addr     = user4Wallet.account.address;
-  const user5Addr     = user5Wallet.account.address;
+  const merchantWallets = [merchant1Wallet, merchant2Wallet, merchant3Wallet];
+  const userWallets     = [user1Wallet, user2Wallet, user3Wallet, user4Wallet, user5Wallet];
+
+  const adminAddr       = adminWallet.account.address;
+  const merchantAddrs   = merchantWallets.map((w) => w.account.address);
+  const userAddrs       = userWallets.map((w) => w.account.address);
 
   console.log("=== C2C Demo Deployment ===");
   console.log("Admin:      ", adminAddr);
-  console.log("Merchant 1: ", merchant1Addr);
-  console.log("Merchant 2: ", merchant2Addr);
-  console.log("Merchant 3: ", merchant3Addr);
-  console.log("User 1:     ", user1Addr);
-  console.log("User 2:     ", user2Addr);
-  console.log("User 3:     ", user3Addr);
-  console.log("User 4:     ", user4Addr);
-  console.log("User 5:     ", user5Addr);
+  merchantAddrs.forEach((a, i) => console.log(`Merchant ${i + 1}: `, a));
+  userAddrs.forEach((a, i) => console.log(`User ${i + 1}:     `, a));
   console.log("Verifier Signer:", VERIFIER_SIGNER_ADDRESS);
   console.log("");
 
-  const t0 = performance.now(); // deployment start (after init overhead)
+  const t0 = performance.now();
 
-  // ── 1. Deploy tokens ─────────────────────────────────────────────────────
-  const usdt = await viem.deployContract("MockERC20", ["Tether USD",       "USDT", 18]);
-  const usdc = await viem.deployContract("MockERC20", ["USD Coin",         "USDC",  6]);
-  const dai  = await viem.deployContract("MockERC20", ["Dai Stablecoin",   "DAI",  18]);
+  // ── 1. Deploy tokens ─────────────────────────────────────────────────────────
+  const usdt = await viem.deployContract("MockERC20", ["Tether USD",     "USDT", 18]);
+  const usdc = await viem.deployContract("MockERC20", ["USD Coin",       "USDC",  6]);
+  const dai  = await viem.deployContract("MockERC20", ["Dai Stablecoin", "DAI",  18]);
   console.log("MockERC20 USDT:", usdt.address);
   console.log("MockERC20 USDC:", usdc.address);
   console.log("MockERC20 DAI: ", dai.address);
-  const t1 = performance.now(); elapsed("Step 1 — Token deploy only (3 contracts)", t0);
+  const t1 = performance.now(); elapsed("Step 1 — Token deploy (3 contracts)", t0);
 
-  // ── 2. Deploy core contracts ──────────────────────────────────────────────
+  // ── 2. Deploy core contracts ──────────────────────────────────────────────────
   const tlsnVerifier = await viem.deployContract("TLSNVerifier");
   console.log("TLSNVerifier:  ", tlsnVerifier.address);
 
@@ -113,27 +115,23 @@ async function main() {
   ]);
   console.log("C2CEscrow:     ", c2cEscrow.address);
   console.log("");
-  const t2 = performance.now(); elapsed("Step 2 — Core contracts deploy (TLSNVerifier + C2CAdmin + C2CEscrow)", t1);
+  const t2 = performance.now(); elapsed("Step 2 — Core contracts (TLSNVerifier + C2CAdmin + C2CEscrow)", t1);
 
-  // ── 3. Cross-contract authorization ──────────────────────────────────────
+  // ── 3. Cross-contract authorization ──────────────────────────────────────────
   await tlsnVerifier.write.setAuthorizedCaller([c2cAdmin.address,  true]);
   await tlsnVerifier.write.setAuthorizedCaller([c2cEscrow.address, true]);
   await c2cAdmin.write.setAuthorizedCaller([c2cEscrow.address, true]);
   console.log("✅ Cross-contract authorization done");
 
-  // ── 4. Register trusted verifier & payment servers ────────────────────────
+  // ── 4. Register trusted verifier & payment servers ───────────────────────────
   await tlsnVerifier.write.addTrustedVerifier([VERIFIER_SIGNER_ADDRESS]);
   await tlsnVerifier.write.addTrustedPaymentServer(["wise.com"]);
   await tlsnVerifier.write.addTrustedPaymentServer(["mbillexprod.alipay.com"]);
   console.log("✅ Trusted verifier & payment servers registered");
 
-  // ── 5. Deploy & register platform verifiers ───────────────────────────────
-  const wisePlatformVerifier = await viem.deployContract("WisePlatformVerifier", [
-    tlsnVerifier.address,
-  ]);
-  const alipayPlatformVerifier = await viem.deployContract("AlipayPlatformVerifier", [
-    tlsnVerifier.address,
-  ]);
+  // ── 5. Deploy & register platform verifiers ───────────────────────────────────
+  const wisePlatformVerifier   = await viem.deployContract("WisePlatformVerifier",   [tlsnVerifier.address]);
+  const alipayPlatformVerifier = await viem.deployContract("AlipayPlatformVerifier", [tlsnVerifier.address]);
   console.log("WisePlatformVerifier:  ", wisePlatformVerifier.address);
   console.log("AlipayPlatformVerifier:", alipayPlatformVerifier.address);
 
@@ -142,87 +140,104 @@ async function main() {
   await tlsnVerifier.write.setPlatformVerifier([PLATFORM_WISE,   wisePlatformVerifier.address]);
   await tlsnVerifier.write.setPlatformVerifier([PLATFORM_ALIPAY, alipayPlatformVerifier.address]);
   console.log("✅ Platform verifiers registered (Wise + Alipay)");
-  const t3 = performance.now(); elapsed("Steps 3-5 — Auth (3 tx) + trusted servers (3 tx) + platform verifiers deploy+register (4 tx)", t2);
+  const t3 = performance.now(); elapsed("Steps 3-5 — Auth + trusted servers + platform verifiers", t2);
 
-  // ── 6. Register supported assets (USDT + MYR only) ───────────────────────
-  await c2cAdmin.write.addCryptoInfo([usdt.address, true]); // cryptoId = 0 (USDT)
-  await c2cAdmin.write.addFiatInfo(["MYR", true]);           // fiatId   = 0 (MYR)
+  // ── 6. Register supported assets ─────────────────────────────────────────────
+  await c2cAdmin.write.addCryptoInfo([usdt.address, true]);  // cryptoId=0 USDT
+  await c2cAdmin.write.addFiatInfo(["MYR", true]);            // fiatId=0 MYR
   console.log("✅ Assets: USDT (cryptoId=0)  Fiat: MYR (fiatId=0)");
-  console.log("   (USDC and DAI deployed as wallet tokens only, not registered in contract)");
   const t4 = performance.now(); elapsed("Step 6 — Asset registration (2 tx)", t3);
 
-  // ── 7. Mint 1000 of each token — sequential (automine requires strict ordering) ─
-  // Hardhat automine mines each tx immediately in its own block, so the mempool
-  // cannot queue transactions. All 24 mints share the admin sender, meaning nonces
-  // must be submitted in strict order (no concurrent submissions with future nonces).
-  const allAddresses = [
-    merchant1Addr, merchant2Addr, merchant3Addr,
-    user1Addr, user2Addr, user3Addr, user4Addr, user5Addr,
-  ];
-  for (const addr of allAddresses) {
+  // ── 7. Mint tokens to all merchants and users ─────────────────────────────────
+  const allRecipients = [...merchantAddrs, ...userAddrs];
+  for (const addr of allRecipients) {
     await usdt.write.mint([addr, MINT_18]);
     await usdc.write.mint([addr, MINT_6]);
     await dai.write.mint( [addr, MINT_18]);
   }
-  console.log("✅ Minted 1000 USDT + 1000 USDC + 1000 DAI to all 3 merchants and 5 users");
-  const t5 = performance.now(); elapsed("Step 7 — Mint (8 addr × 3 tokens = 24 tx, sequential)", t4);
+  console.log(`✅ Minted 2000 USDT + 2000 USDC + 2000 DAI to ${allRecipients.length} accounts`);
+  const t5 = performance.now(); elapsed(`Step 7 — Mint (${allRecipients.length} addr × 3 tokens, sequential)`, t4);
 
-  // ── 8. Register Merchant 1 only — lists USDT→MYR (Wise) ──────────────────
-  await c2cAdmin.write.registerMerchantByAdmin([merchant1Addr]);
-  const usdtAsMerchant1 = await viem.getContractAt("MockERC20", usdt.address, {
-    client: { wallet: merchant1Wallet },
-  });
-  const escrowAsMerchant1 = await viem.getContractAt("C2CEscrow", c2cEscrow.address, {
-    client: { wallet: merchant1Wallet },
-  });
-  await usdtAsMerchant1.write.approve([c2cEscrow.address, COLLATERAL_USDT]);
-  await (escrowAsMerchant1.write as any).listCryptoProduct([
-    0n,               // cryptoId = USDT
-    0n,               // fiatId   = MYR
-    COLLATERAL_USDT,  // 100 USDT collateral
-    true,             // active
-    PLATFORM_WISE,
-  ]);
-  console.log("✅ Merchant 1 registered and listed: USDT→MYR (Wise), collateral=100 USDT");
-  console.log("   (Merchant 2 and 3 hold tokens but are not registered)");
-  console.log("");
-  elapsed("Step 8 — Merchant 1 setup (3 tx)", t5);
+  // ── 8. Approve escrow for users (MAX_UINT) ─────────────────────────────────
+  for (const uWallet of userWallets) {
+    const usdtAsU = await viem.getContractAt("MockERC20", usdt.address, { client: { wallet: uWallet } });
+    const usdcAsU = await viem.getContractAt("MockERC20", usdc.address, { client: { wallet: uWallet } });
+    const daiAsU  = await viem.getContractAt("MockERC20", dai.address,  { client: { wallet: uWallet } });
+    await usdtAsU.write.approve([c2cEscrow.address, MAX_UINT256]);
+    await usdcAsU.write.approve([c2cEscrow.address, MAX_UINT256]);
+    await daiAsU.write.approve( [c2cEscrow.address, MAX_UINT256]);
+  }
+  console.log("✅ Users approved escrow for USDT + USDC + DAI (MAX_UINT)");
+  const t6 = performance.now(); elapsed("Step 8 — User approvals", t5);
 
-  // ── 9. Write .env ─────────────────────────────────────────────────────────
+  // ── 9. Register 1 merchant, list Wise buy-crypto product, publish rate, openNow ──
+  const merchantIndex = 0;
+  const mWallet = merchantWallets[merchantIndex];
+  const mAddr   = merchantAddrs[merchantIndex];
+
+  // Contract handles connected to this merchant's wallet
+  const usdtAsM   = await viem.getContractAt("MockERC20", usdt.address,   { client: { wallet: mWallet } });
+  const adminAsM  = await viem.getContractAt("C2CAdmin",  c2cAdmin.address,  { client: { wallet: mWallet } });
+  const escrowAsM = await viem.getContractAt("C2CEscrow", c2cEscrow.address, { client: { wallet: mWallet } });
+
+  console.log(`\n── Merchant 1 (${mAddr}) ──`);
+
+  // Approve escrow for USDT only (MAX_UINT)
+  await usdtAsM.write.approve([c2cEscrow.address, MAX_UINT256]);
+
+  // Register merchant by admin
+  await c2cAdmin.write.registerMerchantByAdmin([mAddr]);
+  console.log(`  ✅ Registered`);
+
+  // Set payment info for Wise
+  const wNameHash = keccak256(toBytes(MERCHANT_WISE_NAMES[merchantIndex]));
+  const wIdHash   = keccak256(toBytes(MERCHANT_WISE_HANDLES[merchantIndex]));
+  await (adminAsM.write as any).setMerchantPaymentInfoForPlatform([PLATFORM_WISE, wNameHash, wIdHash]);
+  console.log(`  ✅ Payment info set (Wise)`);
+
+  // List Wise buy-crypto product: USDT(0) -> MYR(0), productId=0 for assetType=CRYPTO
+  await (escrowAsM.write as any).listCryptoProduct([0n, 0n, COLLATERAL, true, PLATFORM_WISE]);
+  console.log(`  ✅ Listed 1 product (Wise CRYPTO)`);
+
+  // Publish never-expiring rate (assetType: 0=CRYPTO)
+  await (adminAsM.write as any).publishRate([WISE_CRYPTO_PRODUCT_ID, 0, RATE_WISE_CRYPTO, RATE_EXPIRY_NEVER]);
+  console.log(`  ✅ Rate published (4.5 MYR/USDT, never expires)`);
+
+  // Force-open this product (assetType: 0=CRYPTO)
+  await (adminAsM.write as any).openNow([WISE_CRYPTO_PRODUCT_ID, 0]);
+  console.log(`  ✅ Product opened`);
+  const t7 = performance.now(); elapsed("Step 9 — 1 merchant × (1 approve + 1 register + 1 paymentInfo + 1 list + 1 publishRate + 1 openNow)", t6);
+
+  // ── 10. Write .env ─────────────────────────────────────────────────────────
   const envPath = path.resolve(__dirname, "../../demo/.env");
-  const envContent =
-    [
-      `# Auto-generated by deploy-c2c-demo.ts at ${new Date().toISOString()}`,
-      `VITE_VERIFIER_HOST=localhost:7047`,
-      `VITE_SSL=false`,
-      `VITE_CHAIN_ID=31337`,
-      // Core contracts
-      `VITE_C2C_ADMIN_ADDRESS=${c2cAdmin.address}`,
-      `VITE_C2C_ESCROW_ADDRESS=${c2cEscrow.address}`,
-      `VITE_VERIFIER_SIGNER_ADDRESS=${VERIFIER_SIGNER_ADDRESS}`,
-      // Tokens
-      `VITE_USDT_ADDRESS=${usdt.address}`,
-      `VITE_USDC_ADDRESS=${usdc.address}`,
-      `VITE_DAI_ADDRESS=${dai.address}`,
-      // Merchants
-      `VITE_MERCHANT1_ADDRESS=${merchant1Addr}`,
-      `VITE_MERCHANT2_ADDRESS=${merchant2Addr}`,
-      `VITE_MERCHANT3_ADDRESS=${merchant3Addr}`,
-      // Users
-      `VITE_USER1_ADDRESS=${user1Addr}`,
-      `VITE_USER2_ADDRESS=${user2Addr}`,
-      `VITE_USER3_ADDRESS=${user3Addr}`,
-      `VITE_USER4_ADDRESS=${user4Addr}`,
-      `VITE_USER5_ADDRESS=${user5Addr}`,
-      // Demo params
-      `VITE_RATE=${RATE.toString()}`,
-      `VITE_BUY_AMOUNT=${BUY_AMOUNT.toString()}`,
+  const envContent = [
+    `# Auto-generated by deploy-c2c-demo.ts at ${new Date().toISOString()}`,
+    `VITE_VERIFIER_HOST=localhost:7047`,
+    `VITE_SSL=false`,
+    `VITE_CHAIN_ID=31337`,
+    // Core contracts
+    `VITE_C2C_ADMIN_ADDRESS=${c2cAdmin.address}`,
+    `VITE_C2C_ESCROW_ADDRESS=${c2cEscrow.address}`,
+    `VITE_VERIFIER_SIGNER_ADDRESS=${VERIFIER_SIGNER_ADDRESS}`,
+    // Tokens
+    `VITE_USDT_ADDRESS=${usdt.address}`,
+    `VITE_USDC_ADDRESS=${usdc.address}`,
+    `VITE_DAI_ADDRESS=${dai.address}`,
+    // Merchants
+    `VITE_MERCHANT1_ADDRESS=${merchantAddrs[0]}`,
+    `VITE_MERCHANT2_ADDRESS=${merchantAddrs[1]}`,
+    `VITE_MERCHANT3_ADDRESS=${merchantAddrs[2]}`,
+    // Users
+    `VITE_USER1_ADDRESS=${userAddrs[0]}`,
+    `VITE_USER2_ADDRESS=${userAddrs[1]}`,
+    `VITE_USER3_ADDRESS=${userAddrs[2]}`,
+    `VITE_USER4_ADDRESS=${userAddrs[3]}`,
+    `VITE_USER5_ADDRESS=${userAddrs[4]}`,
     ].join("\n") + "\n";
 
   fs.writeFileSync(envPath, envContent, "utf-8");
 
-  console.log("");
-  console.log("=".repeat(60));
+  console.log("\n" + "=".repeat(60));
   console.log("✅ .env written to packages/demo/.env");
   console.log("=".repeat(60));
   console.log(envContent);
