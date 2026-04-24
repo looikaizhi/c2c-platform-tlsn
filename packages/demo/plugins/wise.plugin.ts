@@ -257,61 +257,65 @@ async function onClick() {
             return;
         }
 
-        const contactsProof = await prove(
-            {
-                url: contactsRequestUrl,
-                method: METHOD,
-                headers: buildHeadersForEndpoint(ENDPOINT_CONTACTS),
-            },
-            {
-                verifierUrl: VERIFIER_URL,
-                proxyUrl: PROXY_URL_BASE + HOST,
-                maxRecvData: 20000,
-                maxSentData: 12000,
-                transcriptCommitHashAlg: 'Keccak256',
-                handlers: CONTACTS_HANDLERS,
-                sessionData: {
-                    __tlsn_order_binding_hash: CONTACTS_ORDER_BINDING_HASH,
-                    __tlsn_merchant_name_hash: MERCHANT_NAME_HASH,
-                    __tlsn_merchant_id_hash:   MERCHANT_ID_HASH,
-                    __tlsn_payee_name_hash:    PAYEE_NAME_HASH,
-                    __tlsn_payee_id_hash:      PAYEE_ID_HASH,
-                },
-                accountCheckFields: [
-                    // CONTACTS_HANDLERS[2] = title    → verify against payeeNameHash
-                    { handlerIndex: 2, sessionDataKey: '__tlsn_payee_name_hash', valueMode: 'json_value' },
-                    // CONTACTS_HANDLERS[3] = subtitle → verify against payeeIdHash
-                    { handlerIndex: 3, sessionDataKey: '__tlsn_payee_id_hash',   valueMode: 'json_value' },
-                ],
-                transcriptCommitDebug: {
-                    exposeOpenings: true,
-                    //includeVerifierTranscript: true,
-                    runSelfCheck: true,
-                },
-            }
-        );
+        const contactsHeaders = buildHeadersForEndpoint(ENDPOINT_CONTACTS);
+        const transferHeaders = buildHeadersForEndpoint(ENDPOINT_TRANSFER);
 
-        const transferProof = await prove(
-            {
-                url: transferRequestUrl,
-                method: METHOD,
-                headers: buildHeadersForEndpoint(ENDPOINT_TRANSFER),
-            },
-            {
-                verifierUrl: VERIFIER_URL,
-                proxyUrl: PROXY_URL_BASE + HOST,
-                maxRecvData: 20000,
-                maxSentData: 12000,
-                transcriptCommitHashAlg: 'Keccak256',
-                handlers: TRANSFER_HANDLERS,
-                sessionData: { __tlsn_order_binding_hash: TRANSFER_ORDER_BINDING_HASH },
-                transcriptCommitDebug: {
-                    exposeOpenings: true,
-                    //includeVerifierTranscript: true,
-                    runSelfCheck: true,
+        const [contactsProof, transferProof] = await Promise.all([
+            prove(
+                {
+                    url: contactsRequestUrl,
+                    method: METHOD,
+                    headers: contactsHeaders,
                 },
-            }
-        );
+                {
+                    verifierUrl: VERIFIER_URL,
+                    proxyUrl: PROXY_URL_BASE + HOST,
+                    maxRecvData: 20000,
+                    maxSentData: 12000,
+                    transcriptCommitHashAlg: 'Keccak256',
+                    handlers: CONTACTS_HANDLERS,
+                    sessionData: {
+                        __tlsn_order_binding_hash: CONTACTS_ORDER_BINDING_HASH,
+                        __tlsn_merchant_name_hash: MERCHANT_NAME_HASH,
+                        __tlsn_merchant_id_hash:   MERCHANT_ID_HASH,
+                        __tlsn_payee_name_hash:    PAYEE_NAME_HASH,
+                        __tlsn_payee_id_hash:      PAYEE_ID_HASH,
+                    },
+                    accountCheckFields: [
+                        // CONTACTS_HANDLERS[2] = title    → verify against payeeNameHash
+                        { handlerIndex: 2, sessionDataKey: '__tlsn_payee_name_hash', valueMode: 'json_value' },
+                        // CONTACTS_HANDLERS[3] = subtitle → verify against payeeIdHash
+                        { handlerIndex: 3, sessionDataKey: '__tlsn_payee_id_hash',   valueMode: 'json_value' },
+                    ],
+                    transcriptCommitDebug: {
+                        exposeOpenings: true,
+                        //includeVerifierTranscript: true,
+                        runSelfCheck: true,
+                    },
+                }
+            ),
+            prove(
+                {
+                    url: transferRequestUrl,
+                    method: METHOD,
+                    headers: transferHeaders,
+                },
+                {
+                    verifierUrl: VERIFIER_URL,
+                    proxyUrl: PROXY_URL_BASE + HOST,
+                    maxRecvData: 20000,
+                    maxSentData: 12000,
+                    transcriptCommitHashAlg: 'Keccak256',
+                    handlers: TRANSFER_HANDLERS,
+                    sessionData: { __tlsn_order_binding_hash: TRANSFER_ORDER_BINDING_HASH },
+                    transcriptCommitDebug: {
+                        exposeOpenings: true,
+                        //includeVerifierTranscript: true,
+                        runSelfCheck: true,
+                    },
+                }
+            ),
+        ]);
 
         console.log('[wise] prove ok for contacts + transfer');
         done(JSON.stringify({
