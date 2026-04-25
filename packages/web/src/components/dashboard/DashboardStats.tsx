@@ -1,6 +1,7 @@
+import React from 'react';
 import { Activity, Banknote, CircleDollarSign, ShieldCheck } from 'lucide-react';
-import MetricChip from '@/components/ui/MetricChip';
-import SurfaceCard from '@/components/ui/SurfaceCard';
+import { Badge } from '@/components/ui/Badge';
+import { Card } from '@/components/ui/Card';
 
 interface DashboardStatsProps {
     totalOrders: number;
@@ -30,17 +31,18 @@ function StatCard({
     hint: string;
     tone: 'info' | 'success' | 'warning' | 'neutral';
 }) {
+    const badgeVariant: Record<string, 'info'|'success'|'warning'|'muted'> = { info: 'info', success: 'success', warning: 'warning', neutral: 'muted' };
     return (
-        <SurfaceCard className="min-w-56 flex-1 p-4">
+        <Card padding="none" className="min-w-56 flex-1 p-4">
             <div className="mb-3 flex items-center justify-between">
                 <span className="text-xs uppercase tracking-[0.12em] text-[var(--text-muted)]">{label}</span>
                 <div className="text-[var(--text-subtle)]">{icon}</div>
             </div>
             <p className="font-[var(--font-mono)] text-3xl font-semibold text-white">{value}</p>
             <div className="mt-3">
-                <MetricChip label="Status" value={hint} tone={tone} />
+                <Badge variant={badgeVariant[tone] ?? 'muted'} size="sm">{hint}</Badge>
             </div>
-        </SurfaceCard>
+        </Card>
     );
 }
 

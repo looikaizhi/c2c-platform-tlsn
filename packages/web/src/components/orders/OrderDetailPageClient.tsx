@@ -4,9 +4,9 @@ import Link from 'next/link';
 import { ArrowLeft, BadgeCheck, Clock3 } from 'lucide-react';
 import { useOrderDetailQuery } from '@/hooks/queries/useOrderDetailQuery';
 import { useOrderPaymentQuery } from '@/hooks/queries/useOrderPaymentQuery';
-import SectionHeader from '@/components/ui/SectionHeader';
-import StatusPill from '@/components/ui/StatusPill';
-import SurfaceCard from '@/components/ui/SurfaceCard';
+import { Badge } from '@/components/ui/Badge';
+import { Card } from '@/components/ui/Card';
+import { OrderTimeline } from '@/components/order/OrderTimeline';
 
 interface OrderDetailPageClientProps {
     orderId: string;
@@ -51,28 +51,28 @@ export default function OrderDetailPageClient({ orderId }: OrderDetailPageClient
                         <ArrowLeft className="h-4 w-4" />
                         返回 Dashboard
                     </Link>
-                    <StatusPill label={`Order #${orderId}`} tone="info" />
+                    <Badge variant="info">Order #{orderId}</Badge>
                 </div>
 
-                <SectionHeader
-                    eyebrow="Order Detail"
-                    title="订单审计视图"
-                    description="展示数据库快照与支付方式，链上最终状态请结合合约事件校验。"
-                />
+                <div>
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>Order Detail</p>
+                    <h1 style={{ fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>订单审计视图</h1>
+                    <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginTop: '4px' }}>展示数据库快照与支付方式，链上最终状态请结合合约事件校验。</p>
+                </div>
 
                 {detailQuery.isLoading ? (
-                    <SurfaceCard className="p-6">
+                    <Card padding="none" className="p-6">
                         <div className="h-5 w-48 animate-pulse rounded bg-[var(--bg-surface-4)]" />
                         <div className="mt-4 h-4 w-full animate-pulse rounded bg-[var(--bg-surface-4)]" />
                         <div className="mt-2 h-4 w-2/3 animate-pulse rounded bg-[var(--bg-surface-4)]" />
-                    </SurfaceCard>
+                    </Card>
                 ) : detailQuery.isError || !detailQuery.data ? (
                     <div role="alert" className="rounded-lg border border-[color:rgb(246_70_93_/_45%)] bg-[color:rgb(127_29_29_/_24%)] p-6 text-red-200">
                         订单详情加载失败，请稍后重试。
                     </div>
                 ) : (
                     <>
-                        <SurfaceCard className="p-6">
+                        <Card padding="none" className="p-6">
                             <div className="flex flex-wrap gap-4">
                                 <InfoItem label="商家地址" value={formatAddress(detailQuery.data.wallet_address)} />
                                 <InfoItem label="合约地址" value={formatAddress(detailQuery.data.contract_address)} />
@@ -88,9 +88,9 @@ export default function OrderDetailPageClient({ orderId }: OrderDetailPageClient
                                 <InfoItem label="成交量" value={`${detailQuery.data.trading_volume}`} />
                                 <InfoItem label="限额" value={`${detailQuery.data.minimum_amount} - ${detailQuery.data.maximum_amount} USD`} />
                             </div>
-                        </SurfaceCard>
+                        </Card>
 
-                        <SurfaceCard className="p-6">
+                        <Card padding="none" className="p-6">
                             <div className="mb-4 flex items-center gap-2 text-white">
                                 <BadgeCheck className="h-4 w-4 text-[var(--state-success)]" />
                                 支付方式
@@ -116,7 +116,16 @@ export default function OrderDetailPageClient({ orderId }: OrderDetailPageClient
                                     ))}
                                 </ul>
                             )}
-                        </SurfaceCard>
+                        </Card>
+
+                        <Card padding="md">
+                            <div style={{ marginBottom: 'var(--space-3)' }}>
+                                <h3 style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+                                    Order Timeline
+                                </h3>
+                            </div>
+                            <OrderTimeline steps={buildOrderTimeline(detailQuery.data)} />
+                        </Card>
 
                         <div className="flex items-center gap-2 rounded-lg border border-[color:rgb(240_185_11_/_45%)] bg-[color:rgb(113_63_18_/_24%)] p-3 text-xs text-amber-200">
                             <Clock3 className="h-4 w-4" />
@@ -127,6 +136,39 @@ export default function OrderDetailPageClient({ orderId }: OrderDetailPageClient
             </section>
         </main>
     );
+}
+
+import type { OrderDetail } from '@/server/db_types';
+
+function buildOrderTimeline(order: OrderDetail) {
+    const createdAt = order.create_time ? formatDateTime(order.create_time) : undefined;
+    const direction = order.fiat_to_crypto === 1
+        ? `${order.fiat_asset_name} → ${order.crypto_asset_name}`
+        : `${order.crypto_asset_name} → ${order.fiat_asset_name}`;
+
+    return [
+        {
+            label: '订单创建',
+            sublabel: direction,
+            timestamp: createdAt,
+            status: 'done' as const,
+        },
+        {
+            label: '等待付款',
+            sublabel: '买方需在限定时间内完成支付',
+            status: 'active' as const,
+        },
+        {
+            label: '支付验证 (zkTLS)',
+            sublabel: '提交 TLSN 链上支付证明',
+            status: 'pending' as const,
+        },
+        {
+            label: '交易完成',
+            sublabel: '资产自动释放给买方',
+            status: 'pending' as const,
+        },
+    ];
 }
 
 function InfoItem({ label, value }: { label: string; value: string }) {

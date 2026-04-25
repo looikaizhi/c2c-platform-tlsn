@@ -1,121 +1,236 @@
 "use client";
-
 import { useState } from 'react';
-import { ChevronDown, Plug, Unplug, Wallet } from 'lucide-react';
 import { useWallet } from '@/hooks/useWallet';
-import ActionButton from './ui/ActionButton';
-import StatusPill from './ui/StatusPill';
+import { Button } from './ui/Button';
+import { Badge } from './ui/Badge';
+
+function truncateAddr(addr: string) {
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
 
 export default function WalletConnect() {
-    const {
-        address,
-        chainId,
-        isConnected,
-        wallets,
-        isConnecting,
-        error,
-        connect,
-        disconnect,
-    } = useWallet();
-    const [showDropdown, setShowDropdown] = useState(false);
+  const { address, chainId, isConnected, wallets, isConnecting, error, connect, disconnect } =
+    useWallet();
+  const [showDropdown, setShowDropdown] = useState(false);
 
-    const formatAddress = (addr: string) => `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-
-    if (isConnected && address) {
-        return (
-            <div className="relative">
-                <button
-                    type="button"
-                    onClick={() => setShowDropdown(!showDropdown)}
-                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--line-strong)] bg-[var(--bg-surface-2)] px-3 text-sm font-medium text-white transition-all duration-[var(--motion-fast)] hover:border-[color:rgb(240_185_11_/_65%)]"
-                >
-                    <StatusPill label="Wallet" tone="success" />
-                    <span>{formatAddress(address)}</span>
-                    {chainId && <span className="hidden text-xs text-[var(--text-muted)] sm:inline">#{chainId}</span>}
-                    <ChevronDown className="h-4 w-4 text-[var(--text-muted)]" />
-                </button>
-
-                {showDropdown && (
-                    <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-[var(--line-soft)] bg-[var(--bg-surface-2)] p-1.5 shadow-2xl">
-                        <div className="break-all rounded-md border border-[var(--line-soft)] bg-[var(--bg-surface-1)] px-3 py-2 text-xs text-[var(--text-subtle)]">
-                            {address}
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => {
-                                disconnect();
-                                setShowDropdown(false);
-                            }}
-                            className="mt-1 flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-[var(--state-danger)] transition-colors hover:bg-[color:rgb(127_29_29_/_34%)]"
-                        >
-                            <Unplug className="h-4 w-4" />
-                            断开连接 Disconnect
-                        </button>
-                    </div>
-                )}
-                {error && <div className="absolute right-0 mt-1 whitespace-nowrap text-xs text-[var(--state-danger)]">{error}</div>}
-            </div>
-        );
-    }
-
-    if (wallets.length === 0) {
-        return (
-            <div className="relative">
-                <ActionButton disabled tone="ghost" className="h-11 px-4 text-xs">
-                    未检测到钱包 No Wallet
-                </ActionButton>
-                {error && <div className="absolute right-0 mt-1 whitespace-nowrap text-xs text-[var(--state-danger)]">{error}</div>}
-            </div>
-        );
-    }
-
-    if (wallets.length === 1) {
-        return (
-            <div className="relative">
-                <ActionButton
-                    onClick={() => connect(wallets[0])}
-                    disabled={isConnecting}
-                    className="inline-flex h-11 items-center gap-2 px-4"
-                >
-                    <Wallet className="h-4 w-4" />
-                    {isConnecting ? '连接中...' : '连接钱包 Connect'}
-                </ActionButton>
-                {error && <div className="absolute right-0 mt-1 whitespace-nowrap text-xs text-[var(--state-danger)]">{error}</div>}
-            </div>
-        );
-    }
-
+  if (isConnected && address) {
     return (
-        <div className="relative">
-            <ActionButton
-                onClick={() => setShowDropdown(!showDropdown)}
-                disabled={isConnecting}
-                className="inline-flex h-11 items-center gap-2 px-4"
+      <div style={{ position: 'relative' }}>
+        <button
+          type="button"
+          onClick={() => setShowDropdown((v) => !v)}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 'var(--space-2)',
+            height: '36px',
+            padding: '0 var(--space-3)',
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
+            color: 'var(--text-primary)',
+            fontFamily: 'var(--font-ui)',
+            fontSize: '13px',
+            fontWeight: 500,
+            cursor: 'pointer',
+            transition: 'border-color var(--motion-fast)',
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--color-primary)';
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border-default)';
+          }}
+        >
+          <Badge variant="success" size="sm">●</Badge>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+            {truncateAddr(address)}
+          </span>
+          {chainId && (
+            <span style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>#{chainId}</span>
+          )}
+          <span style={{ color: 'var(--text-tertiary)' }}>▾</span>
+        </button>
+
+        {showDropdown && (
+          <div
+            style={{
+              position: 'absolute',
+              right: 0,
+              top: 'calc(100% + 6px)',
+              zIndex: 200,
+              width: '280px',
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              padding: 'var(--space-2)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            }}
+          >
+            <div
+              style={{
+                padding: 'var(--space-2) var(--space-3)',
+                marginBottom: 'var(--space-1)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'var(--bg-surface)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: '11px',
+                color: 'var(--text-secondary)',
+                wordBreak: 'break-all',
+              }}
             >
-                <Plug className="h-4 w-4" />
-                {isConnecting ? '连接中...' : '连接钱包 Connect'}
-            </ActionButton>
-            {showDropdown && (
-                <div className="absolute right-0 z-20 mt-2 w-60 rounded-xl border border-[var(--line-soft)] bg-[var(--bg-surface-2)] p-1.5 shadow-2xl">
-                    <div className="mb-1 rounded-md border border-[var(--line-soft)] bg-[var(--bg-surface-1)] px-3 py-2 text-xs text-[var(--text-muted)]">选择钱包 Select Wallet</div>
-                    {wallets.map((w) => (
-                        <button
-                            type="button"
-                            key={w.info.uuid}
-                            onClick={() => {
-                                connect(w);
-                                setShowDropdown(false);
-                            }}
-                            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm text-white transition-colors hover:bg-[var(--bg-surface-3)]"
-                        >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={w.info.icon} alt={w.info.name} className="h-6 w-6 rounded" />
-                            <span>{w.info.name}</span>
-                        </button>
-                    ))}
-                </div>
-            )}
-            {error && <div className="absolute right-0 mt-1 whitespace-nowrap text-xs text-[var(--state-danger)]">{error}</div>}
-        </div>
+              {address}
+            </div>
+            <button
+              type="button"
+              onClick={() => { disconnect(); setShowDropdown(false); }}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                padding: 'var(--space-2) var(--space-3)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'none',
+                border: 'none',
+                color: 'var(--status-danger)',
+                fontFamily: 'var(--font-ui)',
+                fontSize: '13px',
+                cursor: 'pointer',
+                transition: 'background var(--motion-fast)',
+                textAlign: 'left',
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = 'var(--status-danger-bg)';
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = 'none';
+              }}
+            >
+              ⏻ Disconnect
+            </button>
+          </div>
+        )}
+        {error && (
+          <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: '4px', fontSize: '12px', color: 'var(--status-danger)', whiteSpace: 'nowrap' }}>
+            {error}
+          </div>
+        )}
+      </div>
     );
+  }
+
+  if (wallets.length === 0) {
+    return (
+      <div style={{ position: 'relative' }}>
+        <Button variant="ghost" size="sm" disabled>
+          No Wallet
+        </Button>
+        {error && (
+          <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: '4px', fontSize: '12px', color: 'var(--status-danger)', whiteSpace: 'nowrap' }}>
+            {error}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (wallets.length === 1) {
+    return (
+      <div style={{ position: 'relative' }}>
+        <Button
+          variant="primary"
+          size="sm"
+          loading={isConnecting}
+          onClick={() => connect(wallets[0])}
+        >
+          {isConnecting ? 'Connecting…' : 'Connect Wallet'}
+        </Button>
+        {error && (
+          <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: '4px', fontSize: '12px', color: 'var(--status-danger)', whiteSpace: 'nowrap' }}>
+            {error}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <Button
+        variant="primary"
+        size="sm"
+        loading={isConnecting}
+        onClick={() => setShowDropdown((v) => !v)}
+      >
+        {isConnecting ? 'Connecting…' : 'Connect Wallet'}
+      </Button>
+
+      {showDropdown && (
+        <div
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 'calc(100% + 6px)',
+            zIndex: 200,
+            width: '240px',
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--space-2)',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+          }}
+        >
+          <div
+            style={{
+              padding: 'var(--space-2) var(--space-3)',
+              marginBottom: 'var(--space-1)',
+              color: 'var(--text-secondary)',
+              fontSize: '12px',
+            }}
+          >
+            Select Wallet
+          </div>
+          {wallets.map((w) => (
+            <button
+              type="button"
+              key={w.info.uuid}
+              onClick={() => { connect(w); setShowDropdown(false); }}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-3)',
+                padding: 'var(--space-2) var(--space-3)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-primary)',
+                fontFamily: 'var(--font-ui)',
+                fontSize: '14px',
+                cursor: 'pointer',
+                transition: 'background var(--motion-fast)',
+                textAlign: 'left',
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg-hover)';
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = 'none';
+              }}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={w.info.icon} alt={w.info.name} width={24} height={24} style={{ borderRadius: 'var(--radius-sm)' }} />
+              <span>{w.info.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {error && (
+        <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: '4px', fontSize: '12px', color: 'var(--status-danger)', whiteSpace: 'nowrap' }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
 }

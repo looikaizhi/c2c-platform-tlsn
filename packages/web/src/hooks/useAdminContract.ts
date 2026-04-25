@@ -65,7 +65,7 @@ export function useAdminContract() {
             let tokenSymbol = '';
             for (const log of logs) {
                 try {
-                    const decoded = publicClient.decode?.({ abi: [eventAbi], log });
+                    const decoded = (publicClient as any).decode?.({ abi: [eventAbi], log });
                     if (decoded) {
                         cryptoId = Number((decoded as any).args.cryptoId);
                         tokenSymbol = (decoded as any).args.tokenSymbol;

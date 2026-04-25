@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { BadgeDollarSign, Building2, ChevronDown, Globe2 } from 'lucide-react';
+import { BadgeDollarSign, ChevronDown, Globe2 } from 'lucide-react';
 import { useTlsnExtension } from '@/hooks/useTlsnExtension';
 import { useContract } from '@/hooks/useContract';
 import { useWallet } from '@/hooks/useWallet';
@@ -49,20 +49,20 @@ export default function TlsnVerifyButton({ contractAction, onSuccess }: TlsnVeri
             const result = await tlsn.runPlugin(plugin.file);
 
             // Step 2: Submit proof to contract
-            if (contractAction.type === 'payOrderByWise' && result.proofs) {
+            if (contractAction.type === 'payOrderByWise' && result.proofType === 'dual') {
                 // Wise needs two proofs
                 await contract.submitWiseProofs(
-                    result.proofs.contacts as ExtensionProveResponse,
-                    result.proofs.transfer as ExtensionProveResponse,
+                    result.contactsProof as ExtensionProveResponse,
+                    result.transferProof as ExtensionProveResponse,
                     contractAction.merchant,
                     contractAction.productId,
                     contractAction.orderId,
                     wallet.selectedWallet?.provider,
                 );
-            } else {
+            } else if (result.singleProof) {
                 // Single proof flow
                 await contract.submitProof(
-                    result as unknown as ExtensionProveResponse,
+                    result.singleProof,
                     contractAction,
                     wallet.selectedWallet?.provider,
                 );

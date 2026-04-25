@@ -33,6 +33,33 @@ export interface UseContractReturn {
         orderId: bigint,
         provider?: any,
     ) => Promise<void>;
+    submitWiseCryptoProof: (
+        contactsResponse: ExtensionProveResponse,
+        transferResponse: ExtensionProveResponse,
+        merchant: Hex,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => Promise<void>;
+    submitWiseFiatProof: (
+        transferResponse: ExtensionProveResponse,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => Promise<void>;
+    submitAlipayCryptoProof: (
+        proveResponse: ExtensionProveResponse,
+        merchant: Hex,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => Promise<void>;
+    submitAlipayFiatProof: (
+        proveResponse: ExtensionProveResponse,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => Promise<void>;
     reset: () => void;
 }
 
@@ -102,6 +129,60 @@ export function useContract(): UseContractReturn {
         }
     }, []);
 
+    const submitWiseCryptoProof = useCallback(async (
+        contactsResponse: ExtensionProveResponse,
+        transferResponse: ExtensionProveResponse,
+        merchant: Hex,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => {
+        return submitWiseProofs(contactsResponse, transferResponse, merchant, productId, orderId, provider);
+    }, [submitWiseProofs]);
+
+    const submitWiseFiatProof = useCallback(async (
+        transferResponse: ExtensionProveResponse,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => {
+        try {
+            setError(null);
+            setStatus('building');
+            const transferProof = buildContractProof(transferResponse);
+            setStatus('confirming');
+            const { hash } = await submitProofToContract(
+                transferProof,
+                { type: 'receiveCryptoWithPayment', productId, orderId },
+                provider,
+            );
+            setTxHash(hash);
+            setStatus('success');
+        } catch (err: any) {
+            setError(err.shortMessage || err.message || String(err));
+            setStatus('error');
+        }
+    }, []);
+
+    const submitAlipayCryptoProof = useCallback(async (
+        proveResponse: ExtensionProveResponse,
+        merchant: Hex,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => {
+        return submitProof(proveResponse, { type: 'payOrderByAlipay', merchant, productId, orderId }, provider);
+    }, [submitProof]);
+
+    const submitAlipayFiatProof = useCallback(async (
+        proveResponse: ExtensionProveResponse,
+        productId: bigint,
+        orderId: bigint,
+        provider?: any,
+    ) => {
+        return submitProof(proveResponse, { type: 'receiveCryptoWithAlipayPayment', productId, orderId }, provider);
+    }, [submitProof]);
+
     return {
         status,
         txHash,
@@ -109,6 +190,10 @@ export function useContract(): UseContractReturn {
         isConfigured: isContractConfigured(),
         submitProof,
         submitWiseProofs,
+        submitWiseCryptoProof,
+        submitWiseFiatProof,
+        submitAlipayCryptoProof,
+        submitAlipayFiatProof,
         reset,
     };
 }

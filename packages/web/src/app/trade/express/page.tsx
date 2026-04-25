@@ -1,11 +1,10 @@
-﻿import TradingPage from "@/components/TradingPage";
-import ExpressPage from "@/components/ExpressPage";
-import { TradingType } from "@/interface/tradingPage";
+import { TradingLayout } from '@/components/layout/TradingLayout';
+import { ExpressPage } from '@/components/trading/ExpressPage';
 
 export default function ExpressTradeRoute() {
   return (
-    <TradingPage activeMode={TradingType.EXPRESS}>
+    <TradingLayout activeTab="express">
       <ExpressPage />
-    </TradingPage>
+    </TradingLayout>
   );
 }

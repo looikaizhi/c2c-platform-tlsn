@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { AssetType, toTokenAmount } from '@/lib/orderHelpers';
 import { type SupportedCrypto, type SupportedFiat, useProducts } from '@/hooks/useProducts';
-import ActionButton from '@/components/ui/ActionButton';
-import SurfaceCard from '@/components/ui/SurfaceCard';
+import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
 import ProductActionStatus from './ProductActionStatus';
 
 interface ListProductTabProps {
@@ -32,7 +32,7 @@ export default function ListProductTab({ cryptos, fiats, products, provider }: L
     };
 
     return (
-        <SurfaceCard className="space-y-4 p-6">
+        <Card padding="none" className="space-y-4 p-6">
             <h3 className="text-lg font-semibold text-white">上架新商品 List New Product</h3>
 
             <div>
@@ -113,13 +113,14 @@ export default function ListProductTab({ cryptos, fiats, products, provider }: L
                 successMessage="商品上架成功!"
             />
 
-            <ActionButton
+            <Button
+                variant="primary"
+                fullWidth
                 onClick={handleSubmit}
                 disabled={products.status === 'submitting' || !amount}
-                className="w-full"
             >
                 {products.status === 'submitting' ? '提交中...' : '上架商品'}
-            </ActionButton>
-        </SurfaceCard>
+            </Button>
+        </Card>
     );
 }

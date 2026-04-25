@@ -1,6 +1,6 @@
 import type { ProductStatus } from '@/hooks/useProducts';
-import StatusPill from '@/components/ui/StatusPill';
-import SurfaceCard from '@/components/ui/SurfaceCard';
+import { Badge } from '@/components/ui/Badge';
+import { Card } from '@/components/ui/Card';
 
 interface ProductActionStatusProps {
     status: ProductStatus;
@@ -18,12 +18,14 @@ export default function ProductActionStatus({
     if (status === 'idle') return null;
 
     return (
-        <SurfaceCard className="p-3">
+        <Card padding="none" className="p-3">
             <div className="mb-2">
-                <StatusPill
-                    label={status === 'error' ? 'Error' : status === 'success' ? 'Success' : 'Pending'}
-                    tone={status === 'error' ? 'danger' : status === 'success' ? 'success' : 'warning'}
-                />
+                <Badge
+                    variant={status === 'error' ? 'danger' : status === 'success' ? 'success' : 'warning'}
+                    dot
+                >
+                    {status === 'error' ? 'Error' : status === 'success' ? 'Success' : 'Pending'}
+                </Badge>
             </div>
             <p className={`text-sm ${
                 status === 'error'
@@ -36,6 +38,6 @@ export default function ProductActionStatus({
                 {status === 'success' && successMessage}
                 {status === 'error' && error}
             </p>
-        </SurfaceCard>
+        </Card>
     );
 }

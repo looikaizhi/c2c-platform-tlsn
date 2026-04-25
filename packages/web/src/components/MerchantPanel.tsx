@@ -10,8 +10,7 @@ import MerchantTabBar, { type MerchantTab } from './merchant/MerchantTabBar';
 import ListProductTab from './merchant/ListProductTab';
 import ManageTab from './merchant/ManageTab';
 import OrdersTab from './merchant/OrdersTab';
-import SectionHeader from './ui/SectionHeader';
-import SurfaceCard from './ui/SurfaceCard';
+import { Card } from './ui/Card';
 
 export default function MerchantPanel() {
     const wallet = useWallet();
@@ -55,9 +54,9 @@ export default function MerchantPanel() {
         return (
             <main className="flex min-h-[calc(100dvh-64px)] w-full justify-center px-4 py-6 sm:px-6">
                 <section className="flex w-full max-w-[1280px]">
-                    <SurfaceCard className="w-full p-8 text-center">
+                    <Card padding="none" className="w-full p-8 text-center">
                         <p className="text-lg text-[var(--text-subtle)]">请先连接钱包以管理 Merchant 面板</p>
-                    </SurfaceCard>
+                    </Card>
                 </section>
             </main>
         );
@@ -67,9 +66,9 @@ export default function MerchantPanel() {
         return (
             <main className="flex min-h-[calc(100dvh-64px)] w-full justify-center px-4 py-6 sm:px-6">
                 <section className="flex w-full max-w-[1280px]">
-                    <SurfaceCard className="w-full p-8 text-center">
+                    <Card padding="none" className="w-full p-8 text-center">
                         <div className="mx-auto h-6 w-56 animate-pulse rounded bg-[var(--bg-surface-4)]" />
-                    </SurfaceCard>
+                    </Card>
                 </section>
             </main>
         );
@@ -80,11 +79,11 @@ export default function MerchantPanel() {
     return (
         <main className="flex min-h-[calc(100dvh-64px)] w-full justify-center px-4 py-6 sm:px-6">
             <section className="flex w-full max-w-[1280px] flex-col gap-5">
-                <SectionHeader
-                    eyebrow="Merchant Workspace"
-                    title="商家管理 Merchant Terminal"
-                    description="管理上架商品、收款账户与订单执行流程，保持业务步骤不变并统一终端视觉语义。"
-                />
+                <div style={{ marginBottom: 'var(--space-2)' }}>
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>Merchant Workspace</p>
+                    <h1 style={{ fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>商家管理 Merchant Terminal</h1>
+                    <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginTop: '4px' }}>管理上架商品、收款账户与订单执行流程，保持业务步骤不变并统一终端视觉语义。</p>
+                </div>
 
                 <MerchantStatusCard walletAddress={wallet.address} isMerchant={isMerchant} merchantInfo={merchantInfo} />
 
@@ -98,7 +97,7 @@ export default function MerchantPanel() {
                             <ListProductTab cryptos={cryptos} fiats={fiats} products={products} provider={provider} />
                         )}
                         {activeTab === 'manage' && <ManageTab merchantInfo={merchantInfo} products={products} provider={provider} />}
-                        {activeTab === 'orders' && <OrdersTab />}
+                        {activeTab === 'orders' && <OrdersTab merchantAddress={wallet.address as Address} />}
                     </>
                 )}
             </section>

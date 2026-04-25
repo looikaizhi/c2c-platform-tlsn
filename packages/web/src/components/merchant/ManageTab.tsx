@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { ASSET_TYPE_LABELS, AssetType } from '@/lib/orderHelpers';
 import { type MerchantInfo, useProducts } from '@/hooks/useProducts';
-import ActionButton from '@/components/ui/ActionButton';
-import SurfaceCard from '@/components/ui/SurfaceCard';
+import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
 import ProductActionStatus from './ProductActionStatus';
 
 interface ManageTabProps {
@@ -25,7 +25,7 @@ export default function ManageTab({ merchantInfo, products, provider }: ManageTa
 
     return (
         <div className="space-y-4">
-            <SurfaceCard className="p-6">
+            <Card padding="none" className="p-6">
                 <h3 className="mb-3 text-lg font-semibold text-white">设置法币收款账户</h3>
                 <p className="mb-3 text-xs text-[var(--text-subtle)]">例如 Wise 邮箱、支付宝账号。买家付款时会看到此信息。</p>
                 <div className="flex flex-wrap gap-2">
@@ -36,17 +36,17 @@ export default function ManageTab({ merchantInfo, products, provider }: ManageTa
                         placeholder="merchant@wise.com"
                         className="terminal-input min-w-64 flex-1"
                     />
-                    <ActionButton
+                    <Button
+                        variant="primary"
                         onClick={handleSetFiatAccount}
                         disabled={products.status === 'submitting'}
-                        className="px-5"
                     >
                         保存
-                    </ActionButton>
+                    </Button>
                 </div>
-            </SurfaceCard>
+            </Card>
 
-            <SurfaceCard className="p-6">
+            <Card padding="none" className="p-6">
                 <h3 className="mb-3 text-lg font-semibold text-white">已上架商品</h3>
                 {cryptoCount === 0 && fiatCount === 0 ? (
                     <p className="text-sm text-[var(--text-subtle)]">暂无上架商品</p>
@@ -72,7 +72,7 @@ export default function ManageTab({ merchantInfo, products, provider }: ManageTa
                         ))}
                     </div>
                 )}
-            </SurfaceCard>
+            </Card>
 
             <ProductActionStatus
                 status={products.status}
@@ -102,20 +102,20 @@ function ProductRow({
                 <span className="ml-2 font-semibold">产品 #{String(productId)}</span>
             </div>
             <div className="flex gap-2">
-                <ActionButton
-                    tone="success"
+                <Button
+                    variant="buy"
+                    size="sm"
                     onClick={() => products.activateProduct(productId, assetType, provider)}
-                    className="h-9 px-3 text-xs"
                 >
                     激活
-                </ActionButton>
-                <ActionButton
-                    tone="ghost"
+                </Button>
+                <Button
+                    variant="ghost"
+                    size="sm"
                     onClick={() => products.deactivateProduct(productId, assetType, provider)}
-                    className="h-9 px-3 text-xs"
                 >
                     下架
-                </ActionButton>
+                </Button>
             </div>
         </div>
     );

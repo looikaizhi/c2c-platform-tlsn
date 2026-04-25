@@ -5,9 +5,8 @@ import DashboardStats from '@/components/dashboard/DashboardStats';
 import DashboardOrdersTable from '@/components/dashboard/DashboardOrdersTable';
 import type { SortConfig } from '@/components/dashboard/types';
 import { useDashboardQuery } from '@/hooks/queries/useDashboardQuery';
-import SectionHeader from '@/components/ui/SectionHeader';
-import StatusPill from '@/components/ui/StatusPill';
-import SurfaceCard from '@/components/ui/SurfaceCard';
+import { Badge } from '@/components/ui/Badge';
+import { Card } from '@/components/ui/Card';
 
 const FALLBACK_WALLET_ADDRESS = '0xAbCDeF1234567890fFaBbCcDdEeFf01234567890';
 
@@ -53,12 +52,16 @@ export default function DashboardPage() {
     return (
         <main className="flex min-h-[calc(100dvh-64px)] w-full justify-center px-4 py-6 sm:px-6">
             <section className="flex w-full max-w-[1280px] flex-col">
-                <SectionHeader
-                    eyebrow="Operations"
-                    title="交易看板 Dashboard"
-                    description="追踪法币与加密资产订单流转，统一查看状态、时间和详情跳转。"
-                    action={<StatusPill label="Real-time View" tone="info" />}
-                />
+                <div style={{ marginBottom: 'var(--space-4)' }}>
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>Operations</p>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
+                        <div>
+                            <h1 style={{ fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>交易看板 Dashboard</h1>
+                            <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginTop: '4px' }}>追踪法币与加密资产订单流转，统一查看状态、时间和详情跳转。</p>
+                        </div>
+                        <Badge variant="info">Real-time View</Badge>
+                    </div>
+                </div>
 
                 <DashboardStats
                     totalOrders={allOrders.length}
@@ -67,7 +70,7 @@ export default function DashboardPage() {
                     profit={0}
                 />
 
-                <SurfaceCard className="mb-4 p-3">
+                <Card padding="none" className="mb-4 p-3">
                     <div className="flex flex-wrap items-center gap-2">
                         <button
                             type="button"
@@ -92,10 +95,12 @@ export default function DashboardPage() {
                             Crypto → Fiat
                         </button>
                         <div className="ml-auto">
-                            <StatusPill label={dashboardQuery.isFetching ? 'Syncing' : 'Stable'} tone={dashboardQuery.isFetching ? 'warning' : 'success'} />
+                            <Badge variant={dashboardQuery.isFetching ? 'warning' : 'success'} dot>
+                                {dashboardQuery.isFetching ? 'Syncing' : 'Stable'}
+                            </Badge>
                         </div>
                     </div>
-                </SurfaceCard>
+                </Card>
 
                 <DashboardOrdersTable
                     isLoading={dashboardQuery.isLoading}

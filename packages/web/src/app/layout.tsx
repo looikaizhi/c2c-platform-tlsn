@@ -1,20 +1,13 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Sans, JetBrains_Mono, Noto_Sans_SC } from "next/font/google";
+import { IBM_Plex_Sans, JetBrains_Mono } from "next/font/google";
 import Header from "@/components/Header";
 import AppQueryProvider from "@/providers/AppQueryProvider";
 import "./globals.css";
 
-const bodyFont = Noto_Sans_SC({
+const uiFont = IBM_Plex_Sans({
   subsets: ["latin"],
   weight: ["400", "500", "600", "700"],
-  variable: "--font-body",
-  display: "swap",
-});
-
-const headingFont = IBM_Plex_Sans({
-  subsets: ["latin"],
-  weight: ["500", "600", "700"],
-  variable: "--font-heading",
+  variable: "--font-ui",
   display: "swap",
 });
 
@@ -36,10 +29,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
-      <body
-        className={`${bodyFont.variable} ${headingFont.variable} ${monoFont.variable} antialiased`}
-      >
+    <html lang="en">
+      <body className={`${uiFont.variable} ${monoFont.variable} antialiased`}>
         <AppQueryProvider>
           <Header />
           {children}

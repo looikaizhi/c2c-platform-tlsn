@@ -1,4 +1,4 @@
-import SurfaceCard from '@/components/ui/SurfaceCard';
+import { Card } from '@/components/ui/Card';
 
 export type MerchantTab = 'list' | 'manage' | 'orders';
 
@@ -15,7 +15,7 @@ const TABS: Array<{ key: MerchantTab; label: string; en: string }> = [
 
 export default function MerchantTabBar({ activeTab, onChange }: MerchantTabBarProps) {
     return (
-        <SurfaceCard className="p-2">
+        <Card padding="none" className="p-2">
             <div className="flex flex-wrap gap-2" role="tablist" aria-label="Merchant tabs">
                 {TABS.map((tab) => (
                     <button
@@ -35,6 +35,6 @@ export default function MerchantTabBar({ activeTab, onChange }: MerchantTabBarPr
                     </button>
                 ))}
             </div>
-        </SurfaceCard>
+        </Card>
     );
 }

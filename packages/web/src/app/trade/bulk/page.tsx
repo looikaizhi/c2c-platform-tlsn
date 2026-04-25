@@ -1,11 +1,10 @@
-﻿import TradingPage from "@/components/TradingPage";
-import BulkPage from "@/components/trade/BulkPage";
-import { TradingType } from "@/interface/tradingPage";
+import { TradingLayout } from '@/components/layout/TradingLayout';
+import BulkPage from '@/components/trade/BulkPage';
 
 export default function BulkTradeRoute() {
   return (
-    <TradingPage activeMode={TradingType.Bulk}>
+    <TradingLayout activeTab="bulk">
       <BulkPage />
-    </TradingPage>
+    </TradingLayout>
   );
 }

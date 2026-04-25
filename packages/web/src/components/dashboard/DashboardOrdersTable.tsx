@@ -1,8 +1,8 @@
 import Link from 'next/link';
 import type * as dbTypes from '@/server/db_types';
 import { ArrowDown, ArrowUp, ArrowUpDown, ExternalLink } from 'lucide-react';
-import SurfaceCard from '@/components/ui/SurfaceCard';
-import StatusPill from '@/components/ui/StatusPill';
+import { Badge } from '@/components/ui/Badge';
+import { Card } from '@/components/ui/Card';
 import type { SortConfig } from './types';
 
 interface DashboardOrdersTableProps {
@@ -41,7 +41,7 @@ export default function DashboardOrdersTable({
     onSort,
 }: DashboardOrdersTableProps) {
     return (
-        <SurfaceCard className="overflow-hidden">
+        <Card padding="none" className="overflow-hidden">
             <div className="overflow-x-auto">
                 <table className="min-w-full border-collapse text-sm">
                     <thead className="bg-[var(--bg-surface-2)] text-[var(--text-muted)]">
@@ -105,7 +105,7 @@ export default function DashboardOrdersTable({
                                         </div>
                                     </td>
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{formatDateTime(order.order_create_time)}</td>
-                                    <td className="px-4 py-3"><StatusPill label="active" tone="success" /></td>
+                                    <td className="px-4 py-3"><Badge variant="success" dot>active</Badge></td>
                                     <td className="px-4 py-3 text-right">
                                         <Link
                                             href={`/orders/${order.order_id}`}
@@ -121,6 +121,6 @@ export default function DashboardOrdersTable({
                     </tbody>
                 </table>
             </div>
-        </SurfaceCard>
+        </Card>
     );
 }

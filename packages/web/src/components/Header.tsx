@@ -1,152 +1,195 @@
 "use client";
-
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, ChevronDown, Globe, Moon, Search, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import WalletConnect from "./WalletConnect";
 
 type NavItem = {
   href: string;
   label: string;
-  isActive: (pathname: string) => boolean;
+  match: RegExp;
 };
 
 const navItems: NavItem[] = [
-  {
-    href: "/trade/express",
-    label: "Trade",
-    isActive: (pathname) => pathname === "/" || pathname.startsWith("/trade"),
-  },
-  {
-    href: "/dashboard",
-    label: "Dashboard",
-    isActive: (pathname) => pathname.startsWith("/dashboard"),
-  },
-  {
-    href: "/merchant",
-    label: "Merchant",
-    isActive: (pathname) => pathname.startsWith("/merchant"),
-  },
-  {
-    href: "/admin",
-    label: "Admin",
-    isActive: (pathname) => pathname.startsWith("/admin"),
-  },
+  { label: 'Trade',     href: '/trade/express', match: /^\/trade/ },
+  { label: 'Dashboard', href: '/dashboard',      match: /^\/dashboard/ },
+  { label: 'Merchant',  href: '/merchant',       match: /^\/merchant/ },
+  { label: 'Admin',     href: '/admin',          match: /^\/admin/ },
 ];
-
-function IconAction({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-transparent text-[var(--text-secondary)] transition-all duration-[var(--motion-fast)] hover:border-[var(--line-soft)] hover:bg-[var(--bg-surface-1)] hover:text-white"
-    >
-      {children}
-    </button>
-  );
-}
 
 export default function Header() {
   const pathname = usePathname();
-  const [isMoreOpen, setIsMoreOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
-    <header className="sticky top-0 z-40 border-b border-[var(--line-soft)] bg-[color:rgb(24_26_32_/_97%)]">
-      <div className="flex w-full justify-center px-4 sm:px-6">
-        <div className="flex h-16 w-full max-w-[1280px] items-center gap-3">
-          <Link href="/trade/express" className="flex min-w-fit items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-md border border-[color:rgb(240_185_11_/_40%)] bg-[color:rgb(240_185_11_/_12%)] text-[var(--accent-cta)]">
-              <ShieldCheck className="h-4 w-4" />
-            </div>
-            <div className="hidden sm:block">
-              <p className="text-xs font-semibold tracking-[0.08em] text-[var(--accent-cta)]">ZKTLS</p>
-              <p className="text-sm font-medium text-white">C2C Exchange</p>
-            </div>
-          </Link>
-
-          <nav className="ml-6 flex flex-1 items-center gap-3" aria-label="Primary Navigation">
-            {navItems.map((item) => {
-              const active = item.isActive(pathname);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  aria-current={active ? "page" : undefined}
-                  className={`inline-flex h-11 w-[124px] items-center justify-center rounded-lg border text-[15px] font-medium transition-all duration-[var(--motion-fast)] ${
-                    active
-                      ? "border-[color:rgb(240_185_11_/_48%)] bg-[color:rgb(240_185_11_/_12%)] text-white"
-                      : "border-transparent text-[var(--text-secondary)] hover:border-[var(--line-soft)] hover:bg-[var(--bg-surface-2)] hover:text-white"
-                  }`}
-                >
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
-
-          <div className="ml-auto flex items-center gap-1">
-            <IconAction label="Search">
-              <Search className="h-4 w-4" />
-            </IconAction>
-            <IconAction label="Notifications">
-              <Bell className="h-4 w-4" />
-            </IconAction>
-            <IconAction label="Language">
-              <Globe className="h-4 w-4" />
-            </IconAction>
-            <IconAction label="Theme">
-              <Moon className="h-4 w-4" />
-            </IconAction>
-
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setIsMoreOpen((prev) => !prev)}
-                aria-expanded={isMoreOpen}
-                aria-haspopup="menu"
-                aria-label="Open More Menu"
-                className="inline-flex h-9 items-center gap-1 rounded-md border border-transparent px-2.5 text-sm text-[var(--text-secondary)] transition-all duration-[var(--motion-fast)] hover:border-[var(--line-soft)] hover:bg-[var(--bg-surface-1)] hover:text-white"
-              >
-                More
-                <ChevronDown className="h-4 w-4" />
-              </button>
-
-              {isMoreOpen && (
-                <div
-                  role="menu"
-                  className="absolute right-0 mt-2 w-44 rounded-md border border-[var(--line-soft)] bg-[var(--bg-surface-2)] p-1.5 shadow-2xl"
-                >
-                  <a
-                    href="#"
-                    role="menuitem"
-                    className="block rounded-md px-3 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface-3)] hover:text-white"
-                  >
-                    Docs 文档
-                  </a>
-                  <a
-                    href="#"
-                    role="menuitem"
-                    className="block rounded-md px-3 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface-3)] hover:text-white"
-                  >
-                    Community 社区
-                  </a>
-                </div>
-              )}
-            </div>
-
-            <div className="ml-1">
-              <WalletConnect />
-            </div>
+    <header
+      style={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 100,
+        height: 'var(--header-h)',
+        background: 'var(--bg-surface)',
+        borderBottom: '1px solid var(--border-default)',
+        display: 'flex',
+        alignItems: 'center',
+        padding: '0 var(--space-6)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          width: '100%',
+          maxWidth: 'var(--content-max-w)',
+          margin: '0 auto',
+          gap: 'var(--space-8)',
+        }}
+      >
+        {/* Logo */}
+        <Link
+          href="/trade/express"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--space-2)',
+            textDecoration: 'none',
+            flexShrink: 0,
+          }}
+        >
+          <div
+            style={{
+              width: '32px',
+              height: '32px',
+              borderRadius: 'var(--radius-sm)',
+              background: 'rgba(240,185,11,0.12)',
+              border: '1px solid rgba(240,185,11,0.35)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--color-primary)',
+              fontSize: '16px',
+            }}
+          >
+            ⛨
           </div>
+          <span
+            style={{
+              fontFamily: 'var(--font-ui)',
+              fontWeight: 700,
+              fontSize: '15px',
+              color: 'var(--color-primary)',
+              letterSpacing: '0.02em',
+            }}
+          >
+            zkTLS <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>C2C</span>
+          </span>
+        </Link>
+
+        {/* Desktop nav */}
+        <nav
+          aria-label="Primary"
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', flex: 1 }}
+          className="header-desktop-nav"
+        >
+          {navItems.map((item) => {
+            const active = item.match.test(pathname);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={active ? 'page' : undefined}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  height: 'var(--header-h)',
+                  padding: '0 var(--space-4)',
+                  fontSize: '14px',
+                  fontWeight: active ? 600 : 400,
+                  color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  borderBottom: active
+                    ? '2px solid var(--color-primary)'
+                    : '2px solid transparent',
+                  textDecoration: 'none',
+                  transition: 'color var(--motion-fast), border-color var(--motion-fast)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* Wallet + mobile hamburger */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginLeft: 'auto' }}>
+          <WalletConnect />
+
+          {/* Mobile hamburger */}
+          <button
+            aria-label="Toggle menu"
+            onClick={() => setMobileOpen((v) => !v)}
+            className="header-mobile-btn"
+            style={{
+              display: 'none',
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              fontSize: '20px',
+            }}
+          >
+            ☰
+          </button>
         </div>
       </div>
+
+      {/* Mobile drawer */}
+      {mobileOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 'var(--header-h)',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'var(--bg-surface)',
+            zIndex: 99,
+            padding: 'var(--space-4)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--space-2)',
+          }}
+        >
+          {navItems.map((item) => {
+            const active = item.match.test(pathname);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={() => setMobileOpen(false)}
+                style={{
+                  padding: 'var(--space-3) var(--space-4)',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '15px',
+                  fontWeight: active ? 600 : 400,
+                  color: active ? 'var(--color-primary)' : 'var(--text-primary)',
+                  background: active ? 'rgba(240,185,11,0.08)' : 'transparent',
+                  textDecoration: 'none',
+                }}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </div>
+      )}
+
+      <style>{`
+        @media (max-width: 767px) {
+          .header-desktop-nav { display: none !important; }
+          .header-mobile-btn  { display: flex !important; }
+        }
+      `}</style>
     </header>
   );
 }

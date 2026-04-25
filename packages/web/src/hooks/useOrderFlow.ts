@@ -3,11 +3,20 @@ import { useCallback, useState } from 'react';
 import type { Hex, Address } from 'viem';
 import {
     submitOrderAction,
+    submitProofToContract,
     type OrderAction,
 } from '@/lib/contractSubmitter';
+import {
+    buildContractProof,
+    type ExtensionProveResponse,
+} from '@/lib/proofTransformer';
+import type { TlsnResult } from '@/hooks/useTlsnExtension';
 import { type SignedOrderInput } from '@/lib/eip712';
 import { createWalletClient, custom } from 'viem';
 import { chain, contractConfig } from '@/lib/contractConfig';
+
+export type Platform = 'wise' | 'alipay';
+export type OrderDirection = 'crypto' | 'fiat';
 
 export type OrderFlowStatus =
     | 'idle'
@@ -26,6 +35,16 @@ export interface OrderFlowActionResult {
     error?: string;
 }
 
+export interface SubmitProofParams {
+    platform: Platform;
+    direction: OrderDirection;
+    merchant?: Address;
+    productId: bigint;
+    orderId: bigint;
+    proof: TlsnResult;
+    provider?: any;
+}
+
 export interface UseOrderFlowReturn {
     status: OrderFlowStatus;
     txHash: Hex | null;
@@ -38,6 +57,8 @@ export interface UseOrderFlowReturn {
     payByCrypto: (merchant: Address, productId: bigint, orderId: bigint, provider?: any) => Promise<OrderFlowActionResult>;
     /** Buyer claims 2x refund after merchant timeout */
     claimRefund: (merchant: Address, productId: bigint, orderId: bigint, provider?: any) => Promise<OrderFlowActionResult>;
+    /** Submit TLSN proof to contract after generating it */
+    submitProof: (params: SubmitProofParams) => Promise<OrderFlowActionResult>;
     reset: () => void;
 }
 
@@ -153,6 +174,73 @@ export function useOrderFlow(): UseOrderFlowReturn {
         return exec('claiming', { type: 'claimRefundAfterTimeout', merchant, productId, orderId }, provider);
     }, [exec]);
 
+    const submitProof = useCallback(async (params: SubmitProofParams): Promise<OrderFlowActionResult> => {
+        const { platform, direction, merchant, productId, orderId, proof, provider } = params;
+        try {
+            setError(null);
+            setStatus('pending');
+
+            if (platform === 'wise') {
+                if (proof.proofType !== 'dual' || !proof.contactsProof || !proof.transferProof) {
+                    throw new Error('Wise proof requires dual proof (contacts + transfer)');
+                }
+                const contactsProof = buildContractProof(proof.contactsProof);
+                const transferProof = buildContractProof(proof.transferProof);
+
+                if (direction === 'crypto') {
+                    if (!merchant) throw new Error('merchant address required for crypto direction');
+                    const { hash } = await submitProofToContract(
+                        transferProof,
+                        { type: 'payOrderByWise', merchant, productId, orderId, contactsProof },
+                        provider,
+                    );
+                    setTxHash(hash);
+                } else {
+                    // FIAT: merchant submits transfer proof to receive USDT
+                    const { hash } = await submitProofToContract(
+                        transferProof,
+                        { type: 'receiveCryptoWithPayment', productId, orderId },
+                        provider,
+                    );
+                    setTxHash(hash);
+                }
+            } else if (platform === 'alipay') {
+                if (proof.proofType !== 'single' || !proof.singleProof) {
+                    throw new Error('Alipay proof requires single proof');
+                }
+                const contractProof = buildContractProof(proof.singleProof as ExtensionProveResponse);
+
+                if (direction === 'crypto') {
+                    if (!merchant) throw new Error('merchant address required for crypto direction');
+                    const { hash } = await submitProofToContract(
+                        contractProof,
+                        { type: 'payOrderByAlipay', merchant, productId, orderId },
+                        provider,
+                    );
+                    setTxHash(hash);
+                } else {
+                    // FIAT: merchant submits proof to receive USDT
+                    const { hash } = await submitProofToContract(
+                        contractProof,
+                        { type: 'receiveCryptoWithAlipayPayment', productId, orderId },
+                        provider,
+                    );
+                    setTxHash(hash);
+                }
+            } else {
+                throw new Error(`Unknown platform: ${platform}`);
+            }
+
+            setStatus('success');
+            return { ok: true };
+        } catch (err: any) {
+            const errorMessage = err.shortMessage || err.message || String(err);
+            setError(errorMessage);
+            setStatus('error');
+            return { ok: false, error: errorMessage };
+        }
+    }, []);
+
     return {
         status,
         txHash,
@@ -161,6 +249,7 @@ export function useOrderFlow(): UseOrderFlowReturn {
         cancelOrder,
         payByCrypto,
         claimRefund,
+        submitProof,
         reset,
     };
 }

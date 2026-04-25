@@ -1,11 +1,10 @@
-﻿import TradingPage from "@/components/TradingPage";
-import { P2P_Page } from "@/components/P2P_Page";
-import { TradingType } from "@/interface/tradingPage";
+import { TradingLayout } from '@/components/layout/TradingLayout';
+import { P2PPage } from '@/components/trading/P2PPage';
 
 export default function P2PTradeRoute() {
   return (
-    <TradingPage activeMode={TradingType.P2P}>
-      <P2P_Page />
-    </TradingPage>
+    <TradingLayout activeTab="p2p">
+      <P2PPage />
+    </TradingLayout>
   );
 }
