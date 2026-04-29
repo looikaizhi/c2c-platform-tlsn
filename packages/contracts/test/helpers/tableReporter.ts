@@ -16,8 +16,28 @@ export interface TestRecord {
 
 const _records: TestRecord[] = [];
 
-export function addRecord(r: TestRecord): void {
-  _records.push(r);
+// Overload 1: legacy object-based call — addRecord({ id, desc, pass, totalMs, verifyMs, gasUsed })
+export function addRecord(record: TestRecord): void;
+// Overload 2: positional call — addRecord(id, desc, pass, ctx)
+export function addRecord(id: string, desc: string, pass: boolean, ctx: ReturnType<typeof makeCtx>): void;
+export function addRecord(
+  idOrRecord: string | TestRecord,
+  desc?: string,
+  pass?: boolean,
+  ctx?: ReturnType<typeof makeCtx>,
+): void {
+  if (typeof idOrRecord === "object") {
+    _records.push(idOrRecord);
+  } else {
+    _records.push({
+      id: idOrRecord,
+      desc: desc!,
+      pass: pass!,
+      totalMs: ctx ? Date.now() - ctx.startTime : 0,
+      verifyMs: ctx ? ctx.verifyMs() : 0,
+      gasUsed: ctx ? ctx.gasUsed : 0n,
+    });
+  }
 }
 
 /** Clear all records (useful if multiple suites share a process). */
@@ -28,6 +48,7 @@ export function clearRecords(): void {
 /** Return a timing/gas context to be filled in by each test. */
 export function makeCtx() {
   const ctx = {
+    startTime: Date.now(),
     verifyStart: 0,
     verifyEnd: 0,
     gasUsed: 0n as bigint,

@@ -41,6 +41,9 @@ contract C2CAdmin {
     // 1_000 * 1e18 ≡ "1000 whole tokens" regardless of the token's own decimal count.
     uint256 public maxOrderAmount = 1_000 * 1e18;
 
+    /// @notice 授权的调用合约（如 C2CEscrow）
+    mapping(address => bool) public authorizedCallers;
+
     // ================================================================
     //                          Events
     // ================================================================
@@ -396,8 +399,7 @@ contract C2CAdmin {
      * @notice 递增商家的产品计数器并返回新 productID（仅授权合约可调用）
      */
     function incrementSellCount(address _merchant, AssetType _assetType) external returns (uint256 newId) {
-        // 仅 C2CEscrow 合约可调用 — 由部署脚本配置
-        require(authorizedCallers[msg.sender], "not authorized");
+        if (!authorizedCallers[msg.sender]) revert NotAuthorizedCaller();
         Merchant storage m = merchants[_merchant];
         if (_assetType == AssetType.CRYPTO) {
             newId = m.sellCryptoAmount;
@@ -407,9 +409,6 @@ contract C2CAdmin {
             m.sellFiatAmount++;
         }
     }
-
-    /// @notice 授权的调用合约
-    mapping(address => bool) public authorizedCallers;
 
     function setAuthorizedCaller(address _caller, bool _authorized) external onlyAdmin {
         authorizedCallers[_caller] = _authorized;

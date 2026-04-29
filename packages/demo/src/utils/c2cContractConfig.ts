@@ -15,6 +15,10 @@ export const c2cConfig = {
   escrowAddress:         addr('VITE_C2C_ESCROW_ADDRESS'),
   verifierSignerAddress: addr('VITE_VERIFIER_SIGNER_ADDRESS'),
 
+  // V4 contracts
+  riskManagerAddress: addr('VITE_RISK_MANAGER_ADDRESS'),
+  bondVaultAddress:   addr('VITE_BOND_VAULT_ADDRESS'),
+
   // Token addresses
   usdtAddress: addr('VITE_USDT_ADDRESS'),
   usdcAddress: addr('VITE_USDC_ADDRESS'),

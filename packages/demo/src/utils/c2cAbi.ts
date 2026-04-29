@@ -1,5 +1,5 @@
 // packages/demo/src/utils/c2cAbi.ts
-// ABI definitions matching the current C2CEscrow + C2CAdmin contracts.
+// ABI definitions matching the current C2CEscrow + C2CAdmin + V4 contracts.
 
 // ── TLSNProof tuple (shared) ──────────────────────────────────────────────────
 const tlsnProofComponents = [
@@ -431,20 +431,6 @@ export const C2C_ESCROW_ABI = [
     stateMutability: 'nonpayable' as const,
   },
 
-  // ── Order cancellation ─────────────────────────────────────────────────────
-  {
-    type: 'function' as const,
-    name: 'cancelOrder',
-    inputs: [
-      { name: '_merchant',   type: 'address' as const },
-      { name: '_productId',  type: 'uint256' as const },
-      { name: '_assetType',  type: 'uint8'   as const },
-      { name: '_orderId',    type: 'uint256' as const },
-    ],
-    outputs: [],
-    stateMutability: 'nonpayable' as const,
-  },
-
   // ── Platform payment — CRYPTO product (buyer pays fiat, receives crypto) ───
   {
     type: 'function' as const,
@@ -520,13 +506,15 @@ export const C2C_ESCROW_ABI = [
       { name: '_orderId',   type: 'uint256' as const },
     ],
     outputs: [
-      { name: 'buyer',       type: 'address' as const },
-      { name: 'amount',      type: 'uint256' as const },
-      { name: 'rate',        type: 'uint256' as const },
-      { name: 'deadline',    type: 'uint256' as const },
-      { name: 'status',      type: 'uint8'   as const },
-      { name: 'rateVersion', type: 'uint32'  as const },
-      { name: 'platformTxId', type: 'bytes32' as const },
+      { name: 'buyer',            type: 'address' as const },
+      { name: 'amount',           type: 'uint256' as const },
+      { name: 'rate',             type: 'uint256' as const },
+      { name: 'deadline',         type: 'uint256' as const },
+      { name: 'status',           type: 'uint8'   as const },
+      { name: 'rateVersion',      type: 'uint32'  as const },
+      { name: 'platformTxId',     type: 'bytes32' as const },
+      { name: 'bondAmount',       type: 'uint256' as const },
+      { name: 'bondBpsSnapshot',  type: 'uint16'  as const },
     ],
     stateMutability: 'view' as const,
   },
@@ -677,6 +665,301 @@ export const TLSN_VERIFIER_ABI = [
     inputs: [{ name: '_platformId', type: 'bytes32' as const }],
     outputs: [{ type: 'address' as const }],
     stateMutability: 'view' as const,
+  },
+] as const;
+
+// ── C2CBondVault ABI ──────────────────────────────────────────────────────────
+export const C2C_BOND_VAULT_ABI = [
+  {
+    type: 'function' as const,
+    name: 'createOrderBond',
+    inputs: [
+      { name: 'orderKey',    type: 'bytes32' as const },
+      { name: 'token',       type: 'address' as const },
+      { name: 'prover',      type: 'address' as const },
+      { name: 'counterpart', type: 'address' as const },
+      { name: 'bond',        type: 'uint256' as const },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'settle',
+    inputs: [
+      { name: 'orderKey', type: 'bytes32' as const },
+      { name: 'stype',    type: 'uint8'   as const },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'claim',
+    inputs: [
+      { name: 'token', type: 'address' as const },
+    ],
+    outputs: [{ name: 'amount', type: 'uint256' as const }],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'claimableBalance',
+    inputs: [
+      { name: 'user',  type: 'address' as const },
+      { name: 'token', type: 'address' as const },
+    ],
+    outputs: [{ type: 'uint256' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'orderBonds',
+    inputs: [{ name: 'orderKey', type: 'bytes32' as const }],
+    outputs: [
+      { name: 'token',       type: 'address' as const },
+      { name: 'prover',      type: 'address' as const },
+      { name: 'counterpart', type: 'address' as const },
+      { name: 'bond',        type: 'uint256' as const },
+      { name: 'initialized', type: 'bool'    as const },
+      { name: 'settled',     type: 'bool'    as const },
+    ],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'setEscrow',
+    inputs: [{ name: '_escrow', type: 'address' as const }],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'event' as const,
+    name: 'OrderBondCreated',
+    inputs: [
+      { name: 'orderKey',    type: 'bytes32' as const, indexed: true  },
+      { name: 'token',       type: 'address' as const, indexed: false },
+      { name: 'prover',      type: 'address' as const, indexed: false },
+      { name: 'counterpart', type: 'address' as const, indexed: false },
+      { name: 'bond',        type: 'uint256' as const, indexed: false },
+    ],
+  },
+  {
+    type: 'event' as const,
+    name: 'OrderBondSettled',
+    inputs: [
+      { name: 'orderKey',  type: 'bytes32' as const, indexed: true  },
+      { name: 'stype',     type: 'uint8'   as const, indexed: false },
+      { name: 'recipient', type: 'address' as const, indexed: false },
+      { name: 'amount',    type: 'uint256' as const, indexed: false },
+    ],
+  },
+  {
+    type: 'event' as const,
+    name: 'ClaimableIncreased',
+    inputs: [
+      { name: 'user',   type: 'address' as const, indexed: true  },
+      { name: 'token',  type: 'address' as const, indexed: true  },
+      { name: 'amount', type: 'uint256' as const, indexed: false },
+    ],
+  },
+  {
+    type: 'event' as const,
+    name: 'Claimed',
+    inputs: [
+      { name: 'user',   type: 'address' as const, indexed: true  },
+      { name: 'token',  type: 'address' as const, indexed: true  },
+      { name: 'amount', type: 'uint256' as const, indexed: false },
+    ],
+  },
+] as const;
+
+// ── C2CRiskManager ABI ────────────────────────────────────────────────────────
+const reputationViewComponents = [
+  { name: 'completedCount',            type: 'uint32' as const },
+  { name: 'timeoutCount',              type: 'uint32' as const },
+  { name: 'consecutiveTimeouts',       type: 'uint8'  as const },
+  { name: 'completedSinceLastTimeout', type: 'uint8'  as const },
+  { name: 'riskLevel',                 type: 'uint8'  as const },
+  { name: 'temporarilyFrozen',         type: 'bool'   as const },
+  { name: 'blacklisted',               type: 'bool'   as const },
+  { name: 'frozenUntil',               type: 'uint64' as const },
+  { name: 'lastTimeoutAt',             type: 'uint64' as const },
+] as const;
+
+export const C2C_RISK_MANAGER_ABI = [
+  {
+    type: 'function' as const,
+    name: 'requiredBondBps',
+    inputs: [{ name: 'user', type: 'address' as const }],
+    outputs: [{ type: 'uint16' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'getReputation',
+    inputs: [{ name: 'user', type: 'address' as const }],
+    outputs: [{
+      type: 'tuple' as const,
+      components: reputationViewComponents,
+    }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'onCompleted',
+    inputs: [{ name: 'user', type: 'address' as const }],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'onTimeout',
+    inputs: [{ name: 'user', type: 'address' as const }],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'setBlacklist',
+    inputs: [
+      { name: 'user',  type: 'address' as const },
+      { name: 'value', type: 'bool'    as const },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'manualUnfreeze',
+    inputs: [{ name: 'user', type: 'address' as const }],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'setRiskConfig',
+    inputs: [
+      { name: '_min',             type: 'uint16' as const },
+      { name: '_base',            type: 'uint16' as const },
+      { name: '_max',             type: 'uint16' as const },
+      { name: '_step',            type: 'uint16' as const },
+      { name: '_reset',           type: 'uint8'  as const },
+      { name: '_freezeThreshold', type: 'uint32' as const },
+      { name: '_rewardThreshold', type: 'uint32' as const },
+      { name: '_decayDays',       type: 'uint32' as const },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'setEscrow',
+    inputs: [{ name: '_escrow', type: 'address' as const }],
+    outputs: [],
+    stateMutability: 'nonpayable' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'minBondBps',
+    inputs: [],
+    outputs: [{ type: 'uint16' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'baseBondBps',
+    inputs: [],
+    outputs: [{ type: 'uint16' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'maxBondBps',
+    inputs: [],
+    outputs: [{ type: 'uint16' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'stepBps',
+    inputs: [],
+    outputs: [{ type: 'uint16' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'freezeDays',
+    inputs: [],
+    outputs: [{ type: 'uint32' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'decayIntervalDays',
+    inputs: [],
+    outputs: [{ type: 'uint32' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'freezeThreshold',
+    inputs: [],
+    outputs: [{ type: 'uint32' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'rewardCompletedThreshold',
+    inputs: [],
+    outputs: [{ type: 'uint32' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'function' as const,
+    name: 'resetThreshold',
+    inputs: [],
+    outputs: [{ type: 'uint8' as const }],
+    stateMutability: 'view' as const,
+  },
+  {
+    type: 'event' as const,
+    name: 'ReputationUpdated',
+    inputs: [
+      { name: 'user',        type: 'address' as const, indexed: true  },
+      { name: 'riskLevel',   type: 'uint8'   as const, indexed: false },
+      { name: 'completed',   type: 'uint32'  as const, indexed: false },
+      { name: 'timeouts',    type: 'uint32'  as const, indexed: false },
+      { name: 'frozen',      type: 'bool'    as const, indexed: false },
+      { name: 'blacklisted', type: 'bool'    as const, indexed: false },
+    ],
+  },
+  {
+    type: 'event' as const,
+    name: 'BlacklistUpdated',
+    inputs: [
+      { name: 'user',  type: 'address' as const, indexed: true  },
+      { name: 'value', type: 'bool'    as const, indexed: false },
+    ],
+  },
+  {
+    type: 'event' as const,
+    name: 'FreezeUpdated',
+    inputs: [
+      { name: 'user',        type: 'address' as const, indexed: true  },
+      { name: 'frozen',      type: 'bool'    as const, indexed: false },
+      { name: 'frozenUntil', type: 'uint64'  as const, indexed: false },
+    ],
+  },
+  {
+    type: 'event' as const,
+    name: 'RiskConfigUpdated',
+    inputs: [
+      { name: 'min',  type: 'uint16' as const, indexed: false },
+      { name: 'base', type: 'uint16' as const, indexed: false },
+      { name: 'max',  type: 'uint16' as const, indexed: false },
+      { name: 'step', type: 'uint16' as const, indexed: false },
+    ],
   },
 ] as const;
 

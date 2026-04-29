@@ -8,7 +8,7 @@ import { parseEventLogs, keccak256, stringToBytes } from 'viem';
 import type { Hex } from 'viem';
 
 import { publicClient } from './hardhatAccounts';
-import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from './c2cAbi';
+import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, C2C_BOND_VAULT_ABI, ERC20_ABI } from './c2cAbi';
 import { c2cConfig } from './c2cContractConfig';
 import { normalizeOrder, type OrderView } from './orderView';
 import { decodeContractError, formatContractAwareError } from './contractErrors';
@@ -82,8 +82,7 @@ export async function getOrder(
 // ─── Flow A: Wise-Crypto (buyer pays MYR, receives USDT) ─────────────────────
 
 /**
- * Buyer places a CRYPTO order.
- * No EIP-712 signing required — placeOrder reads the rate from chain.
+ * Buyer places a CRYPTO order (V4: pre-checks bondBps and approves bondVault if needed).
  */
 export async function placeWiseCryptoOrder(
   buyerClient: ReturnType<typeof import('./hardhatAccounts').makePublicClient extends never ? never : any>,
@@ -91,6 +90,46 @@ export async function placeWiseCryptoOrder(
   productId: bigint,
   amount: bigint,
 ): Promise<{ orderId: bigint; deadline: bigint; txHash: Hex }> {
+  const buyerAddr = buyerClient.account?.address as `0x${string}`;
+
+  // Step 1/4: Query requiredBondBps — may revert if blacklisted/frozen
+  let bondBps: bigint;
+  try {
+    bondBps = BigInt(await publicClient.readContract({
+      address: c2cConfig.riskManagerAddress,
+      abi: C2C_RISK_MANAGER_ABI,
+      functionName: 'requiredBondBps',
+      args: [buyerAddr],
+    }) as number);
+  } catch (err: unknown) {
+    const msg = (err as any)?.message ?? String(err);
+    if (msg.includes('UserBlacklisted')) throw new Error('账户已被列入黑名单，无法下单');
+    if (msg.includes('UserTemporarilyFrozen')) throw new Error('账户暂时冻结中，请等待解冻');
+    throw new Error(`风险参数查询失败: ${msg}`);
+  }
+
+  // Step 2/4: Check bondVault allowance and approve if needed
+  const estimatedBond = (amount * bondBps) / 10000n;
+  if (estimatedBond > 0n) {
+    const currentAllowance = await publicClient.readContract({
+      address: c2cConfig.usdtAddress,
+      abi: ERC20_ABI,
+      functionName: 'allowance',
+      args: [buyerAddr, c2cConfig.bondVaultAddress],
+    }) as bigint;
+    if (currentAllowance < estimatedBond) {
+      const MAX_UINT256 = (2n ** 256n) - 1n;
+      const approveTx = await buyerClient.writeContract({
+        address: c2cConfig.usdtAddress,
+        abi: ERC20_ABI,
+        functionName: 'approve',
+        args: [c2cConfig.bondVaultAddress, MAX_UINT256],
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx });
+    }
+  }
+
+  // Step 3/4: placeOrder — contract internally transfers bond to bondVault
   const hash = await buyerClient.writeContract({
     address: c2cConfig.escrowAddress,
     abi: C2C_ESCROW_ABI,
@@ -401,6 +440,26 @@ export async function submitBuyerWiseProof(
 ): Promise<Hex> {
   const { buyerClient: bc, merchantClient: mc } = await import('./hardhatAccounts');
   return submitWiseCryptoProof(bc, mc.account!.address, productId, orderId, contacts, transfer);
+}
+
+// ─── V4: claimBond ────────────────────────────────────────────────────────────
+
+/**
+ * Pull claimable bond balance from bondVault for a given token.
+ * Must be called by the beneficiary (buyer or merchant).
+ */
+export async function claimBond(
+  callerClient: any,
+  tokenAddress: `0x${string}`,
+): Promise<Hex> {
+  const hash = await callerClient.writeContract({
+    address: c2cConfig.bondVaultAddress,
+    abi: C2C_BOND_VAULT_ABI,
+    functionName: 'claim',
+    args: [tokenAddress],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return hash;
 }
 
 // ─── Internal: run Wise plugin ────────────────────────────────────────────────

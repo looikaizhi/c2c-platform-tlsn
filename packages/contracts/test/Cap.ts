@@ -84,7 +84,7 @@ async function setupBase(viem: any) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe("Cap", async function () {
-  const { viem }   = await network.connect();
+  const { viem }   = await network.getOrCreate();
   const testClient = await viem.getTestClient();
 
   let d: DeployResult;
@@ -185,22 +185,27 @@ describe("Cap", async function () {
     await d.c2cAdmin.write.setMaxOrderAmount([raisedCap]);
 
     const amount = 600n * ONE_USDT;
+    const MAX = 2n ** 256n - 1n;
 
-    // First order
+    // First order by buyer
     await d.escrowAsBuyer.write.placeOrder([
       d.merchant.account.address, 0n, 0, amount, NULL_BUYER_INFO,
     ]);
     const [b1] = await d.c2cEscrow.read.getOrder([d.merchant.account.address, 0n, 0, 0n]);
     assert.equal(b1.toLowerCase(), d.buyer.account.address.toLowerCase(), "first order should succeed");
 
-    // Cancel first order so we can place another (CRYPTO PENDING can be cancelled)
-    await d.escrowAsBuyer.write.cancelOrder([d.merchant.account.address, 0n, 0, 0n]);
+    // V4: cancelOrder is disabled; use a second buyer for the second order
+    await d.usdt.write.mint([d.randomUser.account.address, amount * 2n]);
+    const escrowAsRandom = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: d.randomUser } });
+    const usdtAsRandom   = await viem.getContractAt("MockERC20",  d.usdt.address,      { client: { wallet: d.randomUser } });
+    await usdtAsRandom.write.approve([d.c2cEscrow.address,  MAX]);
+    await usdtAsRandom.write.approve([d.c2cBondVault.address, MAX]);
 
-    // Second order of same amount — should still succeed (cap is per-order, not sum)
-    await d.escrowAsBuyer.write.placeOrder([
+    // Second order of same amount — should also succeed (cap is per-order, not sum)
+    await escrowAsRandom.write.placeOrder([
       d.merchant.account.address, 0n, 0, amount, NULL_BUYER_INFO,
     ]);
     const [b2] = await d.c2cEscrow.read.getOrder([d.merchant.account.address, 0n, 0, 1n]);
-    assert.equal(b2.toLowerCase(), d.buyer.account.address.toLowerCase(), "second order should also succeed");
+    assert.equal(b2.toLowerCase(), d.randomUser.account.address.toLowerCase(), "second order should also succeed");
   });
 });

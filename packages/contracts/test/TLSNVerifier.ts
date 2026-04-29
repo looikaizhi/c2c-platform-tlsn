@@ -15,7 +15,7 @@ import {
 } from "./helpers/buildTLSNProof.js";
 
 describe("TLSNVerifier", async function () {
-  const { viem } = await network.connect();
+  const { viem } = await network.getOrCreate();
   let d: DeployResult;
 
   before(async () => {

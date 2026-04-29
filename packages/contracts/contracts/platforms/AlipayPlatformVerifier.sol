@@ -23,7 +23,7 @@ import "../interfaces/IPlatformVerifier.sol";
  *        payeeName        → counterpartyName
  *        payeeLoginEmail  → counterpartyHandle
  *        payAmount        → "250.00" (2 decimal places, converted to X1000)
- *        status           → "succeed" (buyer→merchant) or "SUCCESS" (merchant→buyer)
+ *        status           → "SUCCESS" (both buyer→merchant and merchant→buyer directions)
  *        bizType          → "TRANSFER"
  *        orderId          → string (replay prevention)
  *        gmtSuccess       → "YYYY-MM-DD HH:MM:SS" (UTC+8)
@@ -74,7 +74,7 @@ contract AlipayPlatformVerifier is IPlatformVerifier {
     /**
      * @inheritdoc IPlatformVerifier
      * @dev proofs[0] = Alipay order proof (buyer pays merchant, CRYPTO product).
-     *      Validates payeeName/payeeLoginEmail match counterparty, amount, status="succeed",
+     *      Validates payeeName/payeeLoginEmail match counterparty, amount, status="SUCCESS",
      *      bizType="TRANSFER", gmtSuccess before deadline.
      *      Returns keccak256(orderId) as txId.
      */

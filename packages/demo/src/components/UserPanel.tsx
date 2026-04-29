@@ -10,8 +10,10 @@ import {
   MERCHANT_ADDRESSES,
   publicClient,
 } from '../utils/hardhatAccounts';
-import { C2C_ESCROW_ABI, ERC20_ABI } from '../utils/c2cAbi';
+import { C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, C2C_BOND_VAULT_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+import { ReputationBadge, type ReputationView } from './ReputationBadge';
+import { claimBond } from '../utils/wiseC2cActions';
 import { getDemoUserAddresses } from '../utils/demoUsers';
 import { normalizeOrder } from '../utils/orderView';
 import {
@@ -62,14 +64,12 @@ const GRID_CELL: React.CSSProperties = {
   background: '#f8f9fa', borderRadius: 8, padding: '10px 12px',
 };
 
-// Order status badge colours
+// Order status badge colours (V4: 0=PENDING, 1=EXPIRED, 2=COMPLETED, 3=WAITING)
 const STATUS_STYLE: Record<number, { bg: string; color: string; label: string }> = {
   0: { bg: '#e6f4ff', color: '#1677ff', label: 'PENDING' },
-  1: { bg: '#fff1f0', color: '#ff4d4f', label: 'CANCELLED' },
-  2: { bg: '#fff1f0', color: '#ff4d4f', label: 'EXPIRED' },
-  3: { bg: '#f6ffed', color: '#52c41a', label: 'COMPLETED' },
-  4: { bg: '#fff7e6', color: '#fa8c16', label: 'WAITING' },
-  5: { bg: '#fff7e6', color: '#d46b08', label: 'DISPUTED' },
+  1: { bg: '#fff7e6', color: '#d46b08', label: 'EXPIRED' },
+  2: { bg: '#f6ffed', color: '#52c41a', label: 'COMPLETED' },
+  3: { bg: '#e6f4ff', color: '#1677ff', label: 'WAITING' },
 };
 
 // -- Helpers -----------------------------------------------------------------
@@ -257,7 +257,7 @@ async function loadUser(userAddress: Hex): Promise<UserData> {
         const order = normalizeOrder(rawOrder);
         if (
           getAddress(order.buyer) === checkedAddress &&
-          (order.status === 0 || order.status === 4 || order.status === 5)
+          order.status === 0  // V4: only PENDING orders need buyer action
         ) {
           const platformId = await publicClient.readContract({
             address: c2cConfig.escrowAddress,
@@ -404,6 +404,13 @@ function UserTab({ address }: { address: Hex }) {
   const [rowStates, setRowStates] = useState<Record<string, ProofActionState>>({});
   const [savedArtifacts, setSavedArtifacts] = useState<Record<string, PaymentProofArtifactV1>>({});
 
+  // V4: reputation + claimable bond state
+  const [reputation, setReputation]     = useState<ReputationView | null>(null);
+  const [userBondBps, setUserBondBps]   = useState<number | null>(null);
+  const [userBondBpsError, setUserBondBpsError] = useState<string | null>(null);
+  const [claimableBalances, setClaimableBalances] = useState<Record<string, bigint>>({});
+  const [claimLoading, setClaimLoading] = useState<Record<string, boolean>>({});
+
   const checkedAddress = getAddress(address);
 
   function updateRowState(orderKey: string, updater: (prev: ProofActionState) => ProofActionState) {
@@ -431,6 +438,76 @@ function UserTab({ address }: { address: Hex }) {
     setSavedArtifacts(next);
   }
 
+  async function loadV4Data() {
+    const checkedAddr = getAddress(address);
+    const rmAddr = c2cConfig.riskManagerAddress;
+    const bvAddr = c2cConfig.bondVaultAddress;
+    if (!rmAddr || rmAddr.length < 3 || !bvAddr || bvAddr.length < 3) return;
+
+    // Reputation (never reverts)
+    try {
+      const rep = await publicClient.readContract({
+        address: rmAddr,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'getReputation',
+        args: [checkedAddr],
+      }) as ReputationView;
+      setReputation(rep);
+    } catch { /* silent */ }
+
+    // requiredBondBps (may revert if blacklisted/frozen)
+    try {
+      const bps = await publicClient.readContract({
+        address: rmAddr,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'requiredBondBps',
+        args: [checkedAddr],
+      }) as number;
+      setUserBondBps(bps);
+      setUserBondBpsError(null);
+    } catch (err: unknown) {
+      const msg = (err as any)?.message ?? String(err);
+      setUserBondBps(null);
+      if (msg.includes('UserBlacklisted')) setUserBondBpsError('账户已被列入黑名单，无法下单');
+      else if (msg.includes('UserTemporarilyFrozen')) setUserBondBpsError('账户暂时冻结中，请等待解冻');
+      else setUserBondBpsError('风险参数查询失败');
+    }
+
+    // Claimable balances for USDT / USDC / DAI
+    const tokens: Record<string, Hex> = {
+      USDT: c2cConfig.usdtAddress,
+      USDC: c2cConfig.usdcAddress,
+      DAI:  c2cConfig.daiAddress,
+    };
+    const entries = await Promise.all(
+      Object.entries(tokens).map(async ([, tokenAddr]) => {
+        if (!tokenAddr || tokenAddr.length < 3) return [tokenAddr, 0n] as [string, bigint];
+        const bal = await publicClient.readContract({
+          address: bvAddr,
+          abi: C2C_BOND_VAULT_ABI,
+          functionName: 'claimableBalance',
+          args: [checkedAddr, tokenAddr],
+        }).catch(() => 0n) as bigint;
+        return [tokenAddr, bal] as [string, bigint];
+      }),
+    );
+    setClaimableBalances(Object.fromEntries(entries));
+  }
+
+  async function handleClaimBond(tokenAddr: Hex) {
+    const walletClient = getUserClientByAddress(getAddress(address));
+    if (!walletClient) return;
+    setClaimLoading((prev) => ({ ...prev, [tokenAddr]: true }));
+    try {
+      await claimBond(walletClient, tokenAddr);
+      await loadV4Data();
+    } catch (e) {
+      console.error('[UserPanel] claimBond error', e);
+    } finally {
+      setClaimLoading((prev) => ({ ...prev, [tokenAddr]: false }));
+    }
+  }
+
   async function reload() {
     if (!isC2CConfigured()) return;
     setLoading(true);
@@ -438,6 +515,7 @@ function UserTab({ address }: { address: Hex }) {
       const loaded = await loadUser(address);
       setData(loaded);
       hydrateSavedArtifacts(loaded.activeOrders);
+      await loadV4Data();
     } catch (e) {
       console.error('[UserPanel] load error', e);
     } finally {
@@ -688,6 +766,63 @@ function UserTab({ address }: { address: Hex }) {
           </div>
         ))}
       </div>
+
+      {/* V4 Reputation block */}
+      {reputation && (
+        <div style={{ ...GRID_CELL, marginBottom: 12 }}>
+          <div style={{ ...LABEL, marginBottom: 6 }}>声誉 / Reputation</div>
+          <ReputationBadge
+            reputation={reputation}
+            bondBps={userBondBps}
+            bondBpsError={userBondBpsError}
+          />
+          {userBondBpsError && (
+            <div style={{ marginTop: 6, fontSize: 12, color: '#cf1322', fontWeight: 600 }}>
+              ⚠ 账户受限，无法下单
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* V4 Claimable bond block */}
+      {(() => {
+        const tokenEntries: Array<{ symbol: string; addr: Hex; decimals: number }> = [
+          { symbol: 'USDT', addr: c2cConfig.usdtAddress, decimals: 18 },
+          { symbol: 'USDC', addr: c2cConfig.usdcAddress, decimals: 6 },
+          { symbol: 'DAI',  addr: c2cConfig.daiAddress,  decimals: 18 },
+        ];
+        const hasAny = tokenEntries.some((t) => (claimableBalances[t.addr] ?? 0n) > 0n);
+        if (!hasAny) return null;
+        return (
+          <div style={{ ...GRID_CELL, marginBottom: 12 }}>
+            <div style={{ ...LABEL, marginBottom: 6 }}>可领取保证金 / Claimable Bond</div>
+            {tokenEntries.map(({ symbol, addr, decimals }) => {
+              const bal = claimableBalances[addr] ?? 0n;
+              if (bal === 0n) return null;
+              const isLoading = claimLoading[addr] ?? false;
+              return (
+                <div key={addr} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 13 }}>
+                    {symbol}: <strong>{parseFloat(formatUnits(bal, decimals)).toFixed(4)}</strong>
+                  </span>
+                  <button
+                    disabled={isLoading}
+                    onClick={() => handleClaimBond(addr)}
+                    style={{
+                      padding: '3px 10px', borderRadius: 4, border: 'none',
+                      background: isLoading ? '#d9d9d9' : '#1677ff',
+                      color: '#fff', fontSize: 11, fontWeight: 600,
+                      cursor: isLoading ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {isLoading ? 'Claiming…' : 'Claim'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* Active orders */}
       <div>

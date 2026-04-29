@@ -49,7 +49,7 @@ const ALIPAY_ID_HASH = keccak256(toBytes("testmerchant@alipay.example"));
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("C2CAdmin", async function () {
-  const { viem } = await network.connect();
+  const { viem } = await network.getOrCreate();
   const pc       = await viem.getPublicClient();
 
   before(() => clearRecords());
@@ -804,14 +804,14 @@ describe("C2CAdmin", async function () {
       const t0 = Date.now(); const ctx = makeCtx(); let pass = false;
       try {
         ctx.markVerifyStart();
-        await viem.assertions.revertWith(
+        await viem.assertions.revertWithCustomError(
           asRandom.write.incrementSellCount([d.merchant.account.address, 0]),
-          "not authorized",
+          d.c2cAdmin, "NotAuthorizedCaller",
         );
         ctx.markVerifyEnd();
         pass = true;
       } finally {
-        addRecord({ id: "ADM-ERR-14", desc: "非授权incrementSellCount → not authorized",
+        addRecord({ id: "ADM-ERR-14", desc: "非授权incrementSellCount → NotAuthorizedCaller",
           pass, totalMs: Date.now()-t0, verifyMs: ctx.verifyMs(), gasUsed: 0n });
       }
     });

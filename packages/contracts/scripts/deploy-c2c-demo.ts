@@ -1,41 +1,29 @@
 /**
- * Deploy the C2C Demo contracts and fully initialize state.
- * Writes contract addresses + product IDs to packages/demo/.env after deployment.
+ * Deploy the C2C Demo contracts (V4 — Bond + Penalty + Reputation) and fully
+ * initialise state for 3 merchants × 4 products each.
+ *
+ * Writes contract addresses to packages/demo/.env after deployment.
  *
  * Account layout (Hardhat deterministic accounts):
  *   accounts[0]   → Admin (deployer)
  *   accounts[1-3] → Merchant 1 / 2 / 3
  *   accounts[4-8] → User 1 / 2 / 3 / 4 / 5
- *
- * Tokens deployed (all minted to wallets):
- *   USDT (18 decimals) — registered in contract as cryptoId=0
- *   USDC (6  decimals) — wallet-only, NOT registered in contract
- *   DAI  (18 decimals) — wallet-only, NOT registered in contract
- *
- * Contract assets registered:
- *   Crypto: USDT (cryptoId=0)
- *   Fiat:   MYR  (fiatId=0)
- *
- * Products per merchant:
- *   productId=0 CRYPTO → Wise   (USDT cryptoId=0, MYR fiatId=0)
+ *   accounts[9]   → VerifierSigner
  *
  * Usage:
- *   npx hardhat run scripts/deploy-c2c-demo.ts --network localhost
+ *   npx hardhat run scripts1/deploy-c2c-demo.ts \
+ *     --config hardhat.config.v2.ts \
+ *     --network hardhatMainnet
  */
 
 import { network } from "hardhat";
 import {
   parseUnits,
-  parseEther,
   keccak256,
   toBytes,
-  createWalletClient,
-  createPublicClient,
-  http,
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { hardhat as hardhatChain } from "viem/chains";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -43,8 +31,6 @@ import { performance } from "perf_hooks";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-const RPC_URL = "http://127.0.0.1:8545";
 
 // Must stay aligned with packages/demo/src/utils/hardhatAccounts.ts
 const HARDHAT_PRIVATE_KEYS: Hex[] = [
@@ -61,7 +47,6 @@ const HARDHAT_PRIVATE_KEYS: Hex[] = [
 ];
 
 const VERIFIER_SIGNER_ADDRESS = privateKeyToAccount(HARDHAT_PRIVATE_KEYS[9]).address;
-const MIN_FUNDED_ETH = parseEther("20");
 
 // ── Rate constants (RATE_PRECISION_EXP = 8, so 4.5 MYR/USDT = 450_000_000) ──
 const RATE_WISE_CRYPTO   = 450_000_000n;  // 4.5  MYR / USDT
@@ -76,24 +61,15 @@ const COLLATERAL   = parseUnits("100",  18);  // 100 USDT collateral per product
 const MAX_UINT256  = (2n ** 256n) - 1n;
 
 // ── Merchant identities ────────────────────────────────────────────────────────
-const MERCHANT_WISE_NAMES   = ["KAI XU LOOI",       "MERCHANT TWO",    "MERCHANT THREE"];
-const MERCHANT_WISE_HANDLES = ["@kaixul1",            "@merchant2wise",  "@merchant3wise"];
+const MERCHANT_WISE_NAMES   = ["KAI XU LOOI"];
+const MERCHANT_WISE_HANDLES = ["@kaixul1"];
 
 // ── Never-expiring rate ─────────────────────────────────────────────────────────
 const RATE_EXPIRY_NEVER = 0n;
 
-function elapsed(label: string, start: number): number {
+function elapsed(label: string, start: number): void {
   const ms = Math.round(performance.now() - start);
   console.log(`  ⏱  ${label}: ${ms}ms`);
-  return ms;
-}
-
-function makeFixedWallet(index: number) {
-  return createWalletClient({
-    account: privateKeyToAccount(HARDHAT_PRIVATE_KEYS[index]),
-    chain: hardhatChain,
-    transport: http(RPC_URL),
-  });
 }
 
 async function main() {
@@ -102,21 +78,18 @@ async function main() {
   // ── Hardhat init ─────────────────────────────────────────────────────────────
   const tInit = performance.now();
   const { viem } = await network.connect();
-  const rpcPublicClient = createPublicClient({
-    chain: hardhatChain,
-    transport: http(RPC_URL),
-  });
   const nodeWallets = await viem.getWalletClients();
   elapsed("Hardhat init (connect + fetch wallet clients via RPC)", tInit);
 
-  // Use node admin for deployment, but fixed private keys for merchant/user accounts.
-  const adminWallet = nodeWallets[0];
-  const merchantWallets = [makeFixedWallet(1), makeFixedWallet(2), makeFixedWallet(3)];
-  const userWallets     = [makeFixedWallet(4), makeFixedWallet(5), makeFixedWallet(6), makeFixedWallet(7), makeFixedWallet(8)];
+  // All accounts are Hardhat's deterministic accounts[0..8] — same addresses as
+  // HARDHAT_PRIVATE_KEYS, already pre-funded by Hardhat with 10 000 ETH each.
+  const adminWallet   = nodeWallets[0];
+  const merchantWallets = nodeWallets.slice(1, 4);
+  const userWallets     = nodeWallets.slice(4, 9);
 
-  const adminAddr       = adminWallet.account.address;
-  const merchantAddrs   = merchantWallets.map((w) => w.account.address);
-  const userAddrs       = userWallets.map((w) => w.account.address);
+  const adminAddr     = adminWallet.account.address;
+  const merchantAddrs = merchantWallets.map((w) => w.account.address);
+  const userAddrs     = userWallets.map((w) => w.account.address);
 
   console.log("=== C2C Demo Deployment ===");
   console.log("Admin:      ", adminAddr);
@@ -124,17 +97,6 @@ async function main() {
   userAddrs.forEach((a, i) => console.log(`User ${i + 1}:     `, a));
   console.log("Verifier Signer:", VERIFIER_SIGNER_ADDRESS);
   console.log("");
-
-  // Ensure fixed merchant/user addresses are funded for tx gas.
-  const fundingTargets = [...merchantAddrs, ...userAddrs];
-  for (const target of fundingTargets) {
-    const bal = await rpcPublicClient.getBalance({ address: target });
-    if (bal >= MIN_FUNDED_ETH) continue;
-    const topUp = MIN_FUNDED_ETH - bal;
-    const txHash = await adminWallet.sendTransaction({ to: target, value: topUp });
-    await rpcPublicClient.waitForTransactionReceipt({ hash: txHash });
-  }
-  console.log(`✅ Ensured gas balances for ${fundingTargets.length} fixed merchant/user addresses`);
 
   const t0 = performance.now();
 
@@ -159,14 +121,24 @@ async function main() {
     tlsnVerifier.address,
   ]);
   console.log("C2CEscrow:     ", c2cEscrow.address);
+
+  const bondVault   = await viem.deployContract("C2CBondVault",   [c2cAdmin.address]);
+  const riskManager = await viem.deployContract("C2CRiskManager", [c2cAdmin.address]);
+  console.log("C2CBondVault:  ", bondVault.address);
+  console.log("C2CRiskManager:", riskManager.address);
   console.log("");
-  const t2 = performance.now(); elapsed("Step 2 — Core contracts (TLSNVerifier + C2CAdmin + C2CEscrow)", t1);
+  const t2 = performance.now(); elapsed("Step 2 — Core contracts (TLSNVerifier + C2CAdmin + C2CEscrow + BondVault + RiskManager)", t1);
 
   // ── 3. Cross-contract authorization ──────────────────────────────────────────
   await tlsnVerifier.write.setAuthorizedCaller([c2cAdmin.address,  true]);
   await tlsnVerifier.write.setAuthorizedCaller([c2cEscrow.address, true]);
   await c2cAdmin.write.setAuthorizedCaller([c2cEscrow.address, true]);
-  console.log("✅ Cross-contract authorization done");
+
+  // Wire BondVault + RiskManager to Escrow
+  await bondVault.write.setEscrow([c2cEscrow.address]);
+  await riskManager.write.setEscrow([c2cEscrow.address]);
+  await c2cEscrow.write.setManagers([riskManager.address, bondVault.address]);
+  console.log("✅ Cross-contract authorization + BondVault/RiskManager wiring done");
 
   // ── 4. Register trusted verifier & payment servers ───────────────────────────
   await tlsnVerifier.write.addTrustedVerifier([VERIFIER_SIGNER_ADDRESS]);
@@ -222,17 +194,17 @@ async function main() {
 
   // Contract handles connected to this merchant's wallet
   const usdtAsM   = await viem.getContractAt("MockERC20", usdt.address,   { client: { wallet: mWallet } });
-  const adminAsM  = await viem.getContractAt("C2CAdmin",  c2cAdmin.address,  { client: { wallet: mWallet } });
-  const escrowAsM = await viem.getContractAt("C2CEscrow", c2cEscrow.address, { client: { wallet: mWallet } });
+    const adminAsM  = await viem.getContractAt("C2CAdmin",  c2cAdmin.address,  { client: { wallet: mWallet } });
+    const escrowAsM = await viem.getContractAt("C2CEscrow", c2cEscrow.address, { client: { wallet: mWallet } });
 
   console.log(`\n── Merchant 1 (${mAddr}) ──`);
 
   // Approve escrow for USDT only (MAX_UINT)
   await usdtAsM.write.approve([c2cEscrow.address, MAX_UINT256]);
 
-  // Register merchant by admin
-  await c2cAdmin.write.registerMerchantByAdmin([mAddr]);
-  console.log(`  ✅ Registered`);
+    // Register merchant by admin
+    await c2cAdmin.write.registerMerchantByAdmin([mAddr]);
+    console.log(`  ✅ Registered`);
 
   // Set payment info for Wise
   const wNameHash = keccak256(toBytes(MERCHANT_WISE_NAMES[merchantIndex]));
@@ -241,7 +213,7 @@ async function main() {
   console.log(`  ✅ Payment info set (Wise)`);
 
   // List Wise buy-crypto product: USDT(0) -> MYR(0), productId=0 for assetType=CRYPTO
-  await (escrowAsM.write as any).listCryptoProduct([0n, 0n, COLLATERAL, true, PLATFORM_WISE]);
+    await (escrowAsM.write as any).listCryptoProduct([0n, 0n, COLLATERAL, true, PLATFORM_WISE]);
   console.log(`  ✅ Listed 1 product (Wise CRYPTO)`);
 
   // Publish never-expiring rate (assetType: 0=CRYPTO)
@@ -263,6 +235,8 @@ async function main() {
     // Core contracts
     `VITE_C2C_ADMIN_ADDRESS=${c2cAdmin.address}`,
     `VITE_C2C_ESCROW_ADDRESS=${c2cEscrow.address}`,
+    `VITE_BOND_VAULT_ADDRESS=${bondVault.address}`,
+    `VITE_RISK_MANAGER_ADDRESS=${riskManager.address}`,
     `VITE_VERIFIER_SIGNER_ADDRESS=${VERIFIER_SIGNER_ADDRESS}`,
     // Tokens
     `VITE_USDT_ADDRESS=${usdt.address}`,
@@ -278,7 +252,7 @@ async function main() {
     `VITE_USER3_ADDRESS=${userAddrs[2]}`,
     `VITE_USER4_ADDRESS=${userAddrs[3]}`,
     `VITE_USER5_ADDRESS=${userAddrs[4]}`,
-    ].join("\n") + "\n";
+  ].join("\n") + "\n";
 
   fs.writeFileSync(envPath, envContent, "utf-8");
 

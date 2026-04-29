@@ -2,30 +2,23 @@ import type { Address } from "viem";
 import { parseUnits } from "viem";
 
 /**
- * Deploy the full C2C platform stack and configure cross-contract authorization.
+ * Deploy the full C2C V4 platform stack (with RiskManager + BondVault).
  *
  * Returns all contract instances and wallet clients needed for testing.
  */
 export async function deployAll(viem: any) {
-  // Get wallet clients (hardhat provides 10 accounts by default)
   const walletClients = await viem.getWalletClients();
   const [deployer, verifierSigner, merchant, buyer, randomUser, newAdmin] =
     walletClients;
 
   // 1. Deploy MockERC20
-  const usdt = await viem.deployContract("MockERC20", [
-    "Tether USD",
-    "USDT",
-    18,
-  ]);
+  const usdt = await viem.deployContract("MockERC20", ["Tether USD", "USDT", 18]);
 
   // 2. Deploy TLSNVerifier
   const tlsnVerifier = await viem.deployContract("TLSNVerifier");
 
   // 3. Deploy C2CAdmin(verifierAddress)
-  const c2cAdmin = await viem.deployContract("C2CAdmin", [
-    tlsnVerifier.address,
-  ]);
+  const c2cAdmin = await viem.deployContract("C2CAdmin", [tlsnVerifier.address]);
 
   // 4. Deploy C2CEscrow(adminAddress, verifierAddress)
   const c2cEscrow = await viem.deployContract("C2CEscrow", [
@@ -68,52 +61,74 @@ export async function deployAll(viem: any) {
   await tlsnVerifier.write.setPlatformVerifier([PLATFORM_WISE, wisePlatformVerifier.address]);
   await tlsnVerifier.write.setPlatformVerifier([PLATFORM_ALIPAY, alipayPlatformVerifier.address]);
 
-  // 12. Mint USDT to merchant and buyer
+  // 12. Deploy V4: C2CRiskManager + C2CBondVault
+  const c2cRiskManager = await viem.deployContract("C2CRiskManager", [c2cAdmin.address]);
+  const c2cBondVault   = await viem.deployContract("C2CBondVault",   [c2cAdmin.address]);
+
+  // 13. Wire managers into escrow
+  await c2cEscrow.write.setManagers([
+    c2cRiskManager.address,
+    c2cBondVault.address,
+  ]);
+
+  // 14. Grant escrow permission to call riskManager and bondVault
+  await c2cRiskManager.write.setEscrow([c2cEscrow.address]);
+  await c2cBondVault.write.setEscrow([c2cEscrow.address]);
+
+  // 15. Mint USDT to merchant and buyer
   const mintAmount = parseUnits("100000", 18);
   await usdt.write.mint([merchant.account.address, mintAmount]);
   await usdt.write.mint([buyer.account.address, mintAmount]);
 
-  // Get contract instances connected to specific wallets
+  // Contract instances connected to specific wallets
   const usdtAsMerchant = await viem.getContractAt("MockERC20", usdt.address, {
     client: { wallet: merchant },
   });
   const usdtAsBuyer = await viem.getContractAt("MockERC20", usdt.address, {
     client: { wallet: buyer },
   });
-
-  const escrowAsMerchant = await viem.getContractAt(
-    "C2CEscrow",
-    c2cEscrow.address,
-    { client: { wallet: merchant } },
+  const escrowAsMerchant = await viem.getContractAt("C2CEscrow", c2cEscrow.address, {
+    client: { wallet: merchant },
+  });
+  const escrowAsBuyer = await viem.getContractAt("C2CEscrow", c2cEscrow.address, {
+    client: { wallet: buyer },
+  });
+  const adminAsMerchant = await viem.getContractAt("C2CAdmin", c2cAdmin.address, {
+    client: { wallet: merchant },
+  });
+  const riskManagerAsDeployer = await viem.getContractAt(
+    "C2CRiskManager", c2cRiskManager.address,
+    { client: { wallet: deployer } },
   );
-  const escrowAsBuyer = await viem.getContractAt(
-    "C2CEscrow",
-    c2cEscrow.address,
+  const bondVaultAsBuyer = await viem.getContractAt(
+    "C2CBondVault", c2cBondVault.address,
     { client: { wallet: buyer } },
   );
-
-  const adminAsMerchant = await viem.getContractAt(
-    "C2CAdmin",
-    c2cAdmin.address,
+  const bondVaultAsMerchant = await viem.getContractAt(
+    "C2CBondVault", c2cBondVault.address,
     { client: { wallet: merchant } },
   );
 
   return {
-    // Contracts (deployer-connected by default)
+    // Core contracts
     usdt,
     tlsnVerifier,
     c2cAdmin,
     c2cEscrow,
     wisePlatformVerifier,
     alipayPlatformVerifier,
-
-    // Contracts connected to specific wallets
+    // V4 contracts
+    c2cRiskManager,
+    c2cBondVault,
+    // Wallet-connected contracts
     usdtAsMerchant,
     usdtAsBuyer,
     escrowAsMerchant,
     escrowAsBuyer,
     adminAsMerchant,
-
+    riskManagerAsDeployer,
+    bondVaultAsBuyer,
+    bondVaultAsMerchant,
     // Wallet clients
     deployer,
     verifierSigner,

@@ -3,10 +3,10 @@
 // Click a row to open ProductDetailModal with full info, order form, and confirmation.
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { keccak256, toBytes, parseAbiItem } from 'viem';
+import { keccak256, toBytes, parseAbiItem, formatUnits } from 'viem';
 import type { Hex } from 'viem';
 import { publicClient, getUserClientByAddress } from '../utils/hardhatAccounts';
-import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from '../utils/c2cAbi';
+import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
 import { getDemoUserAddresses } from '../utils/demoUsers';
 import { decodeContractError, formatContractAwareError } from '../utils/contractErrors';
@@ -353,6 +353,11 @@ function ProductDetailModal({
   const [done, setDone]               = useState(false);
   const [tokenDecimals, setTokenDecimals] = useState(18);
 
+  // V4 bond estimate state
+  const [bondBps, setBondBps]             = useState<number | null>(null);
+  const [bondBpsLoading, setBondBpsLoading] = useState(false);
+  const [bondBpsError, setBondBpsError]   = useState<string | null>(null);
+
   useEffect(() => {
     if (demoUserAddresses.length === 0) {
       setSelectedUserAddress('');
@@ -371,6 +376,30 @@ function ProductDetailModal({
       functionName: 'decimals',
     }).then((d) => setTokenDecimals(Number(d))).catch(() => {});
   }, []);
+
+  // V4: query requiredBondBps when user selection changes (CRYPTO orders only)
+  useEffect(() => {
+    if (card.direction !== 'Crypto') return;
+    if (!selectedUserAddress || !c2cConfig.riskManagerAddress || c2cConfig.riskManagerAddress.length < 3) return;
+    setBondBps(null);
+    setBondBpsError(null);
+    setBondBpsLoading(true);
+    publicClient.readContract({
+      address: c2cConfig.riskManagerAddress,
+      abi: C2C_RISK_MANAGER_ABI,
+      functionName: 'requiredBondBps',
+      args: [selectedUserAddress as Hex],
+    }).then((bps) => {
+      setBondBps(Number(bps));
+      setBondBpsError(null);
+    }).catch((err: unknown) => {
+      const msg = (err as any)?.message ?? String(err);
+      if (msg.includes('UserBlacklisted')) setBondBpsError('账户已被列入黑名单，无法下单');
+      else if (msg.includes('UserTemporarilyFrozen')) setBondBpsError('账户暂时冻结中，请等待解冻');
+      else setBondBpsError('风险参数查询失败');
+      setBondBps(null);
+    }).finally(() => setBondBpsLoading(false));
+  }, [selectedUserAddress, card.direction]);
 
   const curr     = getCurrencyForPlatform(card.platformId);
   const usdtAmt  = parseFloat(amount) || 0;
@@ -497,8 +526,11 @@ function ProductDetailModal({
       addLog(`Placing ${card.platformName}-${card.direction} order…`);
 
       if (card.platformId === PLATFORM_WISE && card.direction === 'Crypto') {
+        addLog('步骤 1/4: 查询保证金比率 (RiskManager.requiredBondBps)…');
+        addLog('步骤 2/4: 检查并授权 BondVault (approve if needed)…');
+        addLog('步骤 3/4: 提交下单 (placeOrder)…');
         const { orderId, deadline: dl } = await placeWiseCryptoOrder(buyerClient, card.merchantAddr, card.productId, amountBig);
-        addLog(`Order placed — orderId=${orderId}  deadline=${new Date(Number(dl) * 1000).toLocaleTimeString()}`);
+        addLog(`步骤 4/4: 链上确认 — orderId=${orderId}  deadline=${new Date(Number(dl) * 1000).toLocaleTimeString()}`);
         addLog('Building binding context (reads rateVersion from chain)…');
         const ctx = await makeWiseCryptoBindingContext(card.merchantAddr, buyerAddr, card.productId, amountBig, orderId);
         addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
@@ -522,8 +554,11 @@ function ProductDetailModal({
         setDone(true);
 
       } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Crypto') {
+        addLog('步骤 1/4: 查询保证金比率 (RiskManager.requiredBondBps)…');
+        addLog('步骤 2/4: 检查并授权 BondVault (approve if needed)…');
+        addLog('步骤 3/4: 提交下单 (placeOrder)…');
         const { orderId } = await placeAlipayCryptoOrder(buyerClient, card.merchantAddr, card.productId, amountBig);
-        addLog(`Order placed — orderId=${orderId}`);
+        addLog(`步骤 4/4: 链上确认 — orderId=${orderId}`);
         const ctx = await makeAlipayCryptoBindingContext(card.merchantAddr, buyerAddr, card.productId, amountBig, orderId);
         addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
         addLog('Launching TLSN Alipay plugin…');
@@ -664,6 +699,24 @@ function ProductDetailModal({
               {usdtAmt > 0 && (
                 <div style={{ fontSize: 11, color: COLOR.primary, marginTop: 4 }}>{estimate}</div>
               )}
+              {/* V4 bond estimate (CRYPTO orders only) */}
+              {card.direction === 'Crypto' && (
+                <div style={{ marginTop: 6 }}>
+                  {bondBpsLoading && (
+                    <div style={{ fontSize: 11, color: COLOR.textMuted }}>
+                      <Spinner size={10} /> 查询保证金比率中…
+                    </div>
+                  )}
+                  {!bondBpsLoading && bondBpsError && (
+                    <div style={{ fontSize: 11, color: COLOR.danger }}>⚠ {bondBpsError}</div>
+                  )}
+                  {!bondBpsLoading && !bondBpsError && bondBps != null && usdtAmt > 0 && (
+                    <div style={{ fontSize: 11, color: '#d46b08' }}>
+                      预计保证金：{formatUnits(BigInt(Math.floor(usdtAmt * 10 ** tokenDecimals)) * BigInt(bondBps) / 10000n, tokenDecimals)} USDT（{(bondBps / 100).toFixed(1)}%）
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -701,8 +754,8 @@ function ProductDetailModal({
           {/* Action buttons */}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: log.length > 0 ? 16 : 0 }}>
               <button
-                style={S.btn(COLOR.primary, running || !card.isOpen || demoUserAddresses.length === 0)}
-                disabled={running || !card.isOpen || demoUserAddresses.length === 0}
+                style={S.btn(COLOR.primary, running || !card.isOpen || demoUserAddresses.length === 0 || !!bondBpsError)}
+                disabled={running || !card.isOpen || demoUserAddresses.length === 0 || !!bondBpsError}
                 onClick={handlePlaceOrderClick}
               >
                 {running ? <><Spinner />Processing…</> : 'Place Order'}

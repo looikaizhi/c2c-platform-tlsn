@@ -85,7 +85,7 @@ async function tryPlaceOrder(d: DeployResult) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe("BusinessHours", async function () {
-  const { viem }   = await network.connect();
+  const { viem }   = await network.getOrCreate();
   const testClient = await viem.getTestClient();
 
   let d: DeployResult;

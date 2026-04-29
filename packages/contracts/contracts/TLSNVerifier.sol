@@ -189,9 +189,8 @@ contract TLSNVerifier {
      *                        before being forwarded to the platform verifier.
      * @param paramsData      abi.encode(uint256 fiatAmountX1000,
      *                                   string  targetCurrency,
-     *                                   string  counterpartyName,
-     *                                   string  counterpartyHandle,
-     *                                   uint256 orderDeadline)
+     *                                   uint256 orderDeadline,
+     *                                   uint256 orderCreationTime)
      * @return txId           Platform-specific transaction ID returned by the platform verifier
      */
     function verifyAndDelegate(

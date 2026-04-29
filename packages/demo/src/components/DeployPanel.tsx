@@ -197,9 +197,11 @@ export function DeployPanel() {
   const configured = isC2CConfigured();
 
   const coreContracts: Array<{ label: string; address: string }> = [
-    { label: 'Escrow',    address: c2cConfig.escrowAddress },
-    { label: 'Admin',     address: c2cConfig.adminAddress },
-    { label: 'Verifier',  address: c2cConfig.verifierSignerAddress },
+    { label: 'Escrow',      address: c2cConfig.escrowAddress },
+    { label: 'Admin',       address: c2cConfig.adminAddress },
+    { label: 'Verifier',    address: c2cConfig.verifierSignerAddress },
+    { label: 'RiskManager', address: c2cConfig.riskManagerAddress },
+    { label: 'BondVault',   address: c2cConfig.bondVaultAddress },
   ].filter(({ address }) => isValidAddr(address));
 
   const tokens: Array<{ label: string; address: string }> = [

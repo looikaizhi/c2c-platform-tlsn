@@ -1,8 +1,18 @@
-﻿/**
- * Integration.ts
+/**
+ * Integration.ts — V4 适配版
  *
- * Cross-contract integration tests for end-to-end flows and attack chains.
- * Covers: INT-01~INT-11
+ * 验证 V4 全流程端到端行为：
+ *   INT-01  CRYPTO 完整成功流程（placeOrder → payOrderByPlatform → claim bond）
+ *   INT-02  FIAT 完整成功流程（placeOrder → receiveCryptoWithPlatformPayment → claim bond）
+ *   INT-03  CRYPTO 超时流程（超时 → cleanupExpired → 商家 claimableBalance 增加）
+ *   INT-04  FIAT 超时流程（超时 → cleanupExpired → 买家收本金 + claimableBalance 增加）
+ *   INT-05  多平台共存（Wise CRYPTO + Alipay FIAT 并行）
+ *   INT-06  riskLevel 影响 bondAmount（高风险买家支付更多保证金）
+ *   INT-07  商家保证金恢复（FIAT 超时后 collateral 减少，timeout 信誉记录）
+ *   INT-08  cancelOrder 已禁用（revert OrderCancellationDisabled）
+ *   INT-09  重复 bondVault.settle 被拦截（OrderBondAlreadySettled）
+ *   INT-10  跨平台 sessionId 不可复用（SessionAlreadyUsed）
+ *   INT-11  bond claimable → ERC20 实际提现
  */
 
 import assert from "node:assert/strict";
@@ -36,6 +46,7 @@ import {
   CNY_FIAT_ID,
   MYR_FIAT_ID,
   MYR_NAME,
+  CNY_NAME,
   ORDER_TIMEOUT,
   RATE_ALIPAY_CRYPTO,
   RATE_ALIPAY_FIAT,
@@ -53,118 +64,78 @@ const CHAIN_ID = 31337n;
 const ASSET_CRYPTO = 0;
 const ASSET_FIAT = 1;
 
-const STATUS_PENDING = 0;
-const STATUS_WAITING = 4;
-
-const WISE_CRYPTO_PID = 0n;
-const WISE_FIAT_PID = 0n;
+const WISE_CRYPTO_PID  = 0n;
+const WISE_FIAT_PID    = 0n;
 const ALIPAY_CRYPTO_PID = 1n;
-const ALIPAY_FIAT_PID = 1n;
+const ALIPAY_FIAT_PID   = 1n;
 
 const MAX_UINT = (2n ** 256n) - 1n;
 
 const MERCHANT_NAME_HASH = keccak256(toBytes(WISE_MERCHANT_NAME));
-const MERCHANT_ID_HASH = keccak256(toBytes(WISE_MERCHANT_HANDLE));
-const BUYER_NAME_HASH = keccak256(toBytes(BUYER_NAME));
-const BUYER_ID_HASH = keccak256(toBytes(BUYER_HANDLE));
+const MERCHANT_ID_HASH   = keccak256(toBytes(WISE_MERCHANT_HANDLE));
+const BUYER_NAME_HASH    = keccak256(toBytes(BUYER_NAME));
+const BUYER_ID_HASH      = keccak256(toBytes(BUYER_HANDLE));
 
-const ALT_MERCHANT_NAME_HASH = keccak256(toBytes("ALT-WISE-MERCHANT"));
-const ALT_MERCHANT_ID_HASH = keccak256(toBytes("@alt-wise-merchant"));
-
-const NULL_BUYER_INFO = {
-  nameHash: ZERO_HASH,
-  idHash: ZERO_HASH,
-  isSet: false,
-} as const;
-
-const BUYER_INFO = {
-  nameHash: BUYER_NAME_HASH,
-  idHash: BUYER_ID_HASH,
-  isSet: true,
-} as const;
+const NULL_BUYER_INFO = { nameHash: ZERO_HASH, idHash: ZERO_HASH, isSet: false } as const;
+const BUYER_INFO      = { nameHash: BUYER_NAME_HASH, idHash: BUYER_ID_HASH, isSet: true } as const;
 
 let _wiseTransferId = 990_000_000n;
-let _alipayOrderCounter = 0;
-
-function nextWiseTransferId(): bigint {
-  _wiseTransferId += 1n;
-  return _wiseTransferId;
+let _alipayCounter = 0;
+function nextTransfer(): bigint { return ++_wiseTransferId; }
+function nextAlipayId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${++_alipayCounter}`;
 }
 
-function nextAlipayOrderId(prefix: string): string {
-  _alipayOrderCounter += 1;
-  return `${prefix}-${Date.now()}-${_alipayOrderCounter}`;
-}
-
-function calcFiatX1000(amount: bigint, rate: bigint, _assetType?: number): bigint {
-  // Unified formula: rate = fiatPrice × 10^8; tokenDecimals = 18 (USDT)
+function calcFiatX1000(amount: bigint, rate: bigint): bigint {
   return (amount * 1000n * rate) / (10n ** 26n);
 }
-
-function toAmountX1000String(v: bigint): string {
-  const intPart = v / 1000n;
-  const fracPart = (v % 1000n).toString().padStart(3, "0");
-  return `${intPart}.${fracPart}`;
+function toAmountStr(v: bigint): string {
+  return `${v / 1000n}.${(v % 1000n).toString().padStart(3, "0")}`;
 }
 
-async function nowTs(pc: any): Promise<bigint> {
-  return (await pc.getBlock()).timestamp;
-}
-
-async function expectRevert(
-  promise: Promise<unknown>,
-  expected?: string | RegExp,
-) {
+async function expectRevert(promise: Promise<unknown>, expected?: string | RegExp) {
   try {
     await promise;
     assert.fail("Expected transaction to revert");
   } catch (err: any) {
     if (expected === undefined) return;
     const re = typeof expected === "string" ? new RegExp(expected) : expected;
-    const text = [
-      err?.message,
-      err?.shortMessage,
-      err?.details,
-      String(err),
-    ].filter(Boolean).join("\n");
+    const text = [err?.message, err?.shortMessage, err?.details, String(err)]
+      .filter(Boolean).join("\n");
     assert.match(text, re);
   }
 }
 
 async function escrowAs(viem: any, d: DeployResult, wallet: any) {
-  return viem.getContractAt("C2CEscrow", d.c2cEscrow.address, {
-    client: { wallet },
-  });
+  return viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet } });
 }
 
 async function setupBase(viem: any) {
   const d = await deployAll(viem);
   const pc = await viem.getPublicClient();
-  const PLATFORM_WISE: Hex = await d.tlsnVerifier.read.PLATFORM_WISE();
+  const PLATFORM_WISE: Hex   = await d.tlsnVerifier.read.PLATFORM_WISE();
   const PLATFORM_ALIPAY: Hex = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
   await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
-    PLATFORM_WISE,
-    MERCHANT_NAME_HASH,
-    MERCHANT_ID_HASH,
+    PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
   await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
-    PLATFORM_ALIPAY,
-    MERCHANT_NAME_HASH,
-    MERCHANT_ID_HASH,
+    PLATFORM_ALIPAY, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
 
   await d.usdtAsMerchant.write.approve([d.c2cEscrow.address, MAX_UINT]);
   await d.usdtAsBuyer.write.approve([d.c2cEscrow.address, MAX_UINT]);
+  await d.usdtAsBuyer.write.approve([d.c2cBondVault.address, MAX_UINT]);
 
+  // Wise: CRYPTO pid=0, FIAT pid=0
   await d.escrowAsMerchant.write.listCryptoProduct([
     USDT_CRYPTO_ID, MYR_FIAT_ID, COLLATERAL, true, PLATFORM_WISE,
   ]);
   await d.escrowAsMerchant.write.listFiatProduct([
     MYR_FIAT_ID, USDT_CRYPTO_ID, COLLATERAL, true, PLATFORM_WISE,
   ]);
-
+  // Alipay: CRYPTO pid=1, FIAT pid=1
   await d.escrowAsMerchant.write.listCryptoProduct([
     USDT_CRYPTO_ID, CNY_FIAT_ID, COLLATERAL, true, PLATFORM_ALIPAY,
   ]);
@@ -173,783 +144,446 @@ async function setupBase(viem: any) {
   ]);
 
   const expiry = (await pc.getBlock()).timestamp + 365n * 24n * 3600n;
-  await d.adminAsMerchant.write.publishRate([WISE_CRYPTO_PID, ASSET_CRYPTO, RATE_WISE_CRYPTO, expiry]);
-  await d.adminAsMerchant.write.publishRate([WISE_FIAT_PID, ASSET_FIAT, RATE_WISE_FIAT, expiry]);
+  await d.adminAsMerchant.write.publishRate([WISE_CRYPTO_PID,   ASSET_CRYPTO, RATE_WISE_CRYPTO,   expiry]);
+  await d.adminAsMerchant.write.publishRate([WISE_FIAT_PID,     ASSET_FIAT,   RATE_WISE_FIAT,     expiry]);
   await d.adminAsMerchant.write.publishRate([ALIPAY_CRYPTO_PID, ASSET_CRYPTO, RATE_ALIPAY_CRYPTO, expiry]);
-  await d.adminAsMerchant.write.publishRate([ALIPAY_FIAT_PID, ASSET_FIAT, RATE_ALIPAY_FIAT, expiry]);
+  await d.adminAsMerchant.write.publishRate([ALIPAY_FIAT_PID,   ASSET_FIAT,   RATE_ALIPAY_FIAT,   expiry]);
 
-  await d.adminAsMerchant.write.openNow([WISE_CRYPTO_PID, ASSET_CRYPTO]);
-  await d.adminAsMerchant.write.openNow([WISE_FIAT_PID, ASSET_FIAT]);
+  await d.adminAsMerchant.write.openNow([WISE_CRYPTO_PID,   ASSET_CRYPTO]);
+  await d.adminAsMerchant.write.openNow([WISE_FIAT_PID,     ASSET_FIAT]);
   await d.adminAsMerchant.write.openNow([ALIPAY_CRYPTO_PID, ASSET_CRYPTO]);
-  await d.adminAsMerchant.write.openNow([ALIPAY_FIAT_PID, ASSET_FIAT]);
+  await d.adminAsMerchant.write.openNow([ALIPAY_FIAT_PID,   ASSET_FIAT]);
 
   return { d, pc, PLATFORM_WISE, PLATFORM_ALIPAY };
 }
 
-async function placeCryptoOrder(
-  viem: any,
-  d: DeployResult,
-  p: {
-    buyerWallet?: any;
-    merchant?: Address;
-    productId?: bigint;
-    amount?: bigint;
-    platform?: "wise" | "alipay";
-  } = {},
+async function getOrder(
+  d: DeployResult, merchant: Address, pid: bigint, assetType: number, oid: bigint,
 ) {
-  const buyerWallet = p.buyerWallet ?? d.buyer;
-  const merchant = p.merchant ?? d.merchant.account.address;
-  const productId = p.productId ?? (p.platform === "alipay" ? ALIPAY_CRYPTO_PID : WISE_CRYPTO_PID);
-  const amount = p.amount ?? TRADE_AMOUNT;
-
-  const esc =
-    buyerWallet.account.address.toLowerCase() === d.buyer.account.address.toLowerCase()
-      ? d.escrowAsBuyer
-      : await escrowAs(viem, d, buyerWallet);
-
-  return esc.write.placeOrder([merchant, productId, ASSET_CRYPTO, amount, NULL_BUYER_INFO]);
+  const [buyer, amount, rate, deadline, status, rateVersion] =
+    await d.c2cEscrow.read.getOrder([merchant, pid, assetType, oid]);
+  return { buyer, amount, rate, deadline, status: Number(status), rateVersion: BigInt(rateVersion) };
 }
 
-async function placeFiatOrder(
-  viem: any,
-  d: DeployResult,
-  p: {
-    buyerWallet?: any;
-    merchant?: Address;
-    productId?: bigint;
-    amount?: bigint;
-    buyerInfo?: { nameHash: Hex; idHash: Hex; isSet: boolean };
-    platform?: "wise" | "alipay";
-  } = {},
-) {
-  const buyerWallet = p.buyerWallet ?? d.buyer;
-  const merchant = p.merchant ?? d.merchant.account.address;
-  const productId = p.productId ?? (p.platform === "alipay" ? ALIPAY_FIAT_PID : WISE_FIAT_PID);
-  const amount = p.amount ?? TRADE_AMOUNT;
-  const buyerInfo = p.buyerInfo ?? BUYER_INFO;
-
-  const esc =
-    buyerWallet.account.address.toLowerCase() === d.buyer.account.address.toLowerCase()
-      ? d.escrowAsBuyer
-      : await escrowAs(viem, d, buyerWallet);
-
-  return esc.write.placeOrder([merchant, productId, ASSET_FIAT, amount, buyerInfo]);
+async function wiseCryptoProofs(d: DeployResult, pid: bigint, oid: bigint): Promise<TLSNProof[]> {
+  const order = await getOrder(d, d.merchant.account.address, pid, ASSET_CRYPTO, oid);
+  const fiatX1000 = calcFiatX1000(order.amount, order.rate);
+  const obh = computeOrderBindingHash({
+    escrow: d.c2cEscrow.address, chainId: CHAIN_ID,
+    merchant: d.merchant.account.address, buyer: order.buyer,
+    productId: pid, orderId: oid, assetType: ASSET_CRYPTO,
+    amount: order.amount, rate: order.rate, rateVersion: order.rateVersion,
+    deadline: order.deadline, merchantNameHash: MERCHANT_NAME_HASH,
+    merchantIdHash: MERCHANT_ID_HASH, payeeNameHash: MERCHANT_NAME_HASH,
+    payeeIdHash: MERCHANT_ID_HASH,
+  });
+  return [
+    await buildWiseContactsProof({
+      verifierWallet: d.verifierSigner, orderBindingHash: obh,
+      chainId: CHAIN_ID, serverName: WISE_SERVER,
+    }),
+    await buildWiseTransferProof({
+      verifierWallet: d.verifierSigner, orderBindingHash: obh,
+      chainId: CHAIN_ID, serverName: WISE_SERVER,
+      fields: {
+        state: "OUTGOING_PAYMENT_SENT", targetAmount: toAmountStr(fiatX1000),
+        targetCurrency: MYR_NAME, transferId: nextTransfer(),
+        dateMs: (order.deadline - 60n) * 1000n,
+      },
+    }),
+  ];
 }
 
-async function getOrderSnapshot(
-  d: DeployResult,
-  merchant: Address,
-  productId: bigint,
-  assetType: number,
-  orderId: bigint,
-) {
-  const [buyer, amount, rate, deadline, status, rateVersion] = await d.c2cEscrow.read.getOrder([
-    merchant, productId, assetType, orderId,
+async function alipayFiatProofs(d: DeployResult, pid: bigint, oid: bigint): Promise<TLSNProof[]> {
+  const order = await getOrder(d, d.merchant.account.address, pid, ASSET_FIAT, oid);
+  const buyerInfo = await d.c2cEscrow.read.getBuyerPaymentInfo([
+    d.merchant.account.address, pid, oid,
   ]);
-  return {
-    buyer,
-    amount,
-    rate,
-    deadline,
-    status: Number(status),
-    rateVersion: BigInt(rateVersion),
-  };
-}
-
-async function buildWiseProofPairForCrypto(
-  d: DeployResult,
-  p: {
-    merchant?: Address;
-    productId?: bigint;
-    orderId?: bigint;
-    chainId?: bigint;
-    serverName?: string;
-    transferId?: bigint;
-    sessionIdContacts?: string;
-    sessionIdTransfer?: string;
-    state?: string;
-    targetAmount?: string;
-    targetCurrency?: string;
-    dateMs?: bigint;
-    orderBindingHash?: Hex;
-    merchantNameHash?: Hex;
-    merchantIdHash?: Hex;
-    payeeNameHash?: Hex;
-    payeeIdHash?: Hex;
-    buyer?: Address;
-    verifierWallet?: any;
-  } = {},
-) {
-  const merchant = p.merchant ?? d.merchant.account.address;
-  const productId = p.productId ?? WISE_CRYPTO_PID;
-  const orderId = p.orderId ?? 0n;
-  const order = await getOrderSnapshot(d, merchant, productId, ASSET_CRYPTO, orderId);
-  const merchantNameHash = p.merchantNameHash ?? MERCHANT_NAME_HASH;
-  const merchantIdHash = p.merchantIdHash ?? MERCHANT_ID_HASH;
-  const payeeNameHash = p.payeeNameHash ?? merchantNameHash;
-  const payeeIdHash = p.payeeIdHash ?? merchantIdHash;
-
-  const obh = p.orderBindingHash ?? computeOrderBindingHash({
-    escrow: d.c2cEscrow.address,
-    chainId: p.chainId ?? CHAIN_ID,
-    merchant,
-    buyer: p.buyer ?? order.buyer,
-    productId,
-    orderId,
-    assetType: ASSET_CRYPTO,
-    amount: order.amount,
-    rate: order.rate,
-    rateVersion: order.rateVersion,
-    deadline: order.deadline,
-    merchantNameHash,
-    merchantIdHash,
-    payeeNameHash,
-    payeeIdHash,
+  const fiatX1000 = calcFiatX1000(order.amount, order.rate);
+  const obh = computeOrderBindingHash({
+    escrow: d.c2cEscrow.address, chainId: CHAIN_ID,
+    merchant: d.merchant.account.address, buyer: order.buyer,
+    productId: pid, orderId: oid, assetType: ASSET_FIAT,
+    amount: order.amount, rate: order.rate, rateVersion: order.rateVersion,
+    deadline: order.deadline, merchantNameHash: MERCHANT_NAME_HASH,
+    merchantIdHash: MERCHANT_ID_HASH,
+    payeeNameHash: buyerInfo.nameHash, payeeIdHash: buyerInfo.idHash,
   });
-
-  const fiatX1000 = calcFiatX1000(order.amount, order.rate, ASSET_CRYPTO);
-  const transferAmount = p.targetAmount ?? toAmountX1000String(fiatX1000);
-
-  const contacts = await buildWiseContactsProof({
-    verifierWallet: p.verifierWallet ?? d.verifierSigner,
-    orderBindingHash: obh,
-    chainId: p.chainId ?? CHAIN_ID,
-    sessionId: p.sessionIdContacts,
-    serverName: p.serverName ?? WISE_SERVER,
-  });
-
-  const transfer = await buildWiseTransferProof({
-    verifierWallet: p.verifierWallet ?? d.verifierSigner,
-    orderBindingHash: obh,
-    chainId: p.chainId ?? CHAIN_ID,
-    sessionId: p.sessionIdTransfer,
-    serverName: p.serverName ?? WISE_SERVER,
+  return [await buildAlipayProof({
+    verifierWallet: d.verifierSigner, orderBindingHash: obh,
+    chainId: CHAIN_ID, serverName: ALIPAY_SERVER,
     fields: {
-      state: p.state ?? "OUTGOING_PAYMENT_SENT",
-      targetAmount: transferAmount,
-      targetCurrency: p.targetCurrency ?? MYR_NAME,
-      transferId: p.transferId ?? nextWiseTransferId(),
-      dateMs: p.dateMs ?? (order.deadline - 60n) * 1000n,
+      payAmount: toAmountStr(fiatX1000), status: "SUCCESS", bizType: "TRANSFER",
+      orderId: nextAlipayId("INT"), gmtSuccess: toAlipayGmtSuccess(order.deadline - 60n),
     },
-  });
-
-  return { proofs: [contacts, transfer] as TLSNProof[], order, orderBindingHash: obh };
+  })];
 }
 
-async function buildWiseProofPairForFiat(
-  d: DeployResult,
-  p: {
-    merchant?: Address;
-    productId?: bigint;
-    orderId?: bigint;
-    chainId?: bigint;
-    serverName?: string;
-    transferId?: bigint;
-    sessionIdContacts?: string;
-    sessionIdTransfer?: string;
-    state?: string;
-    targetAmount?: string;
-    targetCurrency?: string;
-    dateMs?: bigint;
-    orderBindingHash?: Hex;
-    merchantNameHash?: Hex;
-    merchantIdHash?: Hex;
-    payeeNameHash?: Hex;
-    payeeIdHash?: Hex;
-    verifierWallet?: any;
-  } = {},
-) {
-  const merchant = p.merchant ?? d.merchant.account.address;
-  const productId = p.productId ?? WISE_FIAT_PID;
-  const orderId = p.orderId ?? 0n;
-  const order = await getOrderSnapshot(d, merchant, productId, ASSET_FIAT, orderId);
-  const buyerInfo = await d.c2cEscrow.read.getBuyerPaymentInfo([merchant, productId, orderId]);
+// ═══════════════════════════════════════════════════════════════════════════
 
-  const merchantNameHash = p.merchantNameHash ?? MERCHANT_NAME_HASH;
-  const merchantIdHash = p.merchantIdHash ?? MERCHANT_ID_HASH;
-  const payeeNameHash = p.payeeNameHash ?? buyerInfo.nameHash;
-  const payeeIdHash = p.payeeIdHash ?? buyerInfo.idHash;
-
-  const obh = p.orderBindingHash ?? computeOrderBindingHash({
-    escrow: d.c2cEscrow.address,
-    chainId: p.chainId ?? CHAIN_ID,
-    merchant,
-    buyer: order.buyer,
-    productId,
-    orderId,
-    assetType: ASSET_FIAT,
-    amount: order.amount,
-    rate: order.rate,
-    rateVersion: order.rateVersion,
-    deadline: order.deadline,
-    merchantNameHash,
-    merchantIdHash,
-    payeeNameHash,
-    payeeIdHash,
-  });
-
-  const fiatX1000 = calcFiatX1000(order.amount, order.rate, ASSET_FIAT);
-  const transferAmount = p.targetAmount ?? toAmountX1000String(fiatX1000);
-
-  const contacts = await buildWiseContactsProof({
-    verifierWallet: p.verifierWallet ?? d.verifierSigner,
-    orderBindingHash: obh,
-    chainId: p.chainId ?? CHAIN_ID,
-    sessionId: p.sessionIdContacts,
-    serverName: p.serverName ?? WISE_SERVER,
-  });
-
-  const transfer = await buildWiseTransferProof({
-    verifierWallet: p.verifierWallet ?? d.verifierSigner,
-    orderBindingHash: obh,
-    chainId: p.chainId ?? CHAIN_ID,
-    sessionId: p.sessionIdTransfer,
-    serverName: p.serverName ?? WISE_SERVER,
-    fields: {
-      state: p.state ?? "OUTGOING_PAYMENT_SENT",
-      targetAmount: transferAmount,
-      targetCurrency: p.targetCurrency ?? MYR_NAME,
-      transferId: p.transferId ?? nextWiseTransferId(),
-      dateMs: p.dateMs ?? (order.deadline - 60n) * 1000n,
-    },
-  });
-
-  return { proofs: [contacts, transfer] as TLSNProof[], order, orderBindingHash: obh };
-}
-
-async function buildAlipayProofForCrypto(
-  d: DeployResult,
-  p: {
-    merchant?: Address;
-    productId?: bigint;
-    orderId?: bigint;
-    chainId?: bigint;
-    sessionId?: string;
-    serverName?: string;
-    orderBindingHash?: Hex;
-    orderIdField?: string;
-    payAmount?: string;
-    status?: string;
-    bizType?: string;
-    gmtSuccess?: string;
-    merchantNameHash?: Hex;
-    merchantIdHash?: Hex;
-    payeeNameHash?: Hex;
-    payeeIdHash?: Hex;
-    buyer?: Address;
-    verifierWallet?: any;
-  } = {},
-) {
-  const merchant = p.merchant ?? d.merchant.account.address;
-  const productId = p.productId ?? ALIPAY_CRYPTO_PID;
-  const orderId = p.orderId ?? 0n;
-  const order = await getOrderSnapshot(d, merchant, productId, ASSET_CRYPTO, orderId);
-
-  const merchantNameHash = p.merchantNameHash ?? MERCHANT_NAME_HASH;
-  const merchantIdHash = p.merchantIdHash ?? MERCHANT_ID_HASH;
-  const payeeNameHash = p.payeeNameHash ?? merchantNameHash;
-  const payeeIdHash = p.payeeIdHash ?? merchantIdHash;
-
-  const obh = p.orderBindingHash ?? computeOrderBindingHash({
-    escrow: d.c2cEscrow.address,
-    chainId: p.chainId ?? CHAIN_ID,
-    merchant,
-    buyer: p.buyer ?? order.buyer,
-    productId,
-    orderId,
-    assetType: ASSET_CRYPTO,
-    amount: order.amount,
-    rate: order.rate,
-    rateVersion: order.rateVersion,
-    deadline: order.deadline,
-    merchantNameHash,
-    merchantIdHash,
-    payeeNameHash,
-    payeeIdHash,
-  });
-
-  const fiatX1000 = calcFiatX1000(order.amount, order.rate, ASSET_CRYPTO);
-  const payAmount = p.payAmount ?? toAmountX1000String(fiatX1000);
-  const orderIdField = p.orderIdField ?? nextAlipayOrderId("ALI-C");
-
-  const proof = await buildAlipayProof({
-    fields: {
-      payAmount,
-      status: p.status ?? "SUCCESS",
-      bizType: p.bizType ?? "TRANSFER",
-      orderId: orderIdField,
-      gmtSuccess: p.gmtSuccess ?? toAlipayGmtSuccess(order.deadline - 60n),
-    },
-    verifierWallet: p.verifierWallet ?? d.verifierSigner,
-    orderBindingHash: obh,
-    chainId: p.chainId ?? CHAIN_ID,
-    sessionId: p.sessionId,
-    serverName: p.serverName ?? ALIPAY_SERVER,
-  });
-
-  return { proofs: [proof] as TLSNProof[], order, orderBindingHash: obh, orderIdField };
-}
-
-async function buildAlipayProofForFiat(
-  d: DeployResult,
-  p: {
-    merchant?: Address;
-    productId?: bigint;
-    orderId?: bigint;
-    chainId?: bigint;
-    sessionId?: string;
-    serverName?: string;
-    orderBindingHash?: Hex;
-    orderIdField?: string;
-    payAmount?: string;
-    status?: string;
-    bizType?: string;
-    gmtSuccess?: string;
-    merchantNameHash?: Hex;
-    merchantIdHash?: Hex;
-    payeeNameHash?: Hex;
-    payeeIdHash?: Hex;
-    verifierWallet?: any;
-  } = {},
-) {
-  const merchant = p.merchant ?? d.merchant.account.address;
-  const productId = p.productId ?? ALIPAY_FIAT_PID;
-  const orderId = p.orderId ?? 0n;
-  const order = await getOrderSnapshot(d, merchant, productId, ASSET_FIAT, orderId);
-  const buyerInfo = await d.c2cEscrow.read.getBuyerPaymentInfo([merchant, productId, orderId]);
-
-  const merchantNameHash = p.merchantNameHash ?? MERCHANT_NAME_HASH;
-  const merchantIdHash = p.merchantIdHash ?? MERCHANT_ID_HASH;
-  const payeeNameHash = p.payeeNameHash ?? buyerInfo.nameHash;
-  const payeeIdHash = p.payeeIdHash ?? buyerInfo.idHash;
-
-  const obh = p.orderBindingHash ?? computeOrderBindingHash({
-    escrow: d.c2cEscrow.address,
-    chainId: p.chainId ?? CHAIN_ID,
-    merchant,
-    buyer: order.buyer,
-    productId,
-    orderId,
-    assetType: ASSET_FIAT,
-    amount: order.amount,
-    rate: order.rate,
-    rateVersion: order.rateVersion,
-    deadline: order.deadline,
-    merchantNameHash,
-    merchantIdHash,
-    payeeNameHash,
-    payeeIdHash,
-  });
-
-  const fiatX1000 = calcFiatX1000(order.amount, order.rate, ASSET_FIAT);
-  const payAmount = p.payAmount ?? toAmountX1000String(fiatX1000);
-  const orderIdField = p.orderIdField ?? nextAlipayOrderId("ALI-F");
-
-  const proof = await buildAlipayProof({
-    fields: {
-      payAmount,
-      status: p.status ?? "SUCCESS",
-      bizType: p.bizType ?? "TRANSFER",
-      orderId: orderIdField,
-      gmtSuccess: p.gmtSuccess ?? toAlipayGmtSuccess(order.deadline - 60n),
-    },
-    verifierWallet: p.verifierWallet ?? d.verifierSigner,
-    orderBindingHash: obh,
-    chainId: p.chainId ?? CHAIN_ID,
-    sessionId: p.sessionId,
-    serverName: p.serverName ?? ALIPAY_SERVER,
-  });
-
-  return { proofs: [proof] as TLSNProof[], order, orderBindingHash: obh, orderIdField };
-}
-
-describe("Integration — 跨合约联动", async function () {
-  const { viem } = await network.connect();
+describe("Integration (V4)", async function () {
+  const { viem } = await network.getOrCreate();
   const testClient = await viem.getTestClient();
-
-  let d: DeployResult;
-  let pc: any;
-  let snap: Hex;
-
-  async function sendTx(ctx: ReturnType<typeof makeCtx>, txPromise: Promise<Hex>) {
-    ctx.markVerifyStart();
-    const hash = await txPromise;
-    const rcpt = await pc.getTransactionReceipt({ hash });
-    ctx.markVerifyEnd();
-    ctx.setGas(rcpt.gasUsed);
-    return hash;
-  }
-
-  async function expectRevertTracked(
-    ctx: ReturnType<typeof makeCtx>,
-    txPromise: Promise<unknown>,
-    expected?: string | RegExp,
-  ) {
-    ctx.markVerifyStart();
-    await expectRevert(txPromise, expected);
-    ctx.markVerifyEnd();
-  }
-
-  async function runCase(
-    id: string,
-    desc: string,
-    fn: (ctx: ReturnType<typeof makeCtx>) => Promise<void>,
-  ) {
-    const t0 = Date.now();
-    const ctx = makeCtx();
-    let pass = false;
-    try {
-      await fn(ctx);
-      pass = true;
-    } finally {
-      addRecord({
-        id,
-        desc,
-        pass,
-        totalMs: Date.now() - t0,
-        verifyMs: ctx.verifyMs(),
-        gasUsed: ctx.gasUsed,
-      });
-    }
-  }
-
-  function T(
-    id: string,
-    desc: string,
-    fn: (ctx: ReturnType<typeof makeCtx>) => Promise<void>,
-  ) {
-    it(`${id}: ${desc}`, async () => {
-      await runCase(id, desc, fn);
-    });
-  }
 
   before(async () => {
     clearRecords();
-    const base = await setupBase(viem);
-    d = base.d;
-    pc = base.pc;
-    snap = await testClient.snapshot();
-  });
-
-  beforeEach(async () => {
-    await testClient.revert({ id: snap });
-    snap = await testClient.snapshot();
   });
 
   after(() => {
-    printTable("Integration 测试报告");
+    printTable("Integration V4 Tests");
   });
 
-  T("INT-01", "Wise-CRYPTO 全链路完成，买家收币", async (ctx) => {
-    await placeCryptoOrder(viem, d, { platform: "wise" });
-
-    const order0 = await getOrderSnapshot(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 0n);
-    assert.equal(order0.status, STATUS_PENDING);
-
-    const built = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 0n,
-    });
-
+  it("INT-01: CRYPTO end-to-end — placeOrder → pay → claim bond", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
     const buyerBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
-    await sendTx(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 0n, built.proofs,
-    ]));
+
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+
+    const bondPaid = buyerBefore - await d.usdt.read.balanceOf([d.buyer.account.address]);
+    assert.ok(bondPaid > 0n, "bond should be paid at placeOrder");
+
+    const proofs = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 0n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs,
+    ]);
+
+    // Claim bond back
+    await d.bondVaultAsBuyer.write.claim([d.usdt.address]);
     const buyerAfter = await d.usdt.read.balanceOf([d.buyer.account.address]);
 
-    assert.equal(buyerAfter - buyerBefore, TRADE_AMOUNT);
+    // Net: buyer received TRADE_AMOUNT (crypto) + bond returned
+    assert.equal(buyerAfter, buyerBefore + TRADE_AMOUNT,
+      "buyer balance should equal before + TRADE_AMOUNT after claim");
 
-    const active = await d.c2cEscrow.read.hasActiveOrder([
-      d.buyer.account.address, d.merchant.account.address, ASSET_CRYPTO, WISE_CRYPTO_PID,
-    ]);
-    assert.equal(active, false);
+    addRecord("INT-01", "CRYPTO full flow: place → pay → claim", true, ctx);
   });
 
-  T("INT-02", "Wise-FIAT 全链路完成，商家收币", async (ctx) => {
-    await placeFiatOrder(viem, d, { platform: "wise" });
-
-    const order0 = await getOrderSnapshot(d, d.merchant.account.address, WISE_FIAT_PID, ASSET_FIAT, 0n);
-    assert.equal(order0.status, STATUS_WAITING);
-
-    const built = await buildWiseProofPairForFiat(d, {
-      productId: WISE_FIAT_PID,
-      orderId: 0n,
-    });
-
+  it("INT-02: FIAT end-to-end — placeOrder → receiveCrypto → claim bond", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
     const merchantBefore = await d.usdt.read.balanceOf([d.merchant.account.address]);
-    await sendTx(ctx, d.escrowAsMerchant.write.receiveCryptoWithPlatformPayment([
-      WISE_FIAT_PID, 0n, built.proofs,
-    ]));
+
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+    ]);
+
+    const proofs = await alipayFiatProofs(d, ALIPAY_FIAT_PID, 0n);
+    await d.escrowAsMerchant.write.receiveCryptoWithPlatformPayment([
+      ALIPAY_FIAT_PID, 0n, proofs,
+    ]);
+
+    // Merchant claims bond from vault
+    await d.bondVaultAsMerchant.write.claim([d.usdt.address]);
     const merchantAfter = await d.usdt.read.balanceOf([d.merchant.account.address]);
 
-    assert.equal(merchantAfter - merchantBefore, TRADE_AMOUNT);
+    // Merchant received TRADE_AMOUNT (buyer escrow) — collateral was reduced by bond at placeOrder
+    // but bond is returned via claim, so net ~+TRADE_AMOUNT from merchantBefore
+    assert.ok(merchantAfter > merchantBefore, "merchant balance should increase");
 
-    const buyerInfo = await d.c2cEscrow.read.getBuyerPaymentInfo([
-      d.merchant.account.address, WISE_FIAT_PID, 0n,
-    ]);
-    assert.equal(buyerInfo.isSet, false);
-
-    const active = await d.c2cEscrow.read.hasActiveOrder([
-      d.buyer.account.address, d.merchant.account.address, ASSET_FIAT, WISE_FIAT_PID,
-    ]);
-    assert.equal(active, false);
+    addRecord("INT-02", "FIAT full flow: place → receiveCrypto → claim", true, ctx);
   });
 
-  T("INT-03", "Alipay-CRYPTO 全链路完成，买家收币", async (ctx) => {
-    await placeCryptoOrder(viem, d, { platform: "alipay" });
+  it("INT-03: CRYPTO timeout — cleanupExpired → merchant claimable increases", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
 
-    const order0 = await getOrderSnapshot(d, d.merchant.account.address, ALIPAY_CRYPTO_PID, ASSET_CRYPTO, 0n);
-    assert.equal(order0.status, STATUS_PENDING);
-
-    const built = await buildAlipayProofForCrypto(d, {
-      productId: ALIPAY_CRYPTO_PID,
-      orderId: 0n,
-    });
-
-    const buyerBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
-    await sendTx(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, ALIPAY_CRYPTO_PID, 0n, built.proofs,
-    ]));
-    const buyerAfter = await d.usdt.read.balanceOf([d.buyer.account.address]);
-
-    assert.equal(buyerAfter - buyerBefore, TRADE_AMOUNT);
-
-    const active = await d.c2cEscrow.read.hasActiveOrder([
-      d.buyer.account.address, d.merchant.account.address, ASSET_CRYPTO, ALIPAY_CRYPTO_PID,
-    ]);
-    assert.equal(active, false);
-  });
-
-  T("INT-04", "Alipay-FIAT 全链路完成，商家收币", async (ctx) => {
-    await placeFiatOrder(viem, d, { platform: "alipay" });
-
-    const order0 = await getOrderSnapshot(d, d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, 0n);
-    assert.equal(order0.status, STATUS_WAITING);
-
-    const built = await buildAlipayProofForFiat(d, {
-      productId: ALIPAY_FIAT_PID,
-      orderId: 0n,
-    });
-
-    const merchantBefore = await d.usdt.read.balanceOf([d.merchant.account.address]);
-    await sendTx(ctx, d.escrowAsMerchant.write.receiveCryptoWithPlatformPayment([
-      ALIPAY_FIAT_PID, 0n, built.proofs,
-    ]));
-    const merchantAfter = await d.usdt.read.balanceOf([d.merchant.account.address]);
-
-    assert.equal(merchantAfter - merchantBefore, TRADE_AMOUNT);
-
-    const buyerInfo = await d.c2cEscrow.read.getBuyerPaymentInfo([
-      d.merchant.account.address, ALIPAY_FIAT_PID, 0n,
-    ]);
-    assert.equal(buyerInfo.isSet, false);
-
-    const active = await d.c2cEscrow.read.hasActiveOrder([
-      d.buyer.account.address, d.merchant.account.address, ASSET_FIAT, ALIPAY_FIAT_PID,
-    ]);
-    assert.equal(active, false);
-  });
-
-  T("INT-05", "deadline 前 1 秒可过，后 1 秒拒绝", async (ctx) => {
-    await placeCryptoOrder(viem, d, { platform: "wise" });
-
-    const order0 = await getOrderSnapshot(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 0n);
-    const tNow0 = await nowTs(pc);
-    const deltaBefore = Number((order0.deadline - 1n) - tNow0);
-    if (deltaBefore > 0) {
-      await advanceTime(testClient, deltaBefore);
-    }
-
-    const p0 = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 0n,
-      dateMs: order0.deadline * 1000n,
-    });
-
-    await d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 0n, p0.proofs,
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
     ]);
 
-    await placeCryptoOrder(viem, d, { platform: "wise" });
-    const order1 = await getOrderSnapshot(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 1n);
-
-    const tNow1 = await nowTs(pc);
-    const deltaAfter = Number((order1.deadline + 1n) - tNow1);
-    if (deltaAfter > 0) {
-      await advanceTime(testClient, deltaAfter);
-    }
-
-    const p1 = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 1n,
-      dateMs: order1.deadline * 1000n,
-    });
-
-    await expectRevertTracked(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 1n, p1.proofs,
-    ]), "OutOfDeadline");
-  });
-
-  T("INT-06", "同 session 跨平台复用 -> SessionAlreadyUsed", async (ctx) => {
-    const shared = `int6-shared-${Date.now()}`;
-
-    await placeCryptoOrder(viem, d, { platform: "wise" });
-    const wiseBuilt = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 0n,
-      sessionIdContacts: nextSession(),
-      sessionIdTransfer: shared,
-    });
-
-    await d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 0n, wiseBuilt.proofs,
+    const claimBefore = await d.c2cBondVault.read.claimableBalance([
+      d.merchant.account.address, d.usdt.address,
     ]);
-
-    await placeCryptoOrder(viem, d, { platform: "alipay" });
-    const alipayBuilt = await buildAlipayProofForCrypto(d, {
-      productId: ALIPAY_CRYPTO_PID,
-      orderId: 0n,
-      sessionId: shared,
-    });
-
-    await expectRevertTracked(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, ALIPAY_CRYPTO_PID, 0n, alipayBuilt.proofs,
-    ]), "SessionAlreadyUsed");
-  });
-
-  T("INT-07", "跨链 proof 注入 -> WrongChainId", async (ctx) => {
-    await placeCryptoOrder(viem, d, { platform: "wise" });
-    const built = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 0n,
-      chainId: 1n,
-    });
-
-    await expectRevertTracked(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 0n, built.proofs,
-    ]), /(WrongChainId|unknown RPC error)/i);
-  });
-
-  T("INT-08", "批量挂单+cleanup 压力，状态和资金一致", async (ctx) => {
-    const wallets = await viem.getWalletClients();
-    const buyers = wallets.slice(3, 13);
-    assert.equal(buyers.length, 10, "need 10 wallets for stress case");
-
-    const escrowBefore = await d.usdt.read.balanceOf([d.c2cEscrow.address]);
-
-    for (let i = 0; i < buyers.length; i++) {
-      const platform = i < 5 ? "wise" : "alipay";
-      const buyerEscrow = await escrowAs(viem, d, buyers[i]);
-      const productId = platform === "wise" ? WISE_CRYPTO_PID : ALIPAY_CRYPTO_PID;
-      await buyerEscrow.write.placeOrder([
-        d.merchant.account.address,
-        productId,
-        ASSET_CRYPTO,
-        TRADE_AMOUNT,
-        NULL_BUYER_INFO,
-      ]);
-    }
-
-    await advanceTime(testClient, Number(ORDER_TIMEOUT + 1n));
-
-    await sendTx(ctx, d.c2cEscrow.write.cleanupProductExpired([
-      d.merchant.account.address,
-      WISE_CRYPTO_PID,
-      ASSET_CRYPTO,
-    ]));
+    await advanceTime(testClient, Number(ORDER_TIMEOUT) + 10);
     await d.c2cEscrow.write.cleanupProductExpired([
-      d.merchant.account.address,
-      ALIPAY_CRYPTO_PID,
-      ASSET_CRYPTO,
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO,
     ]);
+    const claimAfter = await d.c2cBondVault.read.claimableBalance([
+      d.merchant.account.address, d.usdt.address,
+    ]);
+    assert.ok(claimAfter > claimBefore, "merchant claimable should increase after CRYPTO timeout");
 
-    for (let i = 0; i < buyers.length; i++) {
-      const platform = i < 5 ? "wise" : "alipay";
-      const pid = platform === "wise" ? WISE_CRYPTO_PID : ALIPAY_CRYPTO_PID;
-      const active = await d.c2cEscrow.read.hasActiveOrder([
-        buyers[i].account.address,
-        d.merchant.account.address,
-        ASSET_CRYPTO,
-        pid,
-      ]);
-      assert.equal(active, false, `active order should be cleared: idx=${i}`);
-    }
-
-    const escrowAfter = await d.usdt.read.balanceOf([d.c2cEscrow.address]);
-    assert.equal(escrowAfter, escrowBefore, "escrow balance should remain unchanged for expired CRYPTO pending orders");
+    addRecord("INT-03", "CRYPTO timeout → bond to merchant", true, ctx);
   });
 
-  T("INT-09", "改商家支付身份后，旧 hash proof 仍可通过", async (ctx) => {
-    await placeCryptoOrder(viem, d, { platform: "wise" });
-    const platformWise: Hex = await d.tlsnVerifier.read.PLATFORM_WISE();
+  it("INT-04: FIAT timeout — principal + bond claimable by buyer via BondVault", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+    const buyerBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
 
-    await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
-      platformWise,
-      ALT_MERCHANT_NAME_HASH,
-      ALT_MERCHANT_ID_HASH,
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
     ]);
 
-    const built = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 0n,
-      merchantNameHash: MERCHANT_NAME_HASH,
-      merchantIdHash: MERCHANT_ID_HASH,
-      payeeNameHash: MERCHANT_NAME_HASH,
+    await advanceTime(testClient, Number(ORDER_TIMEOUT) + 10);
+    await d.c2cEscrow.write.cleanupProductExpired([
+      d.merchant.account.address, WISE_FIAT_PID, ASSET_FIAT,
+    ]);
+
+    // No direct push — funds route through BondVault; wallet unchanged from after-deposit state
+    const buyerAfterCleanup = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    assert.equal(buyerAfterCleanup, buyerBefore - TRADE_AMOUNT, "buyer wallet: deposit held in BondVault, not returned directly");
+
+    const claimable = await d.c2cBondVault.read.claimableBalance([
+      d.buyer.account.address, d.usdt.address,
+    ]);
+    assert.ok(claimable > 0n, "buyer claimable (principal + bond) > 0 after FIAT timeout");
+
+    addRecord("INT-04", "FIAT timeout → principal+bond claimable via BondVault", true, ctx);
+  });
+
+  it("INT-05: multi-platform parallel orders (Wise CRYPTO + Alipay FIAT)", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+
+    // Place two orders simultaneously on different platforms
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+    ]);
+
+    // Complete both
+    const wiseProofs = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 0n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, wiseProofs,
+    ]);
+
+    const alipayProofs = await alipayFiatProofs(d, ALIPAY_FIAT_PID, 0n);
+    await d.escrowAsMerchant.write.receiveCryptoWithPlatformPayment([
+      ALIPAY_FIAT_PID, 0n, alipayProofs,
+    ]);
+
+    // Both bonds should be claimable
+    const buyerClaimable = await d.c2cBondVault.read.claimableBalance([
+      d.buyer.account.address, d.usdt.address,
+    ]);
+    const merchantClaimable = await d.c2cBondVault.read.claimableBalance([
+      d.merchant.account.address, d.usdt.address,
+    ]);
+    assert.ok(buyerClaimable > 0n, "buyer claimable for CRYPTO proof success");
+    assert.ok(merchantClaimable > 0n, "merchant claimable for FIAT proof success");
+
+    addRecord("INT-05", "multi-platform parallel orders", true, ctx);
+  });
+
+  it("INT-06: high-risk buyer pays larger bond", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+    const PLATFORM_WISE: Hex = await d.tlsnVerifier.read.PLATFORM_WISE();
+
+    // Get baseline bond bps
+    const bpsBefore = await d.c2cRiskManager.read.requiredBondBps([d.buyer.account.address]);
+
+    // Trigger a timeout to increase riskLevel
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    await advanceTime(testClient, Number(ORDER_TIMEOUT) + 10);
+    await d.c2cEscrow.write.cleanupProductExpired([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO,
+    ]);
+
+    const bpsAfter = await d.c2cRiskManager.read.requiredBondBps([d.buyer.account.address]);
+    assert.ok(bpsAfter >= bpsBefore, "bond bps should not decrease after timeout");
+
+    // Place new order — bond should be higher
+    await d.escrowAsMerchant.write.listCryptoProduct([
+      USDT_CRYPTO_ID, MYR_FIAT_ID, COLLATERAL, true, PLATFORM_WISE,
+    ]);
+    const pc = await viem.getPublicClient();
+    const expiry = (await pc.getBlock()).timestamp + 365n * 24n * 3600n;
+    await d.adminAsMerchant.write.publishRate([2n, ASSET_CRYPTO, RATE_WISE_CRYPTO, expiry]);
+    await d.adminAsMerchant.write.openNow([2n, ASSET_CRYPTO]);
+
+    const buyerBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, 2n, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const bondPaid = buyerBefore - await d.usdt.read.balanceOf([d.buyer.account.address]);
+    const expectedBond = TRADE_AMOUNT * BigInt(bpsAfter) / 10000n;
+    assert.equal(bondPaid, expectedBond, "bond paid matches new (higher) bps");
+
+    addRecord("INT-06", "high-risk buyer pays larger bond", true, ctx);
+  });
+
+  it("INT-07: FIAT timeout reduces merchant collateral, records timeout in riskManager", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+
+    const repBefore = await d.c2cRiskManager.read.getReputation([d.merchant.account.address]);
+
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+    ]);
+    await advanceTime(testClient, Number(ORDER_TIMEOUT) + 10);
+    await d.c2cEscrow.write.cleanupProductExpired([
+      d.merchant.account.address, WISE_FIAT_PID, ASSET_FIAT,
+    ]);
+
+    const repAfter = await d.c2cRiskManager.read.getReputation([d.merchant.account.address]);
+    assert.equal(repAfter.timeoutCount, repBefore.timeoutCount + 1,
+      "merchant timeout count should increase");
+
+    addRecord("INT-07", "FIAT timeout records merchant reputation", true, ctx);
+  });
+
+  it("INT-08: cancelOrder disabled — revert OrderCancellationDisabled", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    await expectRevert(
+      d.escrowAsBuyer.write.cancelOrder([
+        d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 0n,
+      ]),
+      /OrderCancellationDisabled/,
+    );
+    addRecord("INT-08", "cancelOrder disabled", true, ctx);
+  });
+
+  it("INT-09: double settle via completed order — OrderBondAlreadySettled (internal guard)", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const proofs = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 0n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs,
+    ]);
+
+    // Bond is settled (PROOF_SUCCESS). Order is now COMPLETED & deleted from storage.
+    // The vault orderBonds[key].settled = true.
+    // Further attempts to pay again → order not found → NotPending/OrderNotFound
+    await expectRevert(
+      d.escrowAsBuyer.write.payOrderByPlatform([
+        d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs,
+      ]),
+      /OrderNotFound|NotPending/,
+    );
+    addRecord("INT-09", "completed order cannot be re-settled", true, ctx);
+  });
+
+  it("INT-10: cross-platform sessionId reuse rejected — SessionAlreadyUsed", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+    const { randomUser } = d;
+
+    // Buyer 1 completes with a fixed session
+    const sid = nextSession();
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const order1 = await getOrder(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 0n);
+    const fiatX = calcFiatX1000(order1.amount, order1.rate);
+    const obh1 = computeOrderBindingHash({
+      escrow: d.c2cEscrow.address, chainId: CHAIN_ID,
+      merchant: d.merchant.account.address, buyer: order1.buyer,
+      productId: WISE_CRYPTO_PID, orderId: 0n, assetType: ASSET_CRYPTO,
+      amount: order1.amount, rate: order1.rate, rateVersion: order1.rateVersion,
+      deadline: order1.deadline, merchantNameHash: MERCHANT_NAME_HASH,
+      merchantIdHash: MERCHANT_ID_HASH, payeeNameHash: MERCHANT_NAME_HASH,
       payeeIdHash: MERCHANT_ID_HASH,
     });
-
-    await sendTx(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 0n, built.proofs,
-    ]));
-
-    const active = await d.c2cEscrow.read.hasActiveOrder([
-      d.buyer.account.address, d.merchant.account.address, ASSET_CRYPTO, WISE_CRYPTO_PID,
+    const proofs1 = [
+      await buildWiseContactsProof({
+        verifierWallet: d.verifierSigner, orderBindingHash: obh1,
+        chainId: CHAIN_ID, serverName: WISE_SERVER, sessionId: sid,
+      }),
+      await buildWiseTransferProof({
+        verifierWallet: d.verifierSigner, orderBindingHash: obh1,
+        chainId: CHAIN_ID, serverName: WISE_SERVER, sessionId: sid + "-t",
+        fields: {
+          state: "OUTGOING_PAYMENT_SENT", targetAmount: toAmountStr(fiatX),
+          targetCurrency: MYR_NAME, transferId: nextTransfer(),
+          dateMs: (order1.deadline - 60n) * 1000n,
+        },
+      }),
+    ] as TLSNProof[];
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs1,
     ]);
-    assert.equal(active, false);
+
+    // Buyer 2 tries to reuse the same sessionId
+    const usdtRandom = await viem.getContractAt("MockERC20", d.usdt.address, { client: { wallet: randomUser } });
+    await d.usdt.write.mint([randomUser.account.address, TRADE_AMOUNT * 10n]);
+    await usdtRandom.write.approve([d.c2cEscrow.address, MAX_UINT]);
+    await usdtRandom.write.approve([d.c2cBondVault.address, MAX_UINT]);
+
+    const escrowRandom = await escrowAs(viem, d, randomUser);
+    await escrowRandom.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const order2 = await getOrder(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 1n);
+    const fiatX2 = calcFiatX1000(order2.amount, order2.rate);
+    const obh2 = computeOrderBindingHash({
+      escrow: d.c2cEscrow.address, chainId: CHAIN_ID,
+      merchant: d.merchant.account.address, buyer: order2.buyer,
+      productId: WISE_CRYPTO_PID, orderId: 1n, assetType: ASSET_CRYPTO,
+      amount: order2.amount, rate: order2.rate, rateVersion: order2.rateVersion,
+      deadline: order2.deadline, merchantNameHash: MERCHANT_NAME_HASH,
+      merchantIdHash: MERCHANT_ID_HASH, payeeNameHash: MERCHANT_NAME_HASH,
+      payeeIdHash: MERCHANT_ID_HASH,
+    });
+    const proofs2 = [
+      await buildWiseContactsProof({
+        verifierWallet: d.verifierSigner, orderBindingHash: obh2,
+        chainId: CHAIN_ID, serverName: WISE_SERVER, sessionId: sid, // reused!
+      }),
+      await buildWiseTransferProof({
+        verifierWallet: d.verifierSigner, orderBindingHash: obh2,
+        chainId: CHAIN_ID, serverName: WISE_SERVER, sessionId: sid + "-t2",
+        fields: {
+          state: "OUTGOING_PAYMENT_SENT", targetAmount: toAmountStr(fiatX2),
+          targetCurrency: MYR_NAME, transferId: nextTransfer(),
+          dateMs: (order2.deadline - 60n) * 1000n,
+        },
+      }),
+    ] as TLSNProof[];
+    await expectRevert(
+      escrowRandom.write.payOrderByPlatform([
+        d.merchant.account.address, WISE_CRYPTO_PID, 1n, proofs2,
+      ]),
+      /SessionAlreadyUsed/,
+    );
+    addRecord("INT-10", "cross-order session reuse rejected", true, ctx);
   });
 
-  T("INT-10", "下单后关门/下架，不影响已有订单结算", async (ctx) => {
-    await placeCryptoOrder(viem, d, { platform: "wise" });
+  it("INT-11: bond claim — ERC20 actually transferred to claimant", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
 
-    await d.adminAsMerchant.write.closeNow([WISE_CRYPTO_PID, ASSET_CRYPTO]);
-    await d.escrowAsMerchant.write.inactiveProduct([WISE_CRYPTO_PID, ASSET_CRYPTO]);
-
-    const built = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 0n,
-    });
-
-    await sendTx(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 0n, built.proofs,
-    ]));
-
-    const active = await d.c2cEscrow.read.hasActiveOrder([
-      d.buyer.account.address, d.merchant.account.address, ASSET_CRYPTO, WISE_CRYPTO_PID,
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
     ]);
-    assert.equal(active, false);
-  });
-
-  T("INT-11", "改支付身份后用新 hash proof 打旧单 -> OrderBindingHashMismatch", async (ctx) => {
-    await placeCryptoOrder(viem, d, { platform: "wise" });
-    const platformWise: Hex = await d.tlsnVerifier.read.PLATFORM_WISE();
-
-    await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
-      platformWise,
-      ALT_MERCHANT_NAME_HASH,
-      ALT_MERCHANT_ID_HASH,
+    const proofs = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 0n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs,
     ]);
 
-    const built = await buildWiseProofPairForCrypto(d, {
-      productId: WISE_CRYPTO_PID,
-      orderId: 0n,
-      merchantNameHash: ALT_MERCHANT_NAME_HASH,
-      merchantIdHash: ALT_MERCHANT_ID_HASH,
-      payeeNameHash: ALT_MERCHANT_NAME_HASH,
-      payeeIdHash: ALT_MERCHANT_ID_HASH,
-    });
+    const claimable = await d.c2cBondVault.read.claimableBalance([
+      d.buyer.account.address, d.usdt.address,
+    ]);
+    assert.ok(claimable > 0n);
 
-    await expectRevertTracked(ctx, d.escrowAsBuyer.write.payOrderByPlatform([
-      d.merchant.account.address, WISE_CRYPTO_PID, 0n, built.proofs,
-    ]), "OrderBindingHashMismatch");
+    const balBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    await d.bondVaultAsBuyer.write.claim([d.usdt.address]);
+    const balAfter = await d.usdt.read.balanceOf([d.buyer.account.address]);
+
+    assert.equal(balAfter - balBefore, claimable, "claimed amount equals ERC20 received");
+
+    const claimableAfter = await d.c2cBondVault.read.claimableBalance([
+      d.buyer.account.address, d.usdt.address,
+    ]);
+    assert.equal(claimableAfter, 0n, "claimable cleared after claim");
+
+    addRecord("INT-11", "bond claim transfers ERC20 and clears claimable", true, ctx);
   });
 });

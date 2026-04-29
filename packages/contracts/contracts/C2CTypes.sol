@@ -12,11 +12,9 @@ enum AssetType {
 
 enum OrderStatus {
     PENDING,
-    CANCELLED,
     EXPIRED,
     COMPLETED,
-    WAITING,
-    DISPUTED
+    WAITING
 }
 
 struct SupportCryptoInfo {
@@ -174,7 +172,18 @@ error OrderBindingHashMismatch();
 error AlipayTransferTooOld();
 error WiseTransferTooOld();
 error MerchantPaymentInfoNotSet();
-error OrderInDispute();
-error DisputeWindowNotExpired();
-error NotDisputedOrder();
-error AlreadyDisputed();
+error ContractPaused();
+
+// ── V4: Bond & Risk errors ────────────────────────────────────────
+error NotAuthorizedCaller();
+error InvalidDatetimeFormat();
+error InvalidBps();
+error OrderCancellationDisabled();
+error UserBlacklisted();
+error UserTemporarilyFrozen();
+error OnlyEscrow();
+error InvalidManagerAddress();
+error ManagersNotSet();
+error OrderBondNotFound();
+error OrderBondAlreadyInitialized();
+error OrderBondAlreadySettled();

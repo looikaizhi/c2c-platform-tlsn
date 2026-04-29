@@ -16,8 +16,10 @@ import {
   user5Client,
   verifierSignerClient,
 } from '../utils/hardhatAccounts';
-import { C2C_ADMIN_ABI } from '../utils/c2cAbi';
+import { C2C_ADMIN_ABI, C2C_RISK_MANAGER_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+import { ReputationBadge } from './ReputationBadge';
+import type { ReputationView } from './ReputationBadge';
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -402,6 +404,277 @@ function KpiCard({ label, children }: { label: string; children: React.ReactNode
         {label}
       </div>
       {children}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+// RiskConfigPanel — read + update C2CRiskManager parameters
+// ────────────────────────────────────────────────────────────────────────────────
+
+function RiskConfigPanel() {
+  type RiskCfg = {
+    min: number; base: number; max: number; step: number;
+    reset: number; freezeThr: number; rewardThr: number; freezeDays: number;
+  };
+  const [cfg, setCfg]           = useState<RiskCfg | null>(null);
+  const [loading, setLoading]   = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm]         = useState({ min: '', base: '', max: '', step: '', reset: '', freezeThr: '', rewardThr: '', decayDays: '' });
+  const [saving, setSaving]     = useState(false);
+  const [err, setErr]           = useState<string | null>(null);
+  const [ok, setOk]             = useState(false);
+
+  const load = useCallback(async () => {
+    if (!isC2CConfigured()) return;
+    if (!c2cConfig.riskManagerAddress || c2cConfig.riskManagerAddress.length <= 2) return;
+    setLoading(true);
+    try {
+      const [min, base, max, step, reset, freezeThr, rewardThr, freezeDays] = await Promise.all([
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'minBondBps'              }).then((r) => Number(r)).catch(() => 0),
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'baseBondBps'             }).then((r) => Number(r)).catch(() => 0),
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'maxBondBps'              }).then((r) => Number(r)).catch(() => 0),
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'stepBps'                 }).then((r) => Number(r)).catch(() => 0),
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'resetThreshold'          }).then((r) => Number(r)).catch(() => 0),
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'freezeThreshold'         }).then((r) => Number(r)).catch(() => 0),
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'rewardCompletedThreshold'}).then((r) => Number(r)).catch(() => 0),
+        publicClient.readContract({ address: c2cConfig.riskManagerAddress, abi: C2C_RISK_MANAGER_ABI, functionName: 'decayIntervalDays'       }).then((r) => Number(r)).catch(() => 0),
+      ]);
+      setCfg({ min, base, max, step, reset, freezeThr, rewardThr, freezeDays });
+    } catch { /* not deployed */ }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  function openForm() {
+    if (!cfg) return;
+    setForm({
+      min: String(cfg.min), base: String(cfg.base), max: String(cfg.max), step: String(cfg.step),
+      reset: String(cfg.reset), freezeThr: String(cfg.freezeThr),
+      rewardThr: String(cfg.rewardThr), decayDays: String(cfg.freezeDays),
+    });
+    setErr(null); setOk(false); setShowForm(true);
+  }
+
+  async function save() {
+    setSaving(true); setErr(null); setOk(false);
+    try {
+      const { request } = await publicClient.simulateContract({
+        address: c2cConfig.riskManagerAddress,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'setRiskConfig',
+        args: [
+          Number(form.min), Number(form.base), Number(form.max), Number(form.step),
+          Number(form.reset), Number(form.freezeThr), Number(form.rewardThr), Number(form.decayDays),
+        ],
+        account: adminClient.account!,
+      });
+      await adminClient.writeContract(request);
+      setOk(true); setShowForm(false);
+      await load();
+    } catch (e: any) {
+      setErr(e?.shortMessage ?? e?.message ?? 'Failed');
+    } finally { setSaving(false); }
+  }
+
+  const bpsLabel = (v: number) => `${v} bps (${(v / 100).toFixed(2)}%)`;
+
+  return (
+    <div style={{ marginTop: 22, borderTop: `1px solid ${C.border}`, paddingTop: 18 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: C.text }}>Risk Manager Config</h3>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {ok && <span style={{ fontSize: 12, color: C.success }}>Saved</span>}
+          <Btn small variant="outline" onClick={load} disabled={loading}>{loading ? '…' : <><IconRefresh /> Refresh</>}</Btn>
+          {cfg && <Btn small variant="outline" onClick={openForm}>Edit Config</Btn>}
+        </div>
+      </div>
+
+      {cfg && !showForm && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8 }}>
+          {[
+            { label: 'Min Bond BPS',       value: bpsLabel(cfg.min) },
+            { label: 'Base Bond BPS',      value: bpsLabel(cfg.base) },
+            { label: 'Max Bond BPS',       value: bpsLabel(cfg.max) },
+            { label: 'Step BPS',           value: bpsLabel(cfg.step) },
+            { label: 'Reset Threshold',    value: `${cfg.reset} completions` },
+            { label: 'Freeze Threshold',   value: `${cfg.freezeThr} consecutive timeouts` },
+            { label: 'Reward Threshold',   value: `${cfg.rewardThr} completions` },
+            { label: 'Freeze / Decay Days',value: `${cfg.freezeDays} days` },
+          ].map(({ label, value }) => (
+            <KpiCard key={label} label={label}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: C.text }}>{value}</div>
+            </KpiCard>
+          ))}
+        </div>
+      )}
+
+      {showForm && (
+        <div style={{ background: C.bg, borderRadius: 9, padding: 14, border: `1px solid ${C.border}` }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 12 }}>
+            {([
+              ['Min Bond BPS',     'min'        ],
+              ['Base Bond BPS',    'base'       ],
+              ['Max Bond BPS',     'max'        ],
+              ['Step BPS',         'step'       ],
+              ['Reset Threshold',  'reset'      ],
+              ['Freeze Threshold', 'freezeThr'  ],
+              ['Reward Threshold', 'rewardThr'  ],
+              ['Decay Days',       'decayDays'  ],
+            ] as [string, keyof typeof form][]).map(([label, key]) => (
+              <div key={key} style={S.formGroup}>
+                <label style={S.label}>{label}</label>
+                <input
+                  style={{ ...S.input, padding: '5px 8px', fontSize: 13 }}
+                  type="number" min="0" step="1"
+                  value={form[key]}
+                  onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Btn onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save Config'}</Btn>
+            <Btn variant="outline" onClick={() => setShowForm(false)} disabled={saving}>Cancel</Btn>
+            {err && <span style={{ fontSize: 12, color: C.error }}>{err}</span>}
+          </div>
+        </div>
+      )}
+
+      {!cfg && !loading && (
+        <p style={{ fontSize: 13, color: C.textMuted }}>RiskManager not deployed or not configured.</p>
+      )}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+// UserRiskManager — query reputation, blacklist, manual unfreeze
+// ────────────────────────────────────────────────────────────────────────────────
+
+function UserRiskManager() {
+  const [addr, setAddr]       = useState('');
+  const [rep, setRep]         = useState<ReputationView | null>(null);
+  const [querying, setQuerying] = useState(false);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [err, setErr]         = useState<string | null>(null);
+  const [result, setResult]   = useState<string | null>(null);
+
+  async function handleQuery() {
+    if (!isAddress(addr)) { setErr('Invalid address'); return; }
+    if (!c2cConfig.riskManagerAddress || c2cConfig.riskManagerAddress.length <= 2) {
+      setErr('RiskManager contract not deployed');
+      return;
+    }
+    setQuerying(true); setErr(null); setRep(null); setResult(null);
+    try {
+      const raw = await publicClient.readContract({
+        address: c2cConfig.riskManagerAddress,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'getReputation',
+        args: [addr as `0x${string}`],
+      });
+      setRep(raw as ReputationView);
+    } catch (e: any) {
+      setErr(e?.shortMessage ?? e?.message ?? 'Query failed');
+    } finally { setQuerying(false); }
+  }
+
+  async function handleBlacklist(blacklist: boolean) {
+    if (!isAddress(addr)) return;
+    const label = blacklist ? 'blacklist' : 'unblacklist';
+    setActionLoading(label); setErr(null); setResult(null);
+    try {
+      const { request } = await publicClient.simulateContract({
+        address: c2cConfig.riskManagerAddress,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'setBlacklist',
+        args: [addr as `0x${string}`, blacklist],
+        account: adminClient.account!,
+      });
+      await adminClient.writeContract(request);
+      setResult(`${blacklist ? 'Blacklisted' : 'Unblacklisted'}: ${addr}`);
+      await handleQuery();
+    } catch (e: any) {
+      setErr(e?.shortMessage ?? e?.message ?? 'Failed');
+    } finally { setActionLoading(null); }
+  }
+
+  async function handleUnfreeze() {
+    if (!isAddress(addr)) return;
+    setActionLoading('unfreeze'); setErr(null); setResult(null);
+    try {
+      const { request } = await publicClient.simulateContract({
+        address: c2cConfig.riskManagerAddress,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'manualUnfreeze',
+        args: [addr as `0x${string}`],
+        account: adminClient.account!,
+      });
+      await adminClient.writeContract(request);
+      setResult(`Unfrozen: ${addr}`);
+      await handleQuery();
+    } catch (e: any) {
+      setErr(e?.shortMessage ?? e?.message ?? 'Failed');
+    } finally { setActionLoading(null); }
+  }
+
+  return (
+    <div style={{ marginTop: 22, borderTop: `1px solid ${C.border}`, paddingTop: 18 }}>
+      <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600, color: C.text }}>User Reputation Management</h3>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <label style={S.label}>User Address</label>
+          <input
+            style={S.input}
+            placeholder="0x…"
+            value={addr}
+            onChange={(e) => { setAddr(e.target.value); setRep(null); setResult(null); setErr(null); }}
+          />
+        </div>
+        <Btn onClick={handleQuery} disabled={querying || !addr}>{querying ? 'Querying…' : 'Query Reputation'}</Btn>
+      </div>
+
+      {err    && <div style={{ fontSize: 12, color: C.error, marginBottom: 8 }}>{err}</div>}
+      {result && <div style={{ fontSize: 12, color: C.success, marginBottom: 8 }}>{result}</div>}
+
+      {rep && (
+        <div style={{ marginBottom: 12 }}>
+          <ReputationBadge reputation={rep} />
+        </div>
+      )}
+
+      {rep && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Btn
+            small danger variant="outline"
+            disabled={!!actionLoading || rep.blacklisted}
+            onClick={() => handleBlacklist(true)}
+          >
+            {actionLoading === 'blacklist' ? '…' : 'Blacklist'}
+          </Btn>
+          {rep.blacklisted && (
+            <Btn
+              small variant="outline"
+              disabled={!!actionLoading}
+              onClick={() => handleBlacklist(false)}
+            >
+              {actionLoading === 'unblacklist' ? '…' : 'Remove Blacklist'}
+            </Btn>
+          )}
+          {rep.temporarilyFrozen && (
+            <Btn
+              small variant="outline"
+              disabled={!!actionLoading}
+              onClick={handleUnfreeze}
+            >
+              {actionLoading === 'unfreeze' ? '…' : 'Manual Unfreeze'}
+            </Btn>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1131,6 +1404,12 @@ export function AdminPanel() {
           </tbody>
         </table>
       </div>
+
+      {/* ── V4 Risk Manager Config ─────────────────────────────────────────── */}
+      <RiskConfigPanel />
+
+      {/* ── V4 User Reputation Management ─────────────────────────────────── */}
+      <UserRiskManager />
 
       {/* ── Access Control ─────────────────────────────────────────────────── */}
       <div style={{ marginTop: 22, borderTop: `1px solid ${C.border}`, paddingTop: 18 }}>

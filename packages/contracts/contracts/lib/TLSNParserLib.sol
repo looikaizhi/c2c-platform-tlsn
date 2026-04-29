@@ -156,7 +156,7 @@ library TLSNParserLib {
      * @return unix    Unix timestamp in UTC seconds
      */
     function parseDatetimeToUnix(bytes memory dateStr) internal pure returns (uint256 unix) {
-        require(dateStr.length >= 19, "bad datetime");
+        if (dateStr.length < 19) revert InvalidDatetimeFormat();
 
         uint256 year  = _p4(dateStr, 0);
         uint256 month = _p2(dateStr, 5);

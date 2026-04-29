@@ -434,7 +434,7 @@ async function assertPlatformPaymentEvent(
 }
 
 describe("AlipayPlatformVerifier", async function () {
-  const { viem } = await network.connect();
+  const { viem } = await network.getOrCreate();
   const testClient = await viem.getTestClient();
 
   let d: DeployResult;
@@ -813,7 +813,7 @@ describe("AlipayPlatformVerifier", async function () {
       );
     });
 
-    T("ALI-ERR-14", "时间格式异常 -> parser revert", async (ctx) => {
+    T("ALI-ERR-14", "时间格式异常 -> InvalidDatetimeFormat", async (ctx) => {
       await placeCryptoOrder(viem, d);
       const built = await buildAlipayProofForCrypto(d, {
         gmtSuccess: "2026-01-01 00:00",
@@ -824,7 +824,7 @@ describe("AlipayPlatformVerifier", async function () {
         d.escrowAsBuyer.write.payOrderByPlatform([
           d.merchant.account.address, ALIPAY_CRYPTO_PID, 0n, built.proofs,
         ]),
-        /bad datetime/i,
+        /InvalidDatetimeFormat/,
       );
     });
   });
@@ -1029,18 +1029,18 @@ describe("AlipayPlatformVerifier", async function () {
       );
     });
 
-    T("ALI-TAMPER-04", "FIAT WAITING 订单 cancel -> NotPending", async (ctx) => {
+    T("ALI-TAMPER-04", "FIAT WAITING 订单 cancel -> NotPending (V4: OrderCancellationDisabled)", async (ctx) => {
       await placeFiatOrder(viem, d);
       await expectRevertTracked(
         ctx,
         d.escrowAsBuyer.write.cancelOrder([
           d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, 0n,
         ]),
-        "NotPending",
+        "NotPending|OrderCancellationDisabled",
       );
     });
 
-    T("ALI-TAMPER-05", "非买家取消 PENDING 订单 -> NotAllowed", async (ctx) => {
+    T("ALI-TAMPER-05", "非买家取消 PENDING 订单 -> NotAllowed (V4: OrderCancellationDisabled)", async (ctx) => {
       await placeCryptoOrder(viem, d);
       const escRandom = await escrowAs(viem, d, d.randomUser);
       await expectRevertTracked(
@@ -1048,7 +1048,7 @@ describe("AlipayPlatformVerifier", async function () {
         escRandom.write.cancelOrder([
           d.merchant.account.address, ALIPAY_CRYPTO_PID, ASSET_CRYPTO, 0n,
         ]),
-        "NotAllowed",
+        "NotAllowed|OrderCancellationDisabled",
       );
     });
 

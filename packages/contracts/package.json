@@ -10,11 +10,16 @@
     "test:alipay": "hardhat test test/AlipayPlatform.ts --network hardhatMainnet",
     "test:wise": "hardhat test test/WisePlatform.ts --network hardhatMainnet",
     "test:integration": "hardhat test test/Integration.ts --network hardhatMainnet",
-    "test:all": "hardhat test test/C2CAdmin.ts test/C2CEscrow.ts test/WisePlatform.ts test/AlipayPlatform.ts test/Integration.ts test/TLSNVerifier.ts test/Rate.ts test/Cap.ts test/BusinessHours.ts --network hardhatMainnet",
+    "test:tlsn": "hardhat test test/TLSNVerifier.ts --network hardhatMainnet",
+    "test:rate": "hardhat test test/Rate.ts --network hardhatMainnet",
+    "test:cap": "hardhat test test/Cap.ts --network hardhatMainnet",
+    "test:hours": "hardhat test test/BusinessHours.ts --network hardhatMainnet",
+    "test:bond": "hardhat test test/Bond.ts --network hardhatMainnet",
+    "test:all": "hardhat test test/C2CAdmin.ts test/C2CEscrow.ts test/WisePlatform.ts test/AlipayPlatform.ts test/Integration.ts test/TLSNVerifier.ts test/Rate.ts test/Cap.ts test/BusinessHours.ts test/Bond.ts --network hardhatMainnet",
     "node": "hardhat node --network hardhatMainnet",
     "deploy:web": "hardhat run scripts/deploy-web.ts --network localhost",
     "deploy:local": "hardhat run scripts/deploy-local.ts --network hardhatMainnet",
-    "deploy:demo": "hardhat run scripts/deploy-c2c-demo.ts --network localhost"
+    "deploy:demo": "hardhat run scripts/deploy-c2c-demo.ts --network hardhatMainnet"
   },
   "keywords": [],
   "author": "",

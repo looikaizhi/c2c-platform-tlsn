@@ -4,19 +4,22 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { formatUnits, keccak256, stringToBytes, parseUnits, parseAbiItem } from 'viem';
 import type { Hex, WalletClient } from 'viem';
 import { publicClient, merchantClients } from '../utils/hardhatAccounts';
-import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, ERC20_ABI } from '../utils/c2cAbi';
+import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, C2C_BOND_VAULT_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
 import { normalizeOrder } from '../utils/orderView';
 import {
   makeWiseFiatBindingContext,
   generateWiseFiatProof,
   submitWiseFiatProof,
+  claimBond,
 } from '../utils/wiseC2cActions';
 import {
   makeAlipayFiatBindingContext,
   generateAlipayFiatProof,
   submitAlipayFiatProof,
 } from '../utils/alipayC2cActions';
+import { ReputationBadge } from './ReputationBadge';
+import type { ReputationView } from './ReputationBadge';
 
 // ── Platform constants ────────────────────────────────────────────────────────
 const PLATFORM_WISE   = keccak256(stringToBytes('wise'))   as Hex;
@@ -866,6 +869,9 @@ function ProductRow({ p, cryptoMap, fiatMap, now, cryptos, walletClient, onRefre
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <Badge v="info" text={p.assetType === 0 ? 'Sell Crypto' : 'Buy Crypto'} />
           <Badge v={resolvePlatformVariant(p.platformId)} text={resolvePlatformLabel(p.platformId)} />
+          {p.assetType === 1 && (
+            <span style={{ fontSize: 10, color: '#d46b08' }}>⚠ 保证金从质押额中预留</span>
+          )}
         </div>
       </td>
       <td style={TD}>
@@ -1097,7 +1103,7 @@ interface FiatOrderItem {
   platformId: Hex;
 }
 
-const STATUS_LABELS: Record<number, string> = { 0: 'PENDING', 4: 'WAITING' };
+const STATUS_LABELS: Record<number, string> = { 0: 'PENDING', 3: 'WAITING' };
 
 function FiatPendingOrders({ address, products, walletClient }: {
   address: Hex;
@@ -1142,7 +1148,7 @@ function FiatPendingOrders({ address, products, walletClient }: {
           });
           const order = normalizeOrder(rawOrder);
           const status = order.status;
-          if (status !== 0 && status !== 4) continue;
+          if (status !== 0 && status !== 3) continue;
           pending.push({
             orderId,
             productId,
@@ -1290,18 +1296,74 @@ function MerchantTab({ address, cryptos, fiats }: {
   const [loading, setLoading] = useState(false);
   const [err, setErr]         = useState<string | null>(null);
 
+  const [reputation, setReputation]               = useState<ReputationView | null>(null);
+  const [merchantBondBps, setMerchantBondBps]     = useState<number | null>(null);
+  const [merchantBondBpsError, setMerchantBondBpsError] = useState<string | null>(null);
+  const [claimableBalances, setClaimableBalances] = useState<{ usdt: bigint; usdc: bigint; dai: bigint } | null>(null);
+  const [claimLoading, setClaimLoading]           = useState<string | null>(null);
+
   const wc = walletByAddr.get(address.toLowerCase());
+
+  const loadV4Data = useCallback(async () => {
+    if (!isC2CConfigured()) return;
+    try {
+      const raw = await publicClient.readContract({
+        address: c2cConfig.riskManagerAddress,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'getReputation',
+        args: [address],
+      });
+      setReputation(raw as ReputationView);
+    } catch { /* not yet deployed */ }
+
+    try {
+      const bps = BigInt(await publicClient.readContract({
+        address: c2cConfig.riskManagerAddress,
+        abi: C2C_RISK_MANAGER_ABI,
+        functionName: 'requiredBondBps',
+        args: [address],
+      }) as number);
+      setMerchantBondBps(Number(bps));
+      setMerchantBondBpsError(null);
+    } catch (e: any) {
+      setMerchantBondBps(null);
+      setMerchantBondBpsError(e?.shortMessage ?? e?.message ?? 'Restricted');
+    }
+
+    try {
+      const [usdt, usdc, dai] = await Promise.all([
+        publicClient.readContract({ address: c2cConfig.bondVaultAddress, abi: C2C_BOND_VAULT_ABI, functionName: 'claimableBalance', args: [address, c2cConfig.usdtAddress] }).then((r) => r as bigint).catch(() => 0n),
+        publicClient.readContract({ address: c2cConfig.bondVaultAddress, abi: C2C_BOND_VAULT_ABI, functionName: 'claimableBalance', args: [address, c2cConfig.usdcAddress] }).then((r) => r as bigint).catch(() => 0n),
+        publicClient.readContract({ address: c2cConfig.bondVaultAddress, abi: C2C_BOND_VAULT_ABI, functionName: 'claimableBalance', args: [address, c2cConfig.daiAddress]  }).then((r) => r as bigint).catch(() => 0n),
+      ]);
+      setClaimableBalances({ usdt, usdc, dai });
+    } catch { /* not yet deployed */ }
+  }, [address]);
+
+  const handleClaimBond = async (tokenAddr: Hex, tokenLabel: string) => {
+    if (!wc) return;
+    setClaimLoading(tokenLabel);
+    try {
+      await claimBond(wc, tokenAddr);
+      await loadV4Data();
+    } catch (e: any) {
+      console.error('[claimBond merchant]', e);
+    } finally {
+      setClaimLoading(null);
+    }
+  };
 
   const reload = useCallback(async () => {
     if (!isC2CConfigured()) return;
     setLoading(true); setErr(null);
     try {
       setData(await loadMerchantData(address));
+      await loadV4Data();
     } catch (e: any) {
       console.error('[MerchantTab]', e);
       setErr(e?.shortMessage ?? e?.message ?? 'Load failed');
     } finally { setLoading(false); }
-  }, [address]);
+  }, [address, loadV4Data]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -1353,6 +1415,54 @@ function MerchantTab({ address, cryptos, fiats }: {
           <BalCard label="DAI"  amount={data.dai}  symbol="DAI"  />
         </div>
       </div>
+
+      {/* ── V4 Reputation ── */}
+      {reputation && (
+        <div style={{ marginBottom: 20 }}>
+          <SectionHdr>Reputation</SectionHdr>
+          <ReputationBadge reputation={reputation} bondBps={merchantBondBps} bondBpsError={merchantBondBpsError} />
+          {merchantBondBpsError && (
+            <div style={{ marginTop: 6, fontSize: 12, color: '#cf1322', fontWeight: 600 }}>
+              ⚠ 账户受限，无法接单
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── V4 Claimable Bond ── */}
+      {claimableBalances && (claimableBalances.usdt > 0n || claimableBalances.usdc > 0n || claimableBalances.dai > 0n) && (
+        <div style={{ marginBottom: 20 }}>
+          <SectionHdr>Claimable Bond</SectionHdr>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            {[
+              { label: 'USDT', addr: c2cConfig.usdtAddress, amount: claimableBalances.usdt, decimals: 18 },
+              { label: 'USDC', addr: c2cConfig.usdcAddress, amount: claimableBalances.usdc, decimals: 6  },
+              { label: 'DAI',  addr: c2cConfig.daiAddress,  amount: claimableBalances.dai,  decimals: 18 },
+            ]
+              .filter((t) => t.amount > 0n)
+              .map((t) => (
+                <div key={t.label} style={{
+                  background: '#f6ffed', borderRadius: 8, padding: '10px 14px',
+                  border: '1px solid #b7eb8f', minWidth: 140,
+                }}>
+                  <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>{t.label}</div>
+                  <div style={{ ...MONO, fontSize: 15, fontWeight: 700, color: '#389e0d' }}>
+                    +{parseFloat(formatUnits(t.amount, t.decimals)).toFixed(4)}
+                  </div>
+                  {wc && (
+                    <button
+                      style={btnStyle('primary', { marginTop: 8, padding: '4px 12px', fontSize: 11 })}
+                      onClick={() => handleClaimBond(t.addr, t.label)}
+                      disabled={claimLoading === t.label}
+                    >
+                      {claimLoading === t.label ? 'Claiming…' : 'Claim'}
+                    </button>
+                  )}
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Payment Info ── */}
       <div style={{ marginBottom: 20 }}>
