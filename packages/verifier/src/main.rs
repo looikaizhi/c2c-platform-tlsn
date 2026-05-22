@@ -1344,8 +1344,13 @@ async fn run_verifier_task(
         session_id, config.max_recv_data, config.max_sent_data
     );
 
-    // Wait for WebSocket connection with timeout
-    let connection_timeout = Duration::from_secs(30);
+    // Wait for WebSocket connection with timeout (configurable via WS_CONNECTION_TIMEOUT_SECS)
+    let connection_timeout = Duration::from_secs(
+        std::env::var("WS_CONNECTION_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60),
+    );
     let socket_result = timeout(connection_timeout, socket_rx).await;
 
     let socket = match socket_result {
@@ -1381,8 +1386,13 @@ async fn run_verifier_task(
     // Convert from futures AsyncRead/AsyncWrite to tokio AsyncRead/AsyncWrite
     let stream = stream.compat();
 
-    // Run the verifier with timeout
-    let verification_timeout = Duration::from_secs(120);
+    // Run the verifier with timeout (configurable via WS_VERIFICATION_TIMEOUT_SECS)
+    let verification_timeout = Duration::from_secs(
+        std::env::var("WS_VERIFICATION_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120),
+    );
     info!(
         "[{}] Starting verification with timeout of {:?}",
         session_id, verification_timeout
