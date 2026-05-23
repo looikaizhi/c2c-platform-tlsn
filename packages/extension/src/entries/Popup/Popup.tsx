@@ -1,35 +1,44 @@
 import React from 'react';
-import { useSelector } from 'react-redux';
-import { RootState } from '../../reducers';
 import browser from 'webextension-polyfill';
 import { logger, LogLevel } from '@tlsn/common';
 
-// Initialize logger at DEBUG level for popup
 logger.init(LogLevel.DEBUG);
 
-const Popup: React.FC = () => {
-  const message = useSelector((state: RootState) => state.app.message);
+const chrome = global.chrome as any;
 
-  const handleClick = async () => {
-    // Send message to background script
-    const response = await browser.runtime.sendMessage({ type: 'PING' });
-    logger.debug('Response from background:', response);
+const Popup: React.FC = () => {
+  const openSidePanel = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        await chrome.sidePanel.open({ tabId: tab.id });
+      }
+    } catch (err) {
+      logger.error('Failed to open side panel:', err);
+    }
+    window.close();
   };
 
   return (
-    <div className="w-[400px] h-[300px] bg-white p-8">
-      <div className="flex flex-col items-center justify-center h-full">
-        <h1 className="text-3xl font-bold text-gray-800 mb-4">Hello World!</h1>
-        <p className="text-gray-600 mb-6">
-          {message || 'Chrome Extension Boilerplate'}
-        </p>
-        <button
-          onClick={handleClick}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-        >
-          Test Background Script
-        </button>
-      </div>
+    <div className="w-[480px] bg-white p-4 font-sans text-sm">
+      <h1 className="text-lg font-bold text-gray-800 mb-3">TLSN Extension</h1>
+
+      <button
+        onClick={openSidePanel}
+        className="button button--primary w-full py-2 mb-2"
+      >
+        Open Benchmark Panel
+      </button>
+
+      <button
+        onClick={async () => {
+          const r = await browser.runtime.sendMessage({ type: 'PING' });
+          logger.debug('PING response:', r);
+        }}
+        className="button w-full py-1"
+      >
+        Test Background Script
+      </button>
     </div>
   );
 };

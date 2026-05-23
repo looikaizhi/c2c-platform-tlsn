@@ -3,6 +3,13 @@
   "version": "0.1.0.1400",
   "name": "TLSNotary",
   "description": "A Chrome extension for TLSNotary",
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon-128.png"
+  },
+  "side_panel": {
+    "default_path": "sidePanel.html"
+  },
   "options_page": "options.html",
   "background": {
     "service_worker": "background.bundle.js"
@@ -55,6 +62,8 @@
     "activeTab",
     "tabs",
     "windows",
-    "contextMenus"
+    "downloads",
+    "contextMenus",
+    "sidePanel"
   ]
 }

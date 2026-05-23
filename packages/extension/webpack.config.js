@@ -48,6 +48,7 @@ var options = {
     /Critical dependency: the request of a dependency is an expression/,
   ],
   entry: {
+    popup: path.join(__dirname, "src", "entries", "Popup", "index.tsx"),
     devConsole: path.join(__dirname, "src", "entries", "DevConsole", "index.tsx"),
     confirmPopup: path.join(__dirname, "src", "entries", "ConfirmPopup", "index.tsx"),
     options: path.join(__dirname, "src", "entries", "Options", "index.tsx"),
@@ -55,6 +56,7 @@ var options = {
     contentScript: path.join(__dirname, "src", "entries", "Content", "index.ts"),
     content: path.join(__dirname, "src", "entries", "Content", "content.ts"),
     offscreen: path.join(__dirname, "src", "entries", "Offscreen", "index.tsx"),
+    sidePanel: path.join(__dirname, "src", "entries", "SidePanel", "index.tsx"),
   },
   output: {
     filename: "[name].bundle.js",
@@ -177,6 +179,7 @@ var options = {
       'node:buffer': require.resolve('buffer/'),
       'node:crypto': path.resolve(__dirname, './src/node-crypto-mock.js'),
       'node:events': require.resolve('events/'),
+      'node:url': path.resolve(__dirname, './src/node-url-mock.js'),
     }),
     isDevelopment && new ReactRefreshWebpackPlugin(),
     new CleanWebpackPlugin({ verbose: false }),
@@ -247,6 +250,12 @@ var options = {
       ],
     }),
     new HtmlWebpackPlugin({
+      template: path.join(__dirname, "src", "entries", "Popup", "index.html"),
+      filename: "popup.html",
+      chunks: ["popup"],
+      cache: false,
+    }),
+    new HtmlWebpackPlugin({
       template: path.join(__dirname, "src", "entries", "DevConsole", "index.html"),
       filename: "devConsole.html",
       chunks: ["devConsole"],
@@ -268,6 +277,12 @@ var options = {
       template: path.join(__dirname, "src", "entries", "Options", "index.html"),
       filename: "options.html",
       chunks: ["options"],
+      cache: false,
+    }),
+    new HtmlWebpackPlugin({
+      template: path.join(__dirname, "src", "entries", "SidePanel", "index.html"),
+      filename: "sidePanel.html",
+      chunks: ["sidePanel"],
       cache: false,
     }),
   ].filter(Boolean),

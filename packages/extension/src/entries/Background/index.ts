@@ -21,6 +21,9 @@ getStoredLogLevel().then((level) => {
 // Initialize WindowManager for multi-window support
 const windowManager = new WindowManager();
 
+// Active benchmark port (long-lived connection that keeps the service worker alive)
+let activeBenchmarkPort: chrome.runtime.Port | null = null;
+
 // Create context menu for Developer Console - only for extension icon
 browser.contextMenus.create({
   id: 'developer-console',
@@ -469,8 +472,87 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse: any) => {
     return; // No response needed
   }
 
+  // ── Benchmark message routing ─────────────────────────────────────────────
+
+  // BENCHMARK_PROGRESS: Offscreen → Background → SidePanel (forwarded via Port)
+  if (request.type === 'BENCHMARK_PROGRESS') {
+    if (activeBenchmarkPort) {
+      try {
+        activeBenchmarkPort.postMessage({
+          type: 'BENCHMARK_PROGRESS',
+          current: request.current,
+          total: request.total,
+        });
+      } catch {
+        // Port may have disconnected
+      }
+    }
+    return; // No response needed
+  }
+
+  // BENCHMARK_COMPLETE: Offscreen → Background → SidePanel (fire-and-forget result)
+  if (request.type === 'BENCHMARK_COMPLETE') {
+    if (activeBenchmarkPort) {
+      try {
+        activeBenchmarkPort.postMessage({
+          type: 'BENCHMARK_RESULT',
+          success: request.success,
+          timings: request.timings,
+          proveCount: request.proveCount,
+          error: request.error,
+        });
+      } catch {
+        // Port may have disconnected
+      }
+    }
+    return; // No response needed
+  }
+
+  // ── Benchmark message routing end ─────────────────────────────────────────
+
   // Unknown message type - no response needed
   return;
+});
+
+// Long-lived Port connection for benchmark: keeps the service worker alive
+// across the full benchmark duration (avoids the 5-minute MV3 SW lifetime limit).
+chrome.runtime.onConnect.addListener((port: chrome.runtime.Port) => {
+  if (port.name !== 'benchmark') return;
+
+  activeBenchmarkPort = port;
+
+  port.onDisconnect.addListener(() => {
+    activeBenchmarkPort = null;
+  });
+
+  port.onMessage.addListener(async (request: any) => {
+    if (request.type === 'KEEPALIVE') return; // SidePanel keepalive — no-op
+
+    if (request.type !== 'BENCHMARK_RUN') return;
+
+    logger.debug('[Background] BENCHMARK_RUN via port, runs:', request.runs);
+
+    try {
+      await createOffscreenDocument();
+
+      // Fire-and-forget: result comes back via BENCHMARK_COMPLETE message.
+      // Avoids holding a long-lived sendMessage channel that Chrome times out.
+      chrome.runtime.sendMessage({
+        type: 'BENCHMARK_START',
+        runs: request.runs,
+      }).catch(() => {});
+    } catch (error) {
+      try {
+        port.postMessage({
+          type: 'BENCHMARK_RESULT',
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to start benchmark',
+        });
+      } catch {
+        // Port may have disconnected
+      }
+    }
+  });
 });
 
 // Mutex for offscreen document creation to prevent race conditions

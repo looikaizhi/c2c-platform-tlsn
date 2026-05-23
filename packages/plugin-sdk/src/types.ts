@@ -333,6 +333,11 @@ export interface VerifierSignatureSummary {
 export interface ProveResponse {
   /** Revealed items sorted by commitmentIndex — directly aligned with transcriptCommitments[i] */
   results: HandlerResult[];
+  /**
+   * Full revealed items before accountCheckFields filtering — includes private fields like payeeName.
+   * Use this for UI display. results (filtered) should be used for contract submission only.
+   */
+  displayResults?: HandlerResult[];
   transcriptCommitments: TranscriptCommitmentSummary[];
   verifierTranscript?: VerifierTranscriptSummary;
   transcriptCommitOpenings?: TranscriptCommitOpeningSummary[];

@@ -94,6 +94,51 @@ const OffscreenApp: React.FC = () => {
 
         return true; // Keep message channel open for async response
       }
+
+      // ── Benchmark handler ─────────────────────────────────────────────────
+      // Fire-and-forget: result is sent back via a separate BENCHMARK_COMPLETE
+      // message instead of sendResponse, so there is no long-lived message
+      // channel that Chrome can time out and close.
+      if (request.type === 'BENCHMARK_START') {
+        const { runs } = request as { type: string; runs: number };
+
+        if (!sessionManager) {
+          chrome.runtime.sendMessage({
+            type: 'BENCHMARK_COMPLETE',
+            success: false,
+            error: 'SessionManager not initialized',
+          }).catch(() => {});
+          return; // No sendResponse
+        }
+
+        sessionManager
+          .awaitInit()
+          .then(async (sm) => {
+            const { timings, proveCount } = await sm.runBenchmark(
+              runs,
+              (current, total) => {
+                logger.debug(`[Benchmark] ${current}/${total}`);
+              },
+            );
+            chrome.runtime.sendMessage({
+              type: 'BENCHMARK_COMPLETE',
+              success: true,
+              timings,
+              proveCount,
+            }).catch(() => {});
+          })
+          .catch((error) => {
+            logger.error('[Benchmark] error:', error);
+            chrome.runtime.sendMessage({
+              type: 'BENCHMARK_COMPLETE',
+              success: false,
+              error: error.message,
+            }).catch(() => {});
+          });
+
+        return; // Fire-and-forget — no sendResponse, no return true
+      }
+      // ── Benchmark handler end ─────────────────────────────────────────────
     });
   }, []);
 
