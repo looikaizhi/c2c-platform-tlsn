@@ -31,6 +31,10 @@ export default defineConfig({
     hardhatMainnet: {
       type: "edr-simulated",
       chainType: "l1",
+      mining: {
+        auto: true,
+        interval: 1000,
+      },
     },
     hardhatOp: {
       type: "edr-simulated",
