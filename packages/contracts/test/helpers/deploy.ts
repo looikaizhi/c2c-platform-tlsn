@@ -109,6 +109,16 @@ export async function deployAll(viem: any) {
     { client: { wallet: merchant } },
   );
 
+  // 16. Pre-warm storage for default buyer and merchant.
+  // Turns cold SSTORE (20,000 gas) → warm SSTORE (2,900 gas) for reps and
+  // _claimable slots. Must be called before any order flow. initReputation /
+  // initClaimable have no access control so the deployer wallet can call them
+  // on behalf of any address.
+  await c2cRiskManager.write.initReputation([merchant.account.address]);
+  await c2cRiskManager.write.initReputation([buyer.account.address]);
+  await c2cBondVault.write.initClaimable([merchant.account.address, usdt.address]);
+  await c2cBondVault.write.initClaimable([buyer.account.address, usdt.address]);
+
   return {
     // Core contracts
     usdt,

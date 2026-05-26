@@ -18,6 +18,10 @@ contract C2CRiskManager is IC2CRiskManager, IC2CRiskManagerAdmin {
         bool   blacklisted;
         uint64 frozenUntil;
         uint64 lastTimeoutAt;
+        // Warm-up sentinel: set to true by initReputation() so the slot is non-zero
+        // before onTimeout/onCompleted, avoiding a 20,000-gas cold SSTORE.
+        // Total struct: 30 bytes → still packed in one storage slot.
+        bool   initialized;
     }
 
     C2CAdmin public adminContract;
@@ -95,6 +99,18 @@ contract C2CRiskManager is IC2CRiskManager, IC2CRiskManagerAdmin {
         rewardCompletedThreshold = _rewardThreshold;
         decayIntervalDays        = _decayDays;
         emit RiskConfigUpdated(_min, _base, _max, _step);
+    }
+
+    // ── Storage warm-up ──────────────────────────────────────────
+    // Call initReputation() before placing the first order.
+    // Writes initialized=true so the reputation slot is non-zero, turning
+    // subsequent onTimeout/onCompleted writes from cold (20,000 gas) to
+    // warm (2,900 gas) SSTOREs. Only needs to be called once per user.
+
+    function initReputation(address user) external {
+        if (!reps[user].initialized) {
+            reps[user].initialized = true;
+        }
     }
 
     function setBlacklist(address user, bool value) external onlyAdmin {

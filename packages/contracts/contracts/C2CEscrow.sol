@@ -737,6 +737,39 @@ contract C2CEscrow {
         return _getProduct(_merchant, _productId, _assetType).platformId;
     }
 
+    struct ProductView {
+        uint256 productId;
+        uint256 cryptoID;
+        uint256 fiatID;
+        uint8   assetType;
+        bytes32 platformId;
+        uint256 collateralAmount;
+        uint256 pendingAmount;
+        uint256 availableAmount;
+        bool    isActive;
+        uint256 activeOrderCount;
+    }
+
+    function getProductInfo(
+        address _merchant,
+        uint256 _productId,
+        uint8   _assetType
+    ) external view returns (ProductView memory) {
+        Product storage p = _getProduct(_merchant, _productId, AssetType(_assetType));
+        return ProductView({
+            productId:        p.productID,
+            cryptoID:         p.cryptoID,
+            fiatID:           p.fiatID,
+            assetType:        uint8(p.assetType),
+            platformId:       p.platformId,
+            collateralAmount: p.collateralAmount,
+            pendingAmount:    p.pendingAmount,
+            availableAmount:  _availableAmount(p),
+            isActive:         p.isActive,
+            activeOrderCount: p.activeOrderCount
+        });
+    }
+
     // ================================================================
     //                    Internal Order Helpers
     // ================================================================

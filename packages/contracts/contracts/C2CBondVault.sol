@@ -110,16 +110,31 @@ contract C2CBondVault is IC2CBondVault {
         emit OrderBondSettled(orderKey, stype, recipient, s.bond);
     }
 
+    // ── Storage warm-up ──────────────────────────────────────────
+    // Call initClaimable() for the user+token pair before the first expected
+    // settlement. Writes sentinel=1 so the slot stays non-zero permanently,
+    // turning every subsequent _credit write from cold (20,000 gas) to warm
+    // (2,900 gas). claim() preserves the sentinel so the slot never returns
+    // to zero. Only needs to be called once per user+token pair.
+
+    function initClaimable(address user, address token) external {
+        if (_claimable[user][token] == 0) {
+            _claimable[user][token] = 1;
+        }
+    }
+
     function claim(address token) external returns (uint256 amount) {
-        amount = _claimable[msg.sender][token];
-        if (amount == 0) return 0;
-        _claimable[msg.sender][token] = 0;
+        uint256 raw = _claimable[msg.sender][token];
+        if (raw <= 1) return 0;          // sentinel only, nothing to claim
+        amount = raw - 1;                // subtract sentinel from actual balance
+        _claimable[msg.sender][token] = 1; // preserve sentinel so slot stays non-zero
         IERC20(token).safeTransfer(msg.sender, amount);
         emit Claimed(msg.sender, token, amount);
     }
 
     function claimableBalance(address user, address token) external view returns (uint256) {
-        return _claimable[user][token];
+        uint256 raw = _claimable[user][token];
+        return raw <= 1 ? 0 : raw - 1;  // hide sentinel from external callers
     }
 
     function _credit(address user, address token, uint256 amount) internal {

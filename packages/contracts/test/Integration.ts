@@ -586,4 +586,207 @@ describe("Integration (V4)", async function () {
 
     addRecord("INT-11", "bond claim transfers ERC20 and clears claimable", true, ctx);
   });
+
+  it("INT-12: buyer re-orders on same CRYPTO product after completing previous order", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+
+    // Place and complete order 0
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const proofs0 = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 0n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs0,
+    ]);
+
+    // _releaseActive clears hasActiveOrder after completion; buyer can re-order immediately
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const order1 = await getOrder(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 1n);
+    assert.notEqual(order1.buyer, "0x0000000000000000000000000000000000000000",
+      "order 1 should exist: hasActiveOrder cleared after completion");
+
+    addRecord("INT-12", "re-order after completion: hasActiveOrder cleared", true, ctx);
+  });
+
+  it("INT-13: buyer re-orders after timeout — _cleanupExpired inside placeOrder clears slot", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+
+    // Place order 0 and let it expire (do NOT call cleanupProductExpired externally)
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    await advanceTime(testClient, Number(ORDER_TIMEOUT) + 10);
+
+    // Calling placeOrder again triggers _cleanupExpired BEFORE the hasActiveOrder duplicate check.
+    // The expired order 0 is processed: bond forfeited, riskManager.onTimeout called,
+    // _releaseActive clears hasActiveOrder. Order 1 is then placed without reverting.
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const order1 = await getOrder(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 1n);
+    assert.notEqual(order1.buyer, "0x0000000000000000000000000000000000000000",
+      "order 1 placed: auto-cleanup in placeOrder freed the expired slot");
+
+    addRecord("INT-13", "re-order after timeout: auto-cleanup in placeOrder frees slot", true, ctx);
+  });
+
+  it("INT-14: merchant collateral exhaustion prevents over-limit CRYPTO order", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+    const PLATFORM_WISE: Hex = await d.tlsnVerifier.read.PLATFORM_WISE();
+
+    // List a product with exactly 2×TRADE_AMOUNT collateral — fits exactly 2 buyers
+    const smallCollateral = TRADE_AMOUNT * 2n;
+    await d.escrowAsMerchant.write.listCryptoProduct([
+      USDT_CRYPTO_ID, MYR_FIAT_ID, smallCollateral, true, PLATFORM_WISE,
+    ]);
+    const newPid = 2n;
+    const pc = await viem.getPublicClient();
+    const expiry = (await pc.getBlock()).timestamp + 365n * 24n * 3600n;
+    await d.adminAsMerchant.write.publishRate([newPid, ASSET_CRYPTO, RATE_WISE_CRYPTO, expiry]);
+    await d.adminAsMerchant.write.openNow([newPid, ASSET_CRYPTO]);
+
+    // Buyer 1 (d.buyer) fills 1 USDT
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, newPid, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+
+    // Buyer 2 (d.randomUser) fills the remaining 1 USDT
+    await d.usdt.write.mint([d.randomUser.account.address, TRADE_AMOUNT * 10n]);
+    const usdtRandom2 = await viem.getContractAt("MockERC20", d.usdt.address, { client: { wallet: d.randomUser } });
+    await usdtRandom2.write.approve([d.c2cEscrow.address, MAX_UINT]);
+    await usdtRandom2.write.approve([d.c2cBondVault.address, MAX_UINT]);
+    await (await escrowAs(viem, d, d.randomUser)).write.placeOrder([
+      d.merchant.account.address, newPid, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+
+    // Buyer 3 — available collateral = 0, must fail with InsufficientAvailable
+    const wallets = await viem.getWalletClients();
+    const buyer3 = wallets[6];
+    await d.usdt.write.mint([buyer3.account.address, TRADE_AMOUNT * 10n]);
+    const usdtBuyer3 = await viem.getContractAt("MockERC20", d.usdt.address, { client: { wallet: buyer3 } });
+    await usdtBuyer3.write.approve([d.c2cEscrow.address, MAX_UINT]);
+    await usdtBuyer3.write.approve([d.c2cBondVault.address, MAX_UINT]);
+
+    await expectRevert(
+      (await escrowAs(viem, d, buyer3)).write.placeOrder([
+        d.merchant.account.address, newPid, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+      ]),
+      /InsufficientAvailable/,
+    );
+
+    addRecord("INT-14", "collateral exhaustion blocks 3rd buyer on 2-USDT product", true, ctx);
+  });
+
+  it("INT-15: FIAT sequential orders on same product — second buyer places after first completes", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+
+    // Complete FIAT order 0 (Alipay, buyer = d.buyer)
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+    ]);
+    const proofs0 = await alipayFiatProofs(d, ALIPAY_FIAT_PID, 0n);
+    await d.escrowAsMerchant.write.receiveCryptoWithPlatformPayment([
+      ALIPAY_FIAT_PID, 0n, proofs0,
+    ]);
+
+    // After completion: collateral reduced by stake (amount−bond), pendingAmount=0.
+    // Remaining collateral (≥9 USDT) is sufficient for another 1-USDT FIAT order.
+    await d.usdt.write.mint([d.randomUser.account.address, TRADE_AMOUNT * 10n]);
+    const usdtR = await viem.getContractAt("MockERC20", d.usdt.address, { client: { wallet: d.randomUser } });
+    await usdtR.write.approve([d.c2cEscrow.address, MAX_UINT]);
+    await usdtR.write.approve([d.c2cBondVault.address, MAX_UINT]);
+
+    await (await escrowAs(viem, d, d.randomUser)).write.placeOrder([
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+    ]);
+    const order1 = await getOrder(d, d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, 1n);
+    assert.notEqual(order1.buyer, "0x0000000000000000000000000000000000000000",
+      "FIAT order 1 placed on same product after order 0 completion");
+
+    addRecord("INT-15", "FIAT sequential orders: second placed after first completes", true, ctx);
+  });
+
+  it("INT-16: rate snapshot protects in-flight CRYPTO order from merchant rate change", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+    const pc = await viem.getPublicClient();
+
+    // Place order — rate v1 (RATE_WISE_CRYPTO) is snapshotted into o.rate
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+
+    // Merchant publishes a new rate v2 (2× the old rate)
+    const expiry = (await pc.getBlock()).timestamp + 365n * 24n * 3600n;
+    await d.adminAsMerchant.write.publishRate([WISE_CRYPTO_PID, ASSET_CRYPTO, RATE_WISE_CRYPTO * 2n, expiry]);
+
+    // wiseCryptoProofs reads the stored order and computes fiat amount from o.rate (v1).
+    // The contract also uses o.rate for _computeFiatAmountX1000, so they match.
+    const proofs = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 0n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs,
+    ]);
+
+    // Order completed successfully using snapshotted v1 rate despite v2 being live
+    const orderAfter = await getOrder(d, d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, 0n);
+    assert.equal(orderAfter.buyer, "0x0000000000000000000000000000000000000000",
+      "order should be completed (deleted) using snapshotted v1 rate");
+
+    addRecord("INT-16", "rate snapshot: in-flight order uses v1 rate despite v2 published", true, ctx);
+  });
+
+  it("INT-17: collateral accounting across two complete CRYPTO order cycles", async () => {
+    const ctx = makeCtx();
+    const { d } = await setupBase(viem);
+    const BOND_BPS = 1000n; // baseBondBps, riskLevel stays 0 across both cycles
+
+    const buyerStart = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    const bondPerOrder = TRADE_AMOUNT * BOND_BPS / 10000n;
+
+    // Cycle 1: place and complete
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const proofs0 = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 0n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 0n, proofs0,
+    ]);
+
+    // Cycle 2: riskLevel still 0 (onCompleted doesn't increase it); bond BPS unchanged
+    await d.escrowAsBuyer.write.placeOrder([
+      d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
+    ]);
+    const proofs1 = await wiseCryptoProofs(d, WISE_CRYPTO_PID, 1n);
+    await d.escrowAsBuyer.write.payOrderByPlatform([
+      d.merchant.account.address, WISE_CRYPTO_PID, 1n, proofs1,
+    ]);
+
+    // Wallet: received 2 × TRADE_AMOUNT crypto, paid 2 × bond (bonds not yet claimed)
+    const buyerWallet = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    assert.equal(
+      buyerWallet,
+      buyerStart + 2n * TRADE_AMOUNT - 2n * bondPerOrder,
+      "buyer wallet: +2 TRADE_AMOUNT crypto, -2 bonds paid",
+    );
+
+    // Both bonds credited to buyer's claimable in bondVault
+    const buyerClaimable = await d.c2cBondVault.read.claimableBalance([
+      d.buyer.account.address, d.usdt.address,
+    ]);
+    assert.equal(buyerClaimable, 2n * bondPerOrder, "both bonds claimable from vault");
+
+    // After claiming: final balance = start + 2 × TRADE_AMOUNT
+    await d.bondVaultAsBuyer.write.claim([d.usdt.address]);
+    const buyerFinal = await d.usdt.read.balanceOf([d.buyer.account.address]);
+    assert.equal(buyerFinal, buyerStart + 2n * TRADE_AMOUNT,
+      "buyer final balance = start + 2 × TRADE_AMOUNT after claim");
+
+    addRecord("INT-17", "2-cycle accounting: wallet + claimable exact", true, ctx);
+  });
 });
