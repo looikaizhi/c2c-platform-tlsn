@@ -53,15 +53,39 @@ services:
       # (the default localhost:8545 is meaningless inside the container).
       - RPC_URL_HTTP=${KEEPER_RPC_URL_HTTP:-http://host.docker.internal:8545}
       - RPC_URL_WS=${KEEPER_RPC_URL_WS:-ws://host.docker.internal:8545}
-      - KEEPER_DEPLOYMENTS_FILE=/deployments/${CHAIN_ID:-31337}.json
+      - KEEPER_LABEL=web
+      - KEEPER_DEPLOYMENTS_FILE=/deployments/web-${CHAIN_ID:-31337}.json
       - STATE_FILE_PATH=/app/packages/keeper/data/state.json
     ports:
       - "9091:9091"
     volumes:
-      # Persist schedule across container restarts.
       - ../keeper/data:/app/packages/keeper/data
-      # Bind-mount the deployments directory so the keeper auto-detects
-      # whichever address the host just deployed.
+      - ../contracts/deployments:/deployments:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ── Second sweep-keeper for the demo escrow ────────────────────────────────
+  # Mirrors `keeper` but tracks the demo deployment file. Uses a separate
+  # account (Hardhat account[8]) and ports so the two processes don't fight
+  # over nonces or bind addresses. Optional — comment out if you only run
+  # one deployment on the chain.
+  keeper-demo:
+    build:
+      context: ../..
+      dockerfile: packages/keeper/Dockerfile
+    env_file: ../keeper/.env.demo
+    environment:
+      - RPC_URL_HTTP=${KEEPER_RPC_URL_HTTP:-http://host.docker.internal:8545}
+      - RPC_URL_WS=${KEEPER_RPC_URL_WS:-ws://host.docker.internal:8545}
+      - KEEPER_LABEL=demo
+      - KEEPER_DEPLOYMENTS_FILE=/deployments/demo-${CHAIN_ID:-31337}.json
+      - STATE_FILE_PATH=/app/packages/keeper/data/state-demo.json
+      - HEALTH_PORT=9092
+    ports:
+      - "9092:9092"
+    volumes:
+      - ../keeper/data:/app/packages/keeper/data
       - ../contracts/deployments:/deployments:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
