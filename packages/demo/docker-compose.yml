@@ -32,3 +32,37 @@ services:
       - verifier
       - demo-static
     restart: unless-stopped
+
+  # ── Off-chain sweep-keeper ─────────────────────────────────────────────────
+  # Watches OrderPlaced on the deployed C2CEscrow and triggers
+  # sweepExpiredBatch after deadline + grace. The contract remains the source
+  # of truth; the keeper is purely a convenience trigger.
+  #
+  # On linux, host.docker.internal needs `extra_hosts` to reach the host's
+  # hardhat node. Provide `.env` next to packages/keeper/ (cp .env.example .env
+  # and tweak); ESCROW_ADDRESS is auto-discovered from
+  # ../contracts/deployments/<chainId>.json so a fresh deploy on the host is
+  # picked up on the next keeper restart.
+  keeper:
+    build:
+      context: ../..
+      dockerfile: packages/keeper/Dockerfile
+    env_file: ../keeper/.env
+    environment:
+      # Override RPC URLs so the container reaches the host's hardhat node
+      # (the default localhost:8545 is meaningless inside the container).
+      - RPC_URL_HTTP=${KEEPER_RPC_URL_HTTP:-http://host.docker.internal:8545}
+      - RPC_URL_WS=${KEEPER_RPC_URL_WS:-ws://host.docker.internal:8545}
+      - KEEPER_DEPLOYMENTS_FILE=/deployments/${CHAIN_ID:-31337}.json
+      - STATE_FILE_PATH=/app/packages/keeper/data/state.json
+    ports:
+      - "9091:9091"
+    volumes:
+      # Persist schedule across container restarts.
+      - ../keeper/data:/app/packages/keeper/data
+      # Bind-mount the deployments directory so the keeper auto-detects
+      # whichever address the host just deployed.
+      - ../contracts/deployments:/deployments:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

@@ -11,7 +11,8 @@ WORKDIR /app
 
 # Copy demo package files and install dependencies
 COPY demo/package.json ./
-RUN npm install
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install --legacy-peer-deps --include=optional
 
 # Copy demo source files
 COPY demo/ .
@@ -29,7 +30,8 @@ WORKDIR /app
 
 # Copy tutorial package files and install dependencies
 COPY tutorial/package.json ./
-RUN npm install
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install --legacy-peer-deps --include=optional
 
 # Copy tutorial source files
 COPY tutorial/ .

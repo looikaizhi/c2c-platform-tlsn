@@ -1,0 +1,4 @@
+services:
+  verifier:
+    cap_add:
+      - NET_ADMIN
