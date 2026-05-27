@@ -14,6 +14,9 @@ const MERCHANT_ID_HASH            = '0x00000000000000000000000000000000000000000
 const PAYEE_NAME_HASH             = '0x0000000000000000000000000000000000000000000000000000000000000004';
 const PAYEE_ID_HASH               = '0x0000000000000000000000000000000000000000000000000000000000000005';
 const TRANSFER_ORDER_BINDING_HASH = '0x0000000000000000000000000000000000000000000000000000000000000006';
+const OWNER_ADDRESS               = '0x0000000000000000000000000000000000000000000000000000000000000007';
+const COUNTERPARTY_ADDRESS        = '0x0000000000000000000000000000000000000000000000000000000000000008';
+const TENANT_ID                   = '__TLSN_TENANT_ID_SENTINEL__';
 
 const HOST = 'wise.com';
 const METHOD = 'GET';
@@ -73,7 +76,7 @@ const CONTACTS_HANDLERS = [
     {
         type: 'RECV',
         part: 'ALL',
-        action: 'PEDERSEN',
+        action: 'REVEAL',
         params: {
             type: 'regex',
             regex: '"title"\\s*:\\s*"[^"]*"',
@@ -83,7 +86,7 @@ const CONTACTS_HANDLERS = [
     {
         type: 'RECV',
         part: 'ALL',
-        action: 'PEDERSEN',
+        action: 'REVEAL',
         params: {
             type: 'regex',
             regex: '"subtitle"\\s*:\\s*"[^"]*"',
@@ -270,8 +273,8 @@ async function onClick() {
                 {
                     verifierUrl: VERIFIER_URL,
                     proxyUrl: PROXY_URL_BASE + HOST,
-                    maxRecvData: 20000,
-                    maxSentData: 12000,
+                    maxRecvData: 3000,
+                    maxSentData: 4000,
                     transcriptCommitHashAlg: 'Keccak256',
                     handlers: CONTACTS_HANDLERS,
                     sessionData: {
@@ -280,6 +283,9 @@ async function onClick() {
                         __tlsn_merchant_id_hash:   MERCHANT_ID_HASH,
                         __tlsn_payee_name_hash:    PAYEE_NAME_HASH,
                         __tlsn_payee_id_hash:      PAYEE_ID_HASH,
+                        __tlsn_owner_address:        OWNER_ADDRESS,
+                        __tlsn_counterparty_address: COUNTERPARTY_ADDRESS,
+                        __tlsn_tenant_id:            TENANT_ID,
                     },
                     accountCheckFields: [
                         // CONTACTS_HANDLERS[2] = title    → verify against payeeNameHash
@@ -303,11 +309,16 @@ async function onClick() {
                 {
                     verifierUrl: VERIFIER_URL,
                     proxyUrl: PROXY_URL_BASE + HOST,
-                    maxRecvData: 20000,
-                    maxSentData: 12000,
+                    maxRecvData: 3000,
+                    maxSentData: 4000,
                     transcriptCommitHashAlg: 'Keccak256',
                     handlers: TRANSFER_HANDLERS,
-                    sessionData: { __tlsn_order_binding_hash: TRANSFER_ORDER_BINDING_HASH },
+                    sessionData: {
+                        __tlsn_order_binding_hash:   TRANSFER_ORDER_BINDING_HASH,
+                        __tlsn_owner_address:        OWNER_ADDRESS,
+                        __tlsn_counterparty_address: COUNTERPARTY_ADDRESS,
+                        __tlsn_tenant_id:            TENANT_ID,
+                    },
                     transcriptCommitDebug: {
                         exposeOpenings: true,
                         //includeVerifierTranscript: true,
@@ -321,8 +332,8 @@ async function onClick() {
         done(JSON.stringify({
             // 前端展示用（合并结果）
             displayResults: [
-                ...(contactsProof?.results || []),
-                ...(transferProof?.results || []),
+                ...((contactsProof as any)?.displayResults || contactsProof?.results || []),
+                ...((transferProof as any)?.displayResults || transferProof?.results || []),
             ],
             // 合约提交用（独立 proof，保留完整 ProveResponse）
             proofs: {

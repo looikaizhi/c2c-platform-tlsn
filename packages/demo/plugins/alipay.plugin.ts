@@ -8,11 +8,14 @@ const PROXY_URL_BASE = VITE_PROXY_URL;
 
 // Sentinel constants injected at runtime by the demo frontend before execCode().
 // Each sentinel has a unique last digit so replace() calls are independent.
-const ORDER_BINDING_HASH = '0x0000000000000000000000000000000000000000000000000000000000000001';
-const MERCHANT_NAME_HASH = '0x0000000000000000000000000000000000000000000000000000000000000002';
-const MERCHANT_ID_HASH   = '0x0000000000000000000000000000000000000000000000000000000000000003';
-const PAYEE_NAME_HASH    = '0x0000000000000000000000000000000000000000000000000000000000000004';
-const PAYEE_ID_HASH      = '0x0000000000000000000000000000000000000000000000000000000000000005';
+const ORDER_BINDING_HASH    = '0x0000000000000000000000000000000000000000000000000000000000000001';
+const MERCHANT_NAME_HASH    = '0x0000000000000000000000000000000000000000000000000000000000000002';
+const MERCHANT_ID_HASH      = '0x0000000000000000000000000000000000000000000000000000000000000003';
+const PAYEE_NAME_HASH       = '0x0000000000000000000000000000000000000000000000000000000000000004';
+const PAYEE_ID_HASH         = '0x0000000000000000000000000000000000000000000000000000000000000005';
+const OWNER_ADDRESS         = '0x0000000000000000000000000000000000000000000000000000000000000007';
+const COUNTERPARTY_ADDRESS  = '0x0000000000000000000000000000000000000000000000000000000000000008';
+const TENANT_ID             = '__TLSN_TENANT_ID_SENTINEL__';
 
 const HOST = 'mbillexprod.alipay.com';
 const PATH = '/enterprise/fundReportDetailQuery.json';
@@ -135,8 +138,8 @@ async function onClick() {
             {
                 verifierUrl: VERIFIER_URL,
                 proxyUrl: PROXY_URL_BASE + HOST,
-                maxRecvData: 20000,
-                maxSentData: 10000,
+                maxRecvData: 3000,
+                maxSentData: 3000,
                 transcriptCommitHashAlg: 'Keccak256',
                 sessionData: {
                     __tlsn_order_binding_hash: ORDER_BINDING_HASH,
@@ -144,6 +147,9 @@ async function onClick() {
                     __tlsn_merchant_id_hash:   MERCHANT_ID_HASH,
                     __tlsn_payee_name_hash:    PAYEE_NAME_HASH,
                     __tlsn_payee_id_hash:      PAYEE_ID_HASH,
+                    __tlsn_owner_address:        OWNER_ADDRESS,
+                    __tlsn_counterparty_address: COUNTERPARTY_ADDRESS,
+                    __tlsn_tenant_id:            TENANT_ID,
                 },
                 accountCheckFields: [
                     // handlers[4] = payeeName       → verify against payeeNameHash (demo placeholder)
@@ -170,25 +176,25 @@ async function onClick() {
                     //   status         – 订单状态 ("SUCCESS" = completed)
                     // part:'ALL' + params.regex is the correct path for regex matching
                     // (extractBodyRanges only supports type:'json'; regex lives in extractAllRanges)
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                    { type: 'RECV', part: 'ALL', action: 'REVEAL',
                         params: { type: 'regex', regex: '"orderId"\\s*:\\s*"[^"]*"' },
                         label: 'transaction.id' },
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                    { type: 'RECV', part: 'ALL', action: 'REVEAL',
                         params: { type: 'regex', regex: '"gmtSuccess"\\s*:\\s*"[^"]*"' },
                         label: 'originator.timestamp' },
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                    { type: 'RECV', part: 'ALL', action: 'REVEAL',
                         params: { type: 'regex', regex: '"payeeName"\\s*:\\s*"[^"]*"' },
                         label: 'beneficiary.name' },
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                    { type: 'RECV', part: 'ALL', action: 'REVEAL',
                         params: { type: 'regex', regex: '"payeeLoginEmail"\\s*:\\s*"[^"]*"' },
                         label: 'beneficiary.accountId' },
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                    { type: 'RECV', part: 'ALL', action: 'REVEAL',
                         params: { type: 'regex', regex: '"payAmount"\\s*:\\s*"[^"]*"' },
                         label: 'originator.amount' },
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                    { type: 'RECV', part: 'ALL', action: 'REVEAL',
                         params: { type: 'regex', regex: '"bizType"\\s*:\\s*"[^"]*"' },
                         label: 'transaction.type' },
-                    { type: 'RECV', part: 'ALL', action: 'PEDERSEN',
+                    { type: 'RECV', part: 'ALL', action: 'REVEAL',
                         params: { type: 'regex', regex: '"status"\\s*:\\s*"[A-Z_]+"' },
                         label: 'transaction.status' },
                 ] as unknown as import('@tlsn/plugin-sdk/src/types').Handler[],
@@ -201,7 +207,10 @@ async function onClick() {
         );
 
         console.log('[alipay] prove ok');
-        done(JSON.stringify(resp));
+        done(JSON.stringify({
+            displayResults: (resp as any).displayResults || (resp as any).results || [],
+            ...resp,
+        }));
     } catch (err) {
         console.error('[alipay] onClick error', err);
         setState('isRequestPending', false);
