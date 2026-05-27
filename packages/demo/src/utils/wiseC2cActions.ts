@@ -22,6 +22,9 @@ import {
   injectPayeeNameHash,
   injectPayeeIdHash,
   injectTransferOrderBindingHash,
+  injectOwnerAddress,
+  injectCounterpartyAddress,
+  injectTenantId,
   ZERO_HASH_32,
   type ExtensionProveResponse,
   type OrderBindingContext,
@@ -182,6 +185,9 @@ export async function makeWiseCryptoBindingContext(
     merchantIdHash:   merchantInfo.idHash,
     payeeNameHash:    merchantInfo.nameHash, // CRYPTO: payee = merchant
     payeeIdHash:      merchantInfo.idHash,
+    ownerAddress:        buyerAddress.toLowerCase() as `0x${string}`,
+    counterpartyAddress: merchantAddress.toLowerCase() as `0x${string}`,
+    tenantId:            'wise',
   };
 }
 
@@ -351,6 +357,9 @@ export async function makeWiseFiatBindingContext(
     merchantIdHash:   merchantInfo.idHash,
     payeeNameHash:    buyerInfo.nameHash, // FIAT: payee = buyer
     payeeIdHash:      buyerInfo.idHash,
+    ownerAddress:        buyerAddress.toLowerCase() as `0x${string}`,
+    counterpartyAddress: merchantAddress.toLowerCase() as `0x${string}`,
+    tenantId:            'wise',
   };
 }
 
@@ -483,6 +492,13 @@ async function _runWisePlugin(
   pluginCode = injectPayeeNameHash(pluginCode, contactsCtx.payeeNameHash);
   pluginCode = injectPayeeIdHash(pluginCode, contactsCtx.payeeIdHash);
   pluginCode = injectTransferOrderBindingHash(pluginCode, transferBindingHash);
+
+  // Audit scoping: owner = buyer, counterparty = merchant, tenant = 'wise'.
+  // For Wise, contacts and transfer share the same buyer/merchant pair.
+  const idCtx = contactsCtx;
+  if (idCtx.ownerAddress)        pluginCode = injectOwnerAddress(pluginCode, idCtx.ownerAddress);
+  if (idCtx.counterpartyAddress) pluginCode = injectCounterpartyAddress(pluginCode, idCtx.counterpartyAddress);
+  pluginCode = injectTenantId(pluginCode, idCtx.tenantId); // always call → triggers D-2 删行兜底
 
   const resultJson = await window.tlsn.execCode(pluginCode);
   const parsed = JSON.parse(resultJson) as {

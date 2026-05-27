@@ -101,6 +101,12 @@ export interface OrderBindingContext {
     payeeNameHash: Hex;
     /** keccak256(normalize(email/handle)) — CRYPTO: merchant; FIAT: buyer */
     payeeIdHash: Hex;
+    /** Buyer address (lowercase 0x-hex) — auditor scoping: owner = initiator */
+    ownerAddress?: Hex;
+    /** Merchant address (lowercase 0x-hex) — auditor scoping: counterparty */
+    counterpartyAddress?: Hex;
+    /** Platform tenant id: 'wise' | 'alipay' (plaintext, not hashed) */
+    tenantId?: 'wise' | 'alipay';
 }
 
 /**
@@ -181,6 +187,14 @@ export const PAYEE_ID_HASH_SENTINEL =
 export const TRANSFER_ORDER_BINDING_HASH_SENTINEL =
     '0x0000000000000000000000000000000000000000000000000000000000000006';
 
+export const OWNER_ADDRESS_SENTINEL =
+    '0x0000000000000000000000000000000000000000000000000000000000000007';
+
+export const COUNTERPARTY_ADDRESS_SENTINEL =
+    '0x0000000000000000000000000000000000000000000000000000000000000008';
+
+export const TENANT_ID_SENTINEL = '__TLSN_TENANT_ID_SENTINEL__';
+
 export function injectOrderBindingHash(pluginCode: string, hash: Hex): string {
     if (!pluginCode.includes(ORDER_BINDING_HASH_SENTINEL)) {
         console.warn('[injectOrderBindingHash] sentinel not found in plugin code — orderBindingHash not injected');
@@ -227,6 +241,29 @@ export function injectTransferOrderBindingHash(pluginCode: string, hash: Hex): s
         return pluginCode;
     }
     return pluginCode.replace(TRANSFER_ORDER_BINDING_HASH_SENTINEL, hash);
+}
+
+export function injectOwnerAddress(pluginCode: string, owner: Hex): string {
+    return pluginCode.includes(OWNER_ADDRESS_SENTINEL)
+        ? pluginCode.replace(OWNER_ADDRESS_SENTINEL, owner.toLowerCase())
+        : pluginCode;
+}
+
+export function injectCounterpartyAddress(pluginCode: string, addr: Hex): string {
+    return pluginCode.includes(COUNTERPARTY_ADDRESS_SENTINEL)
+        ? pluginCode.replace(COUNTERPARTY_ADDRESS_SENTINEL, addr.toLowerCase())
+        : pluginCode;
+}
+
+export function injectTenantId(pluginCode: string, tenantId?: string): string {
+    if (tenantId) {
+        return pluginCode.replace(TENANT_ID_SENTINEL, tenantId);
+    }
+    // D-2: 没值时把整行从 sessionData 删掉,避免哨兵字面值入库
+    return pluginCode.replace(
+        /^\s*__tlsn_tenant_id:\s*['"]__TLSN_TENANT_ID_SENTINEL__['"],?\s*\n/m,
+        '',
+    );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

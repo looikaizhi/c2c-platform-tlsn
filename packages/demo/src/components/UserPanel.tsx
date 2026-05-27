@@ -34,6 +34,10 @@ import {
   type PaymentProofArtifactV1,
 } from '../utils/paymentProofArtifact';
 import { computeOrderBindingHash, type ExtensionProveResponse } from '../utils/proofTransformer';
+import { loginAsUser } from '../utils/verifierAuth';
+import { patchProofTx } from '../utils/proofsApi';
+import { hardhatChain } from '../utils/hardhatAccounts';
+import { MyProofs } from './MyProofs';
 
 // -- Constants ---------------------------------------------------------------
 const ZERO_HASH_32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as Hex;
@@ -93,6 +97,43 @@ function formatUserFacingError(err: unknown): string {
     e?.shortMessage ||
     String(err)
   );
+}
+
+/**
+ * Backfill verifier proof_store rows with on-chain txHash so audit UI can
+ * filter on `status=committed`. Best-effort: 409 = already committed (skip),
+ * any other failure becomes a console warning — does NOT roll back the on-chain payment.
+ */
+async function backfillTx(
+  sessionIds: string[],
+  txHash: Hex,
+  userAddr: Hex,
+  onLog: (message: string) => void,
+): Promise<void> {
+  if (sessionIds.length === 0) return;
+  const results = await Promise.allSettled(
+    sessionIds.map((sid) =>
+      patchProofTx(sid, txHash, hardhatChain.id, userAddr),
+    ),
+  );
+  const failed: string[] = [];
+  let alreadyCount = 0;
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      if (r.value.alreadyCommitted) alreadyCount += 1;
+      else if (!r.value.ok) failed.push(`${sessionIds[i]} → ${r.value.status}`);
+    } else {
+      failed.push(`${sessionIds[i]} → ${(r.reason as any)?.message ?? r.reason}`);
+    }
+  });
+  if (alreadyCount > 0) {
+    onLog(`ℹ ${alreadyCount}/${sessionIds.length} 链上回填已完成(409,跳过)`);
+  }
+  if (failed.length) {
+    onLog(`⚠ ${failed.length}/${sessionIds.length} 链上回填失败(不影响留存): ${failed.join('; ')}`);
+  } else {
+    onLog(`链上回填完成 (${sessionIds.length} session)`);
+  }
 }
 
 function extractSessionIds(proofs: ExtensionProveResponse[]): string[] {
@@ -658,6 +699,11 @@ function UserTab({ address }: { address: Hex }) {
         ? 'Proof artifact saved. Use Download Proof JSON to export it.'
         : '⚠ Submitted, but local proof artifact save failed.');
 
+      // Backfill txHash → verifier proof_store (best-effort, see PROOF_AUDIT_PLAN §5.5)
+      await backfillTx(artifact.sessionIds, txHash, checkedAddress, (m) =>
+        appendOrderLog(orderKey, m),
+      );
+
       updateRowState(orderKey, (prev) => ({
         ...prev,
         status: 'success',
@@ -683,6 +729,23 @@ function UserTab({ address }: { address: Hex }) {
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
+
+  // ── SIWE: lazy-login when this tab becomes active (one user per tab switch).
+  //   Skipped when JWT cache already valid (verifierAuth.getCachedJwt handles it).
+  //   Failure is non-fatal — audit panel will surface its own 401.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const wc = getUserClientByAddress(checkedAddress);
+        if (!wc) return;
+        await loginAsUser(wc as any);
+      } catch (err) {
+        if (!cancelled) console.warn('[UserPanel] SIWE login failed:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [checkedAddress]);
 
   if (!isC2CConfigured()) {
     return <p style={{ color: '#767676', fontSize: 14 }}>Deploy contracts first.</p>;
@@ -1017,6 +1080,10 @@ export function UserPanel() {
       </div>
 
       <UserTab address={addresses[activeTab]} />
+
+      <div style={{ marginTop: 24 }}>
+        <MyProofs activeUserAddr={addresses[activeTab]} />
+      </div>
     </div>
   );
 }

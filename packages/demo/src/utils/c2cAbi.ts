@@ -513,8 +513,6 @@ export const C2C_ESCROW_ABI = [
       { name: 'status',           type: 'uint8'   as const },
       { name: 'rateVersion',      type: 'uint32'  as const },
       { name: 'platformTxId',     type: 'bytes32' as const },
-      { name: 'bondAmount',       type: 'uint256' as const },
-      { name: 'bondBpsSnapshot',  type: 'uint16'  as const },
     ],
     stateMutability: 'view' as const,
   },

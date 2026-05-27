@@ -20,6 +20,8 @@ import { C2C_ADMIN_ABI, C2C_RISK_MANAGER_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
 import { ReputationBadge } from './ReputationBadge';
 import type { ReputationView } from './ReputationBadge';
+import { loginAsAdmin, logoutAdmin } from '../utils/verifierAuth';
+import { AdminAudit } from './AdminAudit';
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -723,6 +725,28 @@ export function AdminPanel() {
   const [editMaxOrder,   setEditMaxOrder]   = useState(false);
   const [maxOrderInput,  setMaxOrderInput]  = useState('');
   const [savingMaxOrder, setSavingMaxOrder] = useState(false);
+
+  // ── Verifier audit (Admin Key for /proofs) ──────────────────────────────────
+  const [adminKeyInput, setAdminKeyInput] = useState('');
+  const [adminKeyLoggedIn, setAdminKeyLoggedIn] = useState(
+    () => typeof window !== 'undefined' && !!sessionStorage.getItem('tlsn:adminKey'),
+  );
+  const handleAdminKeyLogin = () => {
+    const k = adminKeyInput.trim();
+    if (!k) {
+      showToast('Admin Key cannot be empty', 'error');
+      return;
+    }
+    loginAsAdmin(k);
+    setAdminKeyLoggedIn(true);
+    showToast('Admin Key set — audit panel unlocked', 'success');
+  };
+  const handleAdminKeyLogout = () => {
+    logoutAdmin();
+    setAdminKeyLoggedIn(false);
+    setAdminKeyInput('');
+    showToast('Admin Key cleared', 'info');
+  };
 
   // ── Reload ───────────────────────────────────────────────────────────────────
   const reload = useCallback(async () => {
@@ -1487,6 +1511,48 @@ export function AdminPanel() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* ── Verifier Audit (TLSN Proof Store) ─────────────────────────────── */}
+      <div style={{ marginTop: 22, borderTop: `1px solid ${C.border}`, paddingTop: 18 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 14 }}>
+          <span style={{ color: C.muted }}><IconShield /></span>
+          <h3 style={{ ...S.sectionTitle, margin: 0 }}>Verifier Audit (TLSN Proof Store)</h3>
+        </div>
+
+        <div style={{
+          background: '#eff6ff', borderRadius: 9,
+          border: '1px solid #bfdbfe', borderLeft: `3px solid ${C.primary}`,
+          padding: '13px 15px',
+          marginBottom: 14,
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#1e3a8a', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 7 }}>
+            Admin Key — required to load /proofs
+          </div>
+          <p style={{ fontSize: 12, color: '#1e3a8a', margin: '0 0 10px', lineHeight: 1.6 }}>
+            Paste the <code style={{ background: '#dbeafe', padding: '0 3px', borderRadius: 3, fontSize: 11 }}>PROOF_API_KEYS</code> super-admin key configured in <code style={{ background: '#dbeafe', padding: '0 3px', borderRadius: 3, fontSize: 11 }}>packages/verifier/.env</code>.
+          </p>
+          {!adminKeyLoggedIn ? (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                style={{ ...S.input, flex: 1 }}
+                type="password"
+                placeholder="admin-demo-key"
+                value={adminKeyInput}
+                onChange={(e) => setAdminKeyInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleAdminKeyLogin(); }}
+              />
+              <Btn onClick={handleAdminKeyLogin}>Login</Btn>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 12, color: C.success, fontWeight: 600 }}>● Admin Key active</span>
+              <Btn small variant="outline" onClick={handleAdminKeyLogout}>Logout</Btn>
+            </div>
+          )}
+        </div>
+
+        <AdminAudit />
       </div>
     </div>
   );

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Hex } from 'viem';
 
-import { config } from '../config';
 import {
     buildContractProof,
     buildProofDebugSnapshot,
@@ -11,6 +10,7 @@ import { submitProofToContract, type SubmitAction } from '../utils/contractSubmi
 import { isContractConfigured } from '../utils/contractConfig';
 import { formatContractAwareError } from '../utils/contractErrors';
 import { discoverWallets, type EIP6963ProviderDetail } from '../utils/walletDiscovery';
+import { patchProofTx } from '../utils/proofsApi';
 
 type SubmitStatus = 'idle' | 'building' | 'confirming' | 'pending' | 'success' | 'error';
 
@@ -64,6 +64,7 @@ async function patchProofTxBacklink(
     proofs: ExtensionProveResponse[],
     txHash: Hex,
     chainId: number,
+    signerAddr?: Hex,
 ): Promise<{ patched: number; failed: number }> {
     const sessionIds = collectSessionIds(proofs);
     if (!sessionIds.length) return { patched: 0, failed: 0 };
@@ -71,19 +72,15 @@ async function patchProofTxBacklink(
     let patched = 0;
     let failed = 0;
 
+    // Route through patchProofTx → authedFetch so the SIWE JWT (or admin key)
+    // in sessionStorage is attached. /proof/:id/tx requires auth now that
+    // PROOF_API_KEYS is set; an un-authed call would 401 silently.
     await Promise.all(
         sessionIds.map(async (sessionId) => {
             try {
-                const resp = await fetch(`${config.verifierUrl}/proof/${sessionId}/tx`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ txHash, chainId }),
-                });
-                if (!resp.ok) {
-                    failed += 1;
-                    return;
-                }
-                patched += 1;
+                const res = await patchProofTx(sessionId, txHash, chainId, signerAddr);
+                if (res.ok) patched += 1;
+                else failed += 1;
             } catch {
                 failed += 1;
             }
@@ -243,12 +240,23 @@ export function ContractSubmit({ proveResponse, wiseProofs, pluginKey, submitAct
             const chainIdHex = await provider.request({ method: 'eth_chainId' });
             const chainId = parseInt(chainIdHex as string, 16);
 
+            // Resolve signer address so the verifier PATCH attaches the right SIWE JWT.
+            let signerAddr: Hex | undefined;
+            try {
+                const accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
+                if (Array.isArray(accounts) && accounts[0]) {
+                    signerAddr = accounts[0].toLowerCase() as Hex;
+                }
+            } catch {
+                // best-effort — patchProofTx will fall back to admin key / anon
+            }
+
             const { hash, waitForReceipt } = await submitProofToContract(action, provider);
             setTxHash(hash);
             setStatus('pending');
             await waitForReceipt();
 
-            const patchResult = await patchProofTxBacklink(patchProofs, hash, chainId);
+            const patchResult = await patchProofTxBacklink(patchProofs, hash, chainId, signerAddr);
             if (patchResult.failed > 0) {
                 setNote(
                     `Transaction submitted, but verifier tx backlink failed for ${patchResult.failed} proof session(s).`,

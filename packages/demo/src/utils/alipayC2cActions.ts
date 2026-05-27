@@ -21,6 +21,9 @@ import {
   injectMerchantIdHash,
   injectPayeeNameHash,
   injectPayeeIdHash,
+  injectOwnerAddress,
+  injectCounterpartyAddress,
+  injectTenantId,
   ZERO_HASH_32,
   type ExtensionProveResponse,
   type OrderBindingContext,
@@ -199,6 +202,9 @@ export async function makeAlipayCryptoBindingContext(
     merchantIdHash:   merchantInfo.idHash,
     payeeNameHash:    merchantInfo.nameHash, // CRYPTO: payee = merchant
     payeeIdHash:      merchantInfo.idHash,
+    ownerAddress:        buyerAddress.toLowerCase() as `0x${string}`,
+    counterpartyAddress: merchantAddress.toLowerCase() as `0x${string}`,
+    tenantId:            'alipay',
   };
 }
 
@@ -360,6 +366,9 @@ export async function makeAlipayFiatBindingContext(
     merchantIdHash:   merchantInfo.idHash,
     payeeNameHash:    buyerInfo.nameHash, // FIAT: payee = buyer
     payeeIdHash:      buyerInfo.idHash,
+    ownerAddress:        buyerAddress.toLowerCase() as `0x${string}`,
+    counterpartyAddress: merchantAddress.toLowerCase() as `0x${string}`,
+    tenantId:            'alipay',
   };
 }
 
@@ -543,6 +552,12 @@ async function _runAlipayPlugin(ctx: OrderBindingContext): Promise<ExtensionProv
   pluginCode = injectMerchantIdHash(pluginCode, ctx.merchantIdHash);
   pluginCode = injectPayeeNameHash(pluginCode, ctx.payeeNameHash);
   pluginCode = injectPayeeIdHash(pluginCode, ctx.payeeIdHash);
+
+  // Audit scoping: owner = buyer, counterparty = merchant, tenant = 'alipay'.
+  if (ctx.ownerAddress)        pluginCode = injectOwnerAddress(pluginCode, ctx.ownerAddress);
+  if (ctx.counterpartyAddress) pluginCode = injectCounterpartyAddress(pluginCode, ctx.counterpartyAddress);
+  pluginCode = injectTenantId(pluginCode, ctx.tenantId);
+
   const resultJson = await window.tlsn.execCode(pluginCode);
   return JSON.parse(resultJson) as ExtensionProveResponse;
 }

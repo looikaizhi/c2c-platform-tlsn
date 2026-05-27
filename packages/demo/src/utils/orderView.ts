@@ -39,9 +39,6 @@ export interface OrderView {
   status: number;
   rateVersion: number;
   platformTxId: Hex;
-  // V4 fields
-  bondAmount: bigint;
-  bondBpsSnapshot: number;
 }
 
 type RawOrder = Partial<{
@@ -52,8 +49,6 @@ type RawOrder = Partial<{
   status: number;
   rateVersion: number;
   platformTxId: Hex;
-  bondAmount: bigint;
-  bondBpsSnapshot: number;
 }> & unknown[];
 
 /**
@@ -71,8 +66,6 @@ export function normalizeOrder(rawOrder: unknown): OrderView {
     status:          asNumber(raw.status        ?? raw[4]),
     rateVersion:     asNumber(raw.rateVersion   ?? raw[5]),
     platformTxId:    asHex(raw.platformTxId    ?? raw[6], ZERO_HASH_32),
-    bondAmount:      asBigInt(raw.bondAmount    ?? raw[7]),
-    bondBpsSnapshot: asNumber(raw.bondBpsSnapshot ?? raw[8]),
   };
 }
 

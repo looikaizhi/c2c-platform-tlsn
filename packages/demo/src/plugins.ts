@@ -7,7 +7,7 @@ export const plugins: Record<string, Plugin> = {
         logo: '💰',
         file: '/plugins/alipay.js',
         parseResult: (json) => {
-            const r = (json as any).results;
+            const r = (json as any).displayResults || (json as any).results;
             if (!r?.length) return 'Proof committed (Pedersen — no revealed plaintext)';
             return r[r.length - 1].value;
         },

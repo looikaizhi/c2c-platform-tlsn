@@ -5,12 +5,49 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { keccak256, toBytes, parseAbiItem, formatUnits } from 'viem';
 import type { Hex } from 'viem';
-import { publicClient, getUserClientByAddress } from '../utils/hardhatAccounts';
+import { publicClient, getUserClientByAddress, hardhatChain } from '../utils/hardhatAccounts';
+import { patchProofTx } from '../utils/proofsApi';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '../utils/c2cAbi';
 import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
 import { getDemoUserAddresses } from '../utils/demoUsers';
 import { decodeContractError, formatContractAwareError } from '../utils/contractErrors';
-import { buildProofDebugSnapshot } from '../utils/proofTransformer';
+import { buildProofDebugSnapshot, type ExtensionProveResponse } from '../utils/proofTransformer';
+
+/**
+ * Backfill verifier proof_store with txHash (PATCH /proof/:id/tx).
+ * Best-effort — 409 = already-committed (skip), other errors logged but not thrown.
+ * See PROOF_AUDIT_PLAN §5.5.
+ */
+async function backfillProofsTx(
+  proofs: ExtensionProveResponse[],
+  txHash: Hex,
+  userAddr: Hex,
+  addLog: (m: string, level?: 'info' | 'success' | 'error') => void,
+): Promise<void> {
+  const sids = Array.from(
+    new Set(
+      proofs
+        .map((p) => p?.verifierSignature?.sessionId)
+        .filter((s): s is string => !!s),
+    ),
+  );
+  if (sids.length === 0) return;
+  const results = await Promise.allSettled(
+    sids.map((sid) => patchProofTx(sid, txHash, hardhatChain.id, userAddr)),
+  );
+  const failed: string[] = [];
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled' && (r.value.ok || r.value.alreadyCommitted)) return;
+    const reason =
+      r.status === 'fulfilled' ? String(r.value.status) : String((r.reason as any)?.message ?? r.reason);
+    failed.push(`${sids[i]} → ${reason}`);
+  });
+  if (failed.length) {
+    addLog(`⚠ ${failed.length}/${sids.length} 链上回填失败(不影响留存): ${failed.join('; ')}`);
+  } else {
+    addLog(`链上回填完成 (${sids.length} session)`);
+  }
+}
 import {
   placeWiseCryptoOrder,
   placeWiseFiatOrder,
@@ -543,6 +580,7 @@ function ProductDetailModal({
         addLog('Proofs generated, submitting to contract…');
         const txHash = await submitWiseCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, contacts, transfer);
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
+        await backfillProofsTx([contacts, transfer], txHash, buyerAddr, addLog);
         setDone(true);
 
       } else if (card.platformId === PLATFORM_WISE && card.direction === 'Fiat') {
@@ -567,6 +605,7 @@ function ProductDetailModal({
         addLog('Proof generated, submitting to contract…');
         const txHash = await submitAlipayCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, proof);
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
+        await backfillProofsTx([proof], txHash, buyerAddr, addLog);
         setDone(true);
 
       } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Fiat') {
