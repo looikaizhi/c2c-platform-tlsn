@@ -1,7 +1,7 @@
 // packages/demo/src/components/UserPanel.tsx
 // Shows user tabs with balances (ETH / USDT / USDC / DAI) and active orders.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { formatUnits, getAddress } from 'viem';
 import type { Hex } from 'viem';
 
@@ -730,6 +730,33 @@ function UserTab({ address }: { address: Hex }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
+  // Wall-clock tick used to gate `canGenerate` so an order's "Generate Proof"
+  // button disables the moment its on-screen deadline passes — even before
+  // the keeper sweep flips status to EXPIRED on-chain. Submitting after the
+  // deadline would just revert with OutOfDeadline.
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Auto-reload when the count of locally-expired orders increases — the
+  // keeper will have swept within `GRACE_PERIOD_SECONDS`, so pulling fresh
+  // state shrinks the list and surfaces the timeoutCount update.
+  const expiredCount =
+    data?.activeOrders.filter((o) => Number(o.deadline) <= nowSec).length ?? 0;
+  const lastExpiredCountRef = useRef(0);
+  useEffect(() => {
+    if (expiredCount > lastExpiredCountRef.current) {
+      lastExpiredCountRef.current = expiredCount;
+      reload();
+    } else if (expiredCount < lastExpiredCountRef.current) {
+      // List shrank (sweep landed) — reset the watermark.
+      lastExpiredCountRef.current = expiredCount;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expiredCount]);
+
   // ── SIWE: lazy-login when this tab becomes active (one user per tab switch).
   //   Skipped when JWT cache already valid (verifierAuth.getCachedJwt handles it).
   //   Failure is non-fatal — audit panel will surface its own 401.
@@ -914,7 +941,12 @@ function UserTab({ address }: { address: Hex }) {
           const savedArtifact = savedArtifacts[orderKey];
 
           const knownPlatform = order.platformId === PLATFORM_WISE || order.platformId === PLATFORM_ALIPAY;
-          const canGenerate = order.assetType === 0 && order.status === 0 && knownPlatform;
+          const isCountdownExpired = Number(order.deadline) <= nowSec;
+          const canGenerate =
+            order.assetType === 0 &&
+            order.status === 0 &&
+            knownPlatform &&
+            !isCountdownExpired;
           const running = rowState.status === 'running';
 
           const actionLabel = running
@@ -948,6 +980,11 @@ function UserTab({ address }: { address: Hex }) {
                 <span style={{ fontSize: 11, color: '#767676', marginLeft: 'auto' }}>
                   Deadline: {new Date(Number(order.deadline) * 1000).toLocaleTimeString()}
                   {' · '}RateV: {order.rateVersion}
+                  {isCountdownExpired && order.status === 0 && (
+                    <span style={{ color: '#d4380d', marginLeft: 6, fontWeight: 600 }}>
+                      · awaiting keeper sweep…
+                    </span>
+                  )}
                 </span>
               </div>
 
