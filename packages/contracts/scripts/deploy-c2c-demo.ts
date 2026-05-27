@@ -121,6 +121,10 @@ async function main() {
     tlsnVerifier.address,
   ]);
   console.log("C2CEscrow:     ", c2cEscrow.address);
+  // Snapshot block + chainId for the deployments artifact written at the end.
+  const publicClient = await viem.getPublicClient();
+  const escrowDeploymentBlock = await publicClient.getBlockNumber();
+  const escrowChainId = await publicClient.getChainId();
 
   const bondVault   = await viem.deployContract("C2CBondVault",   [c2cAdmin.address]);
   const riskManager = await viem.deployContract("C2CRiskManager", [c2cAdmin.address]);
@@ -255,6 +259,37 @@ async function main() {
   ].join("\n") + "\n";
 
   fs.writeFileSync(envPath, envContent, "utf-8");
+
+  // ── Write packages/contracts/deployments/demo-<chainId>.json ────────────
+  // Sibling artifact to deploy-web.ts's web-<chainId>.json. Consumed by the
+  // keeper to auto-discover the demo escrow without hard-coding the address.
+  const deploymentsDir = path.resolve(__dirname, "../deployments");
+  fs.mkdirSync(deploymentsDir, { recursive: true });
+  const deploymentsFile = path.join(deploymentsDir, `demo-${escrowChainId}.json`);
+  const deploymentsRecord = {
+    chainId: escrowChainId,
+    label: "demo",
+    deployedAt: new Date().toISOString(),
+    deploymentBlock: escrowDeploymentBlock.toString(),
+    contracts: {
+      c2cAdmin: c2cAdmin.address,
+      c2cEscrow: c2cEscrow.address,
+      c2cBondVault: bondVault.address,
+      c2cRiskManager: riskManager.address,
+      tlsnVerifier: tlsnVerifier.address,
+      wisePlatformVerifier: wisePlatformVerifier.address,
+      alipayPlatformVerifier: alipayPlatformVerifier.address,
+    },
+    tokens: {
+      USDT: usdt.address,
+      USDC: usdc.address,
+      DAI: dai.address,
+    },
+    // demo deploys 3 merchants — surface the first one for keeper logs.
+    merchant: merchantAddrs[0],
+  };
+  fs.writeFileSync(deploymentsFile, JSON.stringify(deploymentsRecord, null, 2), "utf-8");
+  console.log(`✅ Deployments written to ${path.relative(process.cwd(), deploymentsFile)}`);
 
   console.log("\n" + "=".repeat(60));
   console.log("✅ .env written to packages/demo/.env");

@@ -1,9 +1,11 @@
 # 智能合约测试结果
 
-> 测试日期：2026-05-03  
+> 测试日期：2026-05-27  
 > 测试网络：`hardhatMainnet`（Hardhat 模拟 L1 主网环境）  
 > Solidity 版本：`0.8.28`（EVM 目标：cancun）  
-> 测试总结：**302 通过，0 失败** ✅
+> 测试总结：**324 个测试用例 100% 通过，0 失败** ✅  
+> Node:test runner 报告 **331 passing**（= 324 业务用例 + 7 个 helper 模块文件各计 1 个"模块加载通过"）  
+> 命令：`npx hardhat test` 或 `npm run test`（两者等价，均触发全量 12 个测试文件）
 
 ---
 
@@ -22,7 +24,8 @@
 | 营业时间                    |     14 |     14 |    0 |
 | Bond 双边公平机制 (V4)      |     22 |     22 |    0 |
 | 过期订单清理                |     11 |     11 |    0 |
-| **合计**                    | **302** | **302** | **0** |
+| Sweep 公开清理 (V4)         |     22 |     22 |    0 |
+| **合计**                    | **324** | **324** | **0** |
 
 ---
 
@@ -536,3 +539,54 @@
 | CLEAN-TYPE-02    | N=10 批量：FIAT（109,978/笔）vs CRYPTO（103,773/笔）对比  | ✅   |        465 |     1,099,782 |
 
 > FIAT 清理比 CRYPTO 贵约 **6,205 gas/笔**，原因：FIAT 超时额外触发 `buyerEscrowedAmount` 更新及 `bondVault.settle` 的双参数重载路径。
+
+---
+
+## Sweep 公开清理 (V4) — 22/22 ✅
+
+> 对应文件：[`test/Sweep.ts`](test/Sweep.ts)  
+> 覆盖功能：`sweepExpired(merchant, productId, assetType, maxSteps)` 与 `sweepExpiredBatch(targets[])` 两个公开入口，任何 EOA 可调用，配合 `ReentrancyGuard` + `whenNotPaused` 保护。
+
+### SINGLE — `sweepExpired`（单产品）
+
+| 编号        | 测试内容                                                                | 通过 |
+|-------------|-------------------------------------------------------------------------|:----:|
+| SWEEP-S-01  | 无过期订单时 no-op（返回 cleaned=0，不发事件）                              | ✅   |
+| SWEEP-S-02  | 清理 1 笔过期 CRYPTO 订单 → 订单存储被删除（buyer 归零）                      | ✅   |
+| SWEEP-S-03  | 清理 1 笔过期 FIAT 订单（WAITING → EXPIRED → 删除）                         | ✅   |
+| SWEEP-S-04  | 清理同产品多笔过期订单（N=5 全部删除）                                       | ✅   |
+| SWEEP-S-05  | `maxSteps=2`，5 笔过期 → 仅前 2 笔被清理，3-5 笔保持 PENDING                | ✅   |
+| SWEEP-S-06  | 第三方 EOA（非买家非商家）调用成功                                          | ✅   |
+| SWEEP-S-07  | 每笔过期订单触发一次 `riskManager.onTimeout`（buyer.timeoutCount += 1）     | ✅   |
+| SWEEP-S-08  | CRYPTO 超时 → `bondVault.settle(PROOF_TIMEOUT)`，商家 claimable 增加     | ✅   |
+| SWEEP-S-09  | 清理后 `hasActiveOrder[buyer][merchant][asset][pid]` 复位为 false         | ✅   |
+| SWEEP-S-10  | 发出 `ExpiredSwept(caller, merchant, productId, assetType, count)` 事件 | ✅   |
+| SWEEP-S-11  | 每笔过期订单各发出一次 `OrderStatusChanged(EXPIRED)` 事件                   | ✅   |
+| SWEEP-S-12  | 合约 paused 时调用 → revert (`ContractPaused` / selector 0xab35696f)     | ✅   |
+
+### BATCH — `sweepExpiredBatch`（跨产品批量）
+
+| 编号        | 测试内容                                                                | 通过 |
+|-------------|-------------------------------------------------------------------------|:----:|
+| SWEEP-B-01  | 一笔 tx 清理 3 个不同产品的过期订单（cleaned=3）                            | ✅   |
+| SWEEP-B-02  | 过期与未过期产品混合 batch → 仅清理过期的（cleaned=1）                       | ✅   |
+| SWEEP-B-03  | `targets.length=0` → revert `BatchSizeInvalid`                          | ✅   |
+| SWEEP-B-04  | `targets.length=21`（> MAX_SWEEP_BATCH=20）→ revert `BatchSizeInvalid`   | ✅   |
+| SWEEP-B-05  | 幂等：第二次 batch 调用 cleaned=0，不发 `ExpiredSwept`                      | ✅   |
+| SWEEP-B-06  | 合约 paused 时调用 → revert                                              | ✅   |
+
+### INV — 不变量校验
+
+| 编号        | 测试内容                                                                | 通过 |
+|-------------|-------------------------------------------------------------------------|:----:|
+| SWEEP-I-01  | CRYPTO：`pendingAmount` 精确下降 N × TRADE_AMOUNT；`collateralAmount` 不变 | ✅   |
+| SWEEP-I-02  | FIAT：`buyerEscrowedAmount` 下降（通过 `pendingAmount` 变化间接观测）       | ✅   |
+| SWEEP-I-03  | `riskManager.timeoutCount` 累加值等于过期订单数                            | ✅   |
+
+### IDEM — 与 `placeOrder` 协作
+
+| 编号        | 测试内容                                                                | 通过 |
+|-------------|-------------------------------------------------------------------------|:----:|
+| SWEEP-D-01  | sweep 后同产品可继续接受新订单（`orderId` 递增到 1，状态 PENDING）            | ✅   |
+
+> **实现要点**：`_cleanupExpired` 重构为 `_cleanupExpiredBounded(maxSteps)` 内部包装，对原有 4 个内部调用点（`placeOrder` + 3 个结算路径）行为零变化；公开入口通过 `before/after` 的 `activeOrderCount` 差值精确计算被清理订单数。

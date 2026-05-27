@@ -16,11 +16,12 @@
     "test:hours": "hardhat test test/BusinessHours.ts --network hardhatMainnet",
     "test:bond": "hardhat test test/Bond.ts --network hardhatMainnet",
     "test:cleanup": "hardhat test test/CleanupExpired.ts --network hardhatMainnet",
-    "test:all": "hardhat test test/C2CAdmin.ts test/C2CEscrow.ts test/WisePlatform.ts test/AlipayPlatform.ts test/Integration.ts test/TLSNVerifier.ts test/Rate.ts test/Cap.ts test/BusinessHours.ts test/Bond.ts test/CleanupExpired.ts --network hardhatMainnet",
+    "test:sweep": "hardhat test test/Sweep.ts --network hardhatMainnet",
+    "test:all": "hardhat test",
     "node": "hardhat node --network hardhatMainnet",
     "deploy:web": "hardhat run scripts/deploy-web.ts --network localhost",
     "deploy:local": "hardhat run scripts/deploy-local.ts --network hardhatMainnet",
-    "deploy:demo": "hardhat run scripts/deploy-c2c-demo.ts --network hardhatMainnet"
+    "deploy:demo": "hardhat run scripts/deploy-c2c-demo.ts --network localhost"
   },
   "keywords": [],
   "author": "",

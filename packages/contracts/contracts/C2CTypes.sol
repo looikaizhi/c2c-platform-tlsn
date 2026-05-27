@@ -187,3 +187,4 @@ error ManagersNotSet();
 error OrderBondNotFound();
 error OrderBondAlreadyInitialized();
 error OrderBondAlreadySettled();
+error BatchSizeInvalid();

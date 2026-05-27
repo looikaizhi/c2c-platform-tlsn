@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "./C2CTypes.sol";
 import "./C2CAdmin.sol";
@@ -24,7 +25,7 @@ import "./interfaces/IC2CBondVault.sol";
  *           - cancelOrder 禁用
  *           - 争议函数全部删除
  */
-contract C2CEscrow {
+contract C2CEscrow is ReentrancyGuard {
     using UintQueue for UintQueue.Queue;
     using SafeERC20 for IERC20;
 
@@ -77,6 +78,13 @@ contract C2CEscrow {
     mapping(address => Product[]) private merchantsProductCrypto;
     mapping(address => Product[]) private merchantsProductFiat;
 
+    struct SweepTarget {
+        address merchant;
+        uint256 productId;
+        AssetType assetType;
+        uint256 maxSteps; // 0 = MAX_PENDING_ORDERS
+    }
+
     // ================================================================
     //                    Buyer Payment Info Storage
     // ================================================================
@@ -92,6 +100,7 @@ contract C2CEscrow {
     mapping(address => bool) public hasEverOrdered;
 
     uint256 public constant MAX_PENDING_ORDERS = 200;
+    uint256 public constant MAX_SWEEP_BATCH    = 20;
     uint256 private constant ORDER_TIMEOUT     = 15 minutes;
 
     uint256 private constant RATE_PRECISION_EXP = 8;
@@ -171,6 +180,13 @@ contract C2CEscrow {
     );
     event Paused(address indexed operator);
     event Unpaused(address indexed operator);
+    event ExpiredSwept(
+        address indexed caller,
+        address indexed merchant,
+        uint256 indexed productId,
+        AssetType assetType,
+        uint256 cleanedCount
+    );
 
     // ================================================================
     //                         Modifiers
@@ -785,8 +801,16 @@ contract C2CEscrow {
     }
 
     function _cleanupExpired(Product storage p, address merchant) internal {
+        _cleanupExpiredBounded(p, merchant, MAX_PENDING_ORDERS);
+    }
+
+    function _cleanupExpiredBounded(
+        Product storage p,
+        address merchant,
+        uint256 maxSteps
+    ) internal {
         uint256 steps = 0;
-        while (!p.pendingOrderIds.isEmpty() && steps < MAX_PENDING_ORDERS) {
+        while (!p.pendingOrderIds.isEmpty() && steps < maxSteps) {
             uint256 oid = p.pendingOrderIds.peek();
             Order storage o = p.orders[oid];
 
@@ -835,6 +859,51 @@ contract C2CEscrow {
             delete buyerOrderPaymentInfo[merchant][p.productID][oid];
             delete p.orders[oid];
             steps++;
+        }
+    }
+
+    // ================================================================
+    //                  Public Sweep (anyone-callable)
+    // ================================================================
+
+    function sweepExpired(
+        address merchant,
+        uint256 productId,
+        AssetType assetType,
+        uint256 maxSteps
+    ) external whenNotPaused nonReentrant returns (uint256 cleaned) {
+        Product storage p = _getProduct(merchant, productId, assetType);
+        uint256 before_ = p.activeOrderCount;
+        _cleanupExpiredBounded(p, merchant, maxSteps == 0 ? MAX_PENDING_ORDERS : maxSteps);
+        cleaned = before_ - p.activeOrderCount;
+        if (cleaned > 0) {
+            emit ExpiredSwept(msg.sender, merchant, productId, assetType, cleaned);
+        }
+    }
+
+    function sweepExpiredBatch(SweepTarget[] calldata targets)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (uint256 totalCleaned)
+    {
+        uint256 len = targets.length;
+        if (len == 0 || len > MAX_SWEEP_BATCH) revert BatchSizeInvalid();
+        for (uint256 i = 0; i < len; ) {
+            SweepTarget calldata t = targets[i];
+            Product storage p = _getProduct(t.merchant, t.productId, t.assetType);
+            uint256 before_ = p.activeOrderCount;
+            _cleanupExpiredBounded(
+                p,
+                t.merchant,
+                t.maxSteps == 0 ? MAX_PENDING_ORDERS : t.maxSteps
+            );
+            uint256 cleaned = before_ - p.activeOrderCount;
+            totalCleaned += cleaned;
+            if (cleaned > 0) {
+                emit ExpiredSwept(msg.sender, t.merchant, t.productId, t.assetType, cleaned);
+            }
+            unchecked { ++i; }
         }
     }
 }

@@ -92,6 +92,11 @@ async function main() {
     tlsnVerifier.address,
   ]);
   console.log("C2CEscrow:             ", c2cEscrow.address);
+  // Capture the deploy block immediately so downstream consumers (e.g. keeper
+  // event replay) can skip pre-deploy blocks.
+  const publicClient = await viem.getPublicClient();
+  const escrowDeploymentBlock = await publicClient.getBlockNumber();
+  const escrowChainId = await publicClient.getChainId();
 
   // ── 5. C2CBondVault ───────────────────────────────────────────────────────
   const c2cBondVault = await viem.deployContract("C2CBondVault", [c2cAdmin.address]);
@@ -293,6 +298,34 @@ async function main() {
 
   const newContent = [...filtered, "", ...contractBlock, ""].join("\n");
   fs.writeFileSync(envPath, newContent, "utf-8");
+
+  // ── 19b. Write packages/contracts/deployments/<chainId>.json ─────────────
+  // Consumed by services that need address discovery without hard-coding —
+  // e.g. the keeper reads .contracts.c2cEscrow + .deploymentBlock on startup.
+  const deploymentsDir = path.resolve(__dirname, "../deployments");
+  fs.mkdirSync(deploymentsDir, { recursive: true });
+  const deploymentsFile = path.join(deploymentsDir, `web-${escrowChainId}.json`);
+  const deploymentsRecord = {
+    chainId: escrowChainId,
+    label: "web",
+    deployedAt: new Date().toISOString(),
+    deploymentBlock: escrowDeploymentBlock.toString(),
+    contracts: {
+      c2cAdmin: c2cAdmin.address,
+      c2cEscrow: c2cEscrow.address,
+      c2cBondVault: c2cBondVault.address,
+      c2cRiskManager: c2cRiskManager.address,
+      tlsnVerifier: tlsnVerifier.address,
+      wisePlatformVerifier: wisePlatformVerifier.address,
+      alipayPlatformVerifier: alipayPlatformVerifier.address,
+    },
+    tokens: Object.fromEntries(
+      onChainCryptos.map((c) => [c.symbol, tokens[c.symbol].address]),
+    ),
+    merchant: merchantAddr,
+  };
+  fs.writeFileSync(deploymentsFile, JSON.stringify(deploymentsRecord, null, 2), "utf-8");
+  console.log(`✅ Deployments written to ${path.relative(process.cwd(), deploymentsFile)}`);
 
   console.log("\n" + "=".repeat(60));
   console.log("✅ packages/web/.env.local updated");
