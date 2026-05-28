@@ -41,7 +41,7 @@ function proofArrayParam(name: string) {
   return { name, type: 'tuple[]' as const, components: tlsnProofComponents };
 }
 
-// ── BuyerPaymentInfo / MerchantPaymentInfo tuple ──────────────────────────────
+// ── BuyerPaymentInfo / PlatformBinding tuple ──────────────────────────────
 const paymentInfoComponents = [
   { name: 'nameHash', type: 'bytes32' as const },
   { name: 'idHash',   type: 'bytes32' as const },
@@ -94,7 +94,7 @@ export const C2C_ADMIN_ABI = [
   // ── Payment info (per-platform) ────────────────────────────────────────────
   {
     type: 'function' as const,
-    name: 'setMerchantPaymentInfoForPlatform',
+    name: 'setPlatformBinding',
     inputs: [
       { name: '_platformId', type: 'bytes32' as const },
       { name: '_nameHash',   type: 'bytes32' as const },
@@ -105,7 +105,7 @@ export const C2C_ADMIN_ABI = [
   },
   {
     type: 'function' as const,
-    name: 'getMerchantPaymentInfoForPlatform',
+    name: 'getPlatformBinding',
     inputs: [
       { name: '_merchant',   type: 'address' as const },
       { name: '_platformId', type: 'bytes32' as const },
@@ -364,7 +364,7 @@ export const C2C_ADMIN_ABI = [
   },
   {
     type: 'event' as const,
-    name: 'MerchantPaymentInfoSet',
+    name: 'PlatformBindingSet',
     inputs: [
       { name: 'merchant',    type: 'address' as const, indexed: true  },
       { name: 'platformId',  type: 'bytes32' as const, indexed: true  },

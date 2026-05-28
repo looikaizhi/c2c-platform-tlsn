@@ -58,7 +58,7 @@ export async function getAlipayMerchantInfo(merchantAddress: `0x${string}`): Pro
   return publicClient.readContract({
     address: c2cConfig.adminAddress,
     abi: C2C_ADMIN_ABI,
-    functionName: 'getMerchantPaymentInfoForPlatform',
+    functionName: 'getPlatformBinding',
     args: [merchantAddress, PLATFORM_ALIPAY],
   }) as Promise<{ nameHash: `0x${string}`; idHash: `0x${string}`; isSet: boolean }>;
 }

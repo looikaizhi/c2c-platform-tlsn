@@ -59,7 +59,7 @@ export async function getWiseMerchantInfo(merchantAddress: `0x${string}`): Promi
   return publicClient.readContract({
     address: c2cConfig.adminAddress,
     abi: C2C_ADMIN_ABI,
-    functionName: 'getMerchantPaymentInfoForPlatform',
+    functionName: 'getPlatformBinding',
     args: [merchantAddress, PLATFORM_WISE],
   }) as Promise<{ nameHash: `0x${string}`; idHash: `0x${string}`; isSet: boolean }>;
 }

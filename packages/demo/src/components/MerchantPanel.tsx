@@ -281,8 +281,8 @@ async function loadMerchantData(address: Hex): Promise<MerchantData> {
     safeBal(c2cConfig.usdtAddress, address),
     safeBal(c2cConfig.usdcAddress, address),
     safeBal(c2cConfig.daiAddress,  address),
-    publicClient.readContract({ address: c2cConfig.adminAddress, abi: C2C_ADMIN_ABI, functionName: 'getMerchantPaymentInfoForPlatform', args: [address, PLATFORM_WISE] }),
-    publicClient.readContract({ address: c2cConfig.adminAddress, abi: C2C_ADMIN_ABI, functionName: 'getMerchantPaymentInfoForPlatform', args: [address, PLATFORM_ALIPAY] }),
+    publicClient.readContract({ address: c2cConfig.adminAddress, abi: C2C_ADMIN_ABI, functionName: 'getPlatformBinding', args: [address, PLATFORM_WISE] }),
+    publicClient.readContract({ address: c2cConfig.adminAddress, abi: C2C_ADMIN_ABI, functionName: 'getPlatformBinding', args: [address, PLATFORM_ALIPAY] }),
   ]);
 
   const [productLogs, collateralLogs] = await Promise.all([
@@ -417,7 +417,7 @@ function PayInfoForm({ platform, platformLabel, info, walletClient, onDone }: {
       const idHash   = keccak256(stringToBytes(accountId.trim())) as Hex;
       const { request } = await publicClient.simulateContract({
         address: c2cConfig.adminAddress, abi: C2C_ADMIN_ABI,
-        functionName: 'setMerchantPaymentInfoForPlatform',
+        functionName: 'setPlatformBinding',
         args: [platform, nameHash, idHash],
         account: walletClient.account!,
       });

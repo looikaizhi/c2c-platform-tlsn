@@ -28,6 +28,8 @@ import {
   PLATFORM_ALIPAY,
   submitAlipayCryptoProof,
 } from '../utils/alipayC2cActions';
+import { getAllUserBindings, type BindingView } from '../utils/userBindingActions';
+import { BindingRow } from './binding/BindingRow';
 import {
   buildPaymentProofArtifactStorageKey,
   PAYMENT_PROOF_ARTIFACT_SCHEMA_VERSION,
@@ -452,6 +454,9 @@ function UserTab({ address }: { address: Hex }) {
   const [claimableBalances, setClaimableBalances] = useState<Record<string, bigint>>({});
   const [claimLoading, setClaimLoading] = useState<Record<string, boolean>>({});
 
+  // Per-platform payment bindings (Wise + Alipay)
+  const [bindings, setBindings] = useState<BindingView[] | null>(null);
+
   const checkedAddress = getAddress(address);
 
   function updateRowState(orderKey: string, updater: (prev: ProofActionState) => ProofActionState) {
@@ -549,6 +554,14 @@ function UserTab({ address }: { address: Hex }) {
     }
   }
 
+  async function loadBindings() {
+    try {
+      setBindings(await getAllUserBindings(checkedAddress));
+    } catch (e) {
+      console.warn('[UserPanel] loadBindings failed', e);
+    }
+  }
+
   async function reload() {
     if (!isC2CConfigured()) return;
     setLoading(true);
@@ -556,7 +569,7 @@ function UserTab({ address }: { address: Hex }) {
       const loaded = await loadUser(address);
       setData(loaded);
       hydrateSavedArtifacts(loaded.activeOrders);
-      await loadV4Data();
+      await Promise.all([loadV4Data(), loadBindings()]);
     } catch (e) {
       console.error('[UserPanel] load error', e);
     } finally {
@@ -845,6 +858,59 @@ function UserTab({ address }: { address: Hex }) {
         <div style={{ flex: '0 0 auto', ...LABEL, marginBottom: 0, marginRight: 8 }}>Address</div>
         <div style={{ flex: 1, ...VALUE, fontSize: 12 }}>{checkedAddress}</div>
         <CopyButton text={checkedAddress} />
+      </div>
+
+      {/* Payment Bindings — buyer must bind per platform before placing orders */}
+      <div style={{
+        background: '#fff',
+        border: '1px solid #e5e7eb',
+        borderRadius: 10,
+        padding: '16px 18px',
+        marginBottom: 16,
+      }}>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{
+            fontSize: 11,
+            fontWeight: 700,
+            color: '#475569',
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            marginBottom: 4,
+          }}>
+            Payment Bindings
+          </div>
+          <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.5 }}>
+            Link your real payment accounts on-chain (hashed). Required before placing any order on that platform.
+          </div>
+        </div>
+        {(() => {
+          const walletClient = getUserClientByAddress(checkedAddress) ?? undefined;
+          if (!bindings) {
+            return <div style={{ fontSize: 13, color: '#94a3b8' }}>Loading bindings…</div>;
+          }
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {bindings.map((b, i) => (
+                <div
+                  key={b.platformId}
+                  style={i > 0 ? { borderTop: '1px solid #f1f5f9', paddingTop: 14 } : undefined}
+                >
+                  <BindingRow binding={b} walletClient={walletClient} onChange={reload} />
+                </div>
+              ))}
+              {!walletClient && (
+                <div style={{
+                  fontSize: 12,
+                  color: '#94a3b8',
+                  fontStyle: 'italic',
+                  paddingTop: 4,
+                }}>
+                  Read-only — this address has no local signer mapping.
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Balances */}

@@ -90,7 +90,7 @@ const ADMIN_ABI = [
   { type: 'function', name: 'addCryptoInfo',                  inputs: [{ type: 'address' }, { type: 'bool' }], outputs: [], stateMutability: 'nonpayable' },
   { type: 'function', name: 'addFiatInfo',                    inputs: [{ type: 'string' },  { type: 'bool' }], outputs: [], stateMutability: 'nonpayable' },
   { type: 'function', name: 'registerMerchantByAdmin',        inputs: [{ type: 'address' }],                  outputs: [], stateMutability: 'nonpayable' },
-  { type: 'function', name: 'setMerchantPaymentInfoForPlatform', inputs: [{ type: 'bytes32' }, { type: 'bytes32' }, { type: 'bytes32' }], outputs: [], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'setPlatformBinding', inputs: [{ type: 'bytes32' }, { type: 'bytes32' }, { type: 'bytes32' }], outputs: [], stateMutability: 'nonpayable' },
   { type: 'function', name: 'publishRate',                    inputs: [{ type: 'uint256' }, { type: 'uint8' }, { type: 'uint256' }, { type: 'uint64' }], outputs: [], stateMutability: 'nonpayable' },
   { type: 'function', name: 'openNow',                        inputs: [{ type: 'uint256' }, { type: 'uint8' }], outputs: [], stateMutability: 'nonpayable' },
 ] as const;
@@ -266,12 +266,12 @@ export async function deployDemoState(
     // Set payment info for Wise
     const wNameHash = keccak256(toBytes(MERCHANT_WISE_NAMES[i]))   as Hex;
     const wIdHash   = keccak256(toBytes(MERCHANT_WISE_HANDLES[i])) as Hex;
-    await wait(await wc(mWallet)({ address: adminAddress, abi: ADMIN_ABI, functionName: 'setMerchantPaymentInfoForPlatform', args: [PLATFORM_WISE, wNameHash, wIdHash] }));
+    await wait(await wc(mWallet)({ address: adminAddress, abi: ADMIN_ABI, functionName: 'setPlatformBinding', args: [PLATFORM_WISE, wNameHash, wIdHash] }));
 
     // Set payment info for Alipay
     const aNameHash = keccak256(toBytes(MERCHANT_ALI_NAMES[i]))    as Hex;
     const aIdHash   = keccak256(toBytes(MERCHANT_ALI_HANDLES[i]))  as Hex;
-    await wait(await wc(mWallet)({ address: adminAddress, abi: ADMIN_ABI, functionName: 'setMerchantPaymentInfoForPlatform', args: [PLATFORM_ALIPAY, aNameHash, aIdHash] }));
+    await wait(await wc(mWallet)({ address: adminAddress, abi: ADMIN_ABI, functionName: 'setPlatformBinding', args: [PLATFORM_ALIPAY, aNameHash, aIdHash] }));
 
     // List products
     // productId=0 CRYPTO (Wise), productId=0 FIAT (Wise), productId=1 CRYPTO (Alipay), productId=1 FIAT (Alipay)

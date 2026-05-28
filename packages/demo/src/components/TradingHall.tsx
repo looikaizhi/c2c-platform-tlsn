@@ -3,8 +3,15 @@
 // Click a row to open ProductDetailModal with full info, order form, and confirmation.
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { keccak256, toBytes, parseAbiItem, formatUnits } from 'viem';
+import { parseAbiItem, formatUnits } from 'viem';
 import type { Hex } from 'viem';
+import {
+  getUserPlatformBinding,
+  loadBindingPlaintext,
+  type BindingView,
+  type PlatformBinding,
+} from '../utils/userBindingActions';
+import { BindingRow } from './binding/BindingRow';
 import { publicClient, getUserClientByAddress, hardhatChain } from '../utils/hardhatAccounts';
 import { patchProofTx } from '../utils/proofsApi';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '../utils/c2cAbi';
@@ -382,13 +389,16 @@ function ProductDetailModal({
   const demoUserAddresses = useMemo(() => getDemoUserAddresses(), []);
   const [selectedUserAddress, setSelectedUserAddress] = useState<Hex | ''>(demoUserAddresses[0] ?? '');
   const [amount, setAmount]           = useState('1');
-  const [buyerName, setBuyerName]     = useState('');
-  const [buyerHandle, setBuyerHandle] = useState('');
   const [log, setLog]                 = useState<{ msg: string; type: 'info' | 'error' | 'success' }[]>([]);
   const [running, setRunning]         = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [done, setDone]               = useState(false);
   const [tokenDecimals, setTokenDecimals] = useState(18);
+
+  // Buyer's binding for THIS product's platform (loaded per user/platform change)
+  const [buyerBinding, setBuyerBinding]               = useState<PlatformBinding | null>(null);
+  const [buyerBindingLoading, setBuyerBindingLoading] = useState(false);
+  const [bindingReloadKey, setBindingReloadKey]       = useState(0);
 
   // V4 bond estimate state
   const [bondBps, setBondBps]             = useState<number | null>(null);
@@ -438,6 +448,19 @@ function ProductDetailModal({
     }).finally(() => setBondBpsLoading(false));
   }, [selectedUserAddress, card.direction]);
 
+  // Buyer must have a platform binding before placing ANY order (CRYPTO or FIAT).
+  // The contract enforces this; we read here to gate the UI button + show the
+  // bound name/handle, or expose an inline form when missing.
+  useEffect(() => {
+    if (!selectedUserAddress) { setBuyerBinding(null); return; }
+    setBuyerBindingLoading(true);
+    setBuyerBinding(null);
+    getUserPlatformBinding(selectedUserAddress as Hex, card.platformId)
+      .then((b) => setBuyerBinding(b))
+      .catch(() => setBuyerBinding({ nameHash: '0x0' as Hex, idHash: '0x0' as Hex, isSet: false }))
+      .finally(() => setBuyerBindingLoading(false));
+  }, [selectedUserAddress, card.platformId, bindingReloadKey]);
+
   const curr     = getCurrencyForPlatform(card.platformId);
   const usdtAmt  = parseFloat(amount) || 0;
   const estimate = fiatEstimate(card.rate, card.assetType, usdtAmt, curr);
@@ -453,8 +476,9 @@ function ProductDetailModal({
     if (demoUserAddresses.length === 0) return 'No demo users found in .env. Deploy contracts first.';
     if (!selectedUserAddress) return 'Please select a valid user.';
     if (!amount || usdtAmt <= 0) return 'Please enter a valid USDT amount.';
-    if (card.direction === 'Fiat' && !buyerName.trim()) return `Please enter your ${card.platformName} display name.`;
-    if (card.direction === 'Fiat' && !buyerHandle.trim()) return `Please enter your ${card.platformName} ${card.platformId === PLATFORM_WISE ? 'handle' : 'account'}.`;
+    if (!buyerBinding || !buyerBinding.isSet) {
+      return `You must set your ${card.platformName} payment account before placing this order.`;
+    }
     return null;
   }
 
@@ -584,9 +608,11 @@ function ProductDetailModal({
         setDone(true);
 
       } else if (card.platformId === PLATFORM_WISE && card.direction === 'Fiat') {
-        const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
-        const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
-        const { orderId } = await placeWiseFiatOrder(buyerClient, card.merchantAddr, card.productId, amountBig, buyerNameHash, buyerIdHash);
+        if (!buyerBinding?.isSet) throw new Error('Buyer binding not set — UI gate bypassed.');
+        const { orderId } = await placeWiseFiatOrder(
+          buyerClient, card.merchantAddr, card.productId, amountBig,
+          buyerBinding.nameHash, buyerBinding.idHash,
+        );
         addLog(`Order placed — orderId=${orderId}  USDT locked.`);
         addLog('Merchant must now pay MYR and submit Wise proof (see Merchant Panel).', 'success');
         setDone(true);
@@ -609,9 +635,11 @@ function ProductDetailModal({
         setDone(true);
 
       } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Fiat') {
-        const buyerNameHash = keccak256(toBytes(buyerName)) as Hex;
-        const buyerIdHash   = keccak256(toBytes(buyerHandle)) as Hex;
-        const { orderId } = await placeAlipayFiatOrder(buyerClient, card.merchantAddr, card.productId, amountBig, buyerNameHash, buyerIdHash);
+        if (!buyerBinding?.isSet) throw new Error('Buyer binding not set — UI gate bypassed.');
+        const { orderId } = await placeAlipayFiatOrder(
+          buyerClient, card.merchantAddr, card.productId, amountBig,
+          buyerBinding.nameHash, buyerBinding.idHash,
+        );
         addLog(`Order placed — orderId=${orderId}  USDT locked.`);
         addLog('Merchant must now pay CNY and submit Alipay proof (see Merchant Panel).', 'success');
         setDone(true);
@@ -759,42 +787,129 @@ function ProductDetailModal({
             </div>
           </div>
 
-          {card.direction === 'Fiat' && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
-              <div>
-                <label style={S.label}>
-                  {card.platformName} display name <span style={{ color: COLOR.danger }}>*</span>
-                </label>
-                <input
-                  type="text"
-                  value={buyerName}
-                  onChange={(e) => setBuyerName(e.target.value)}
-                  placeholder="e.g. JOHN DOE"
-                  style={S.input}
-                  disabled={running}
+          {/* Buyer payment binding panel — required for BOTH directions by the contract */}
+          {(() => {
+            const buyerClient = selectedUserAddress ? getUserClientByAddress(selectedUserAddress) : null;
+            if (!selectedUserAddress) return null;
+            if (buyerBindingLoading) {
+              return (
+                <div style={{
+                  marginBottom: 16,
+                  padding: '10px 14px',
+                  background: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 8,
+                  fontSize: 12,
+                  color: '#64748b',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}>
+                  <Spinner size={12} />
+                  Checking your {card.platformName} binding…
+                </div>
+              );
+            }
+            if (buyerBinding?.isSet) {
+              const pt = loadBindingPlaintext(selectedUserAddress as Hex, card.platformId);
+              return (
+                <div style={{
+                  marginBottom: 16,
+                  padding: '12px 14px',
+                  background: '#f0fdf4',
+                  border: '1px solid #bbf7d0',
+                  borderRadius: 8,
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 10,
+                }}>
+                  <span aria-hidden style={{
+                    flexShrink: 0,
+                    width: 18, height: 18, borderRadius: '50%',
+                    background: '#15803d', color: '#fff',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 11, fontWeight: 700, marginTop: 1,
+                  }}>✓</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#15803d', lineHeight: 1.4 }}>
+                      Using your bound {card.platformName} account
+                    </div>
+                    {pt ? (
+                      <div style={{ fontSize: 13, color: '#166534', marginTop: 4, lineHeight: 1.5 }}>
+                        {pt.name}
+                        <span style={{ color: '#86efac', margin: '0 6px' }}>·</span>
+                        <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
+                          {pt.handle}
+                        </span>
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: '#16a34a', marginTop: 4, fontStyle: 'italic', lineHeight: 1.5 }}>
+                        Plaintext not cached in this browser — on-chain hash will still be used.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+            // Not set → render inline BindingRow in compact mode
+            const view: BindingView = {
+              ...(buyerBinding ?? { nameHash: '0x0' as Hex, idHash: '0x0' as Hex, isSet: false }),
+              platformId:    card.platformId,
+              platformLabel: card.platformName,
+              plaintext:     null,
+            };
+            return (
+              <div style={{
+                marginBottom: 16,
+                padding: 14,
+                background: '#fffbeb',
+                border: '1px solid #fde68a',
+                borderRadius: 10,
+              }}>
+                <div style={{
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: '#92400e',
+                  marginBottom: 4,
+                  lineHeight: 1.4,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}>
+                  <span aria-hidden>⚠</span>
+                  {card.platformName} account not set
+                </div>
+                <div style={{
+                  fontSize: 12,
+                  color: '#a16207',
+                  marginBottom: 12,
+                  lineHeight: 1.5,
+                }}>
+                  Bind your {card.platformName} account on-chain (hashed) before placing this order — required by the contract.
+                </div>
+                <BindingRow
+                  binding={view}
+                  walletClient={buyerClient ?? undefined}
+                  onChange={() => setBindingReloadKey((k) => k + 1)}
+                  defaultOpen
+                  compact
                 />
               </div>
-              <div>
-                <label style={S.label}>
-                  {card.platformName} {card.platformId === PLATFORM_WISE ? 'handle' : 'account'} <span style={{ color: COLOR.danger }}>*</span>
-                </label>
-                <input
-                  type="text"
-                  value={buyerHandle}
-                  onChange={(e) => setBuyerHandle(e.target.value)}
-                  placeholder={card.platformId === PLATFORM_WISE ? '@handle' : 'phone/email'}
-                  style={S.input}
-                  disabled={running}
-                />
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Action buttons */}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: log.length > 0 ? 16 : 0 }}>
               <button
-                style={S.btn(COLOR.primary, running || !card.isOpen || demoUserAddresses.length === 0 || !!bondBpsError)}
-                disabled={running || !card.isOpen || demoUserAddresses.length === 0 || !!bondBpsError}
+                style={S.btn(
+                  COLOR.primary,
+                  running || !card.isOpen || demoUserAddresses.length === 0 || !!bondBpsError
+                    || !buyerBinding?.isSet || buyerBindingLoading,
+                )}
+                disabled={
+                  running || !card.isOpen || demoUserAddresses.length === 0 || !!bondBpsError
+                  || !buyerBinding?.isSet || buyerBindingLoading
+                }
                 onClick={handlePlaceOrderClick}
               >
                 {running ? <><Spinner />Processing…</> : 'Place Order'}
