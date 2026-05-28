@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { verifyVerifierSignature } from './verifySignature';
-import type { ProofExportResponse } from './proofsApi';
+import type { ProofExportResponse } from './proof';
 
 const REFERENCE_SID = '0006da30-2050-49a0-8d22-965e5f5c0daa';
 const REFERENCE_SIGNER = '0xa0ee7a142d267c1f36714e4a8f75612f20a79720';
