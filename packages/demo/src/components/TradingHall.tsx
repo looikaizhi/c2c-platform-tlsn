@@ -10,51 +10,21 @@ import {
   loadBindingPlaintext,
   type BindingView,
   type PlatformBinding,
-} from '../utils/userBindingActions';
+} from '../utils/services';
 import { BindingRow } from './BindingRow';
-import { publicClient, getUserClientByAddress, hardhatChain } from '../utils/hardhatAccounts';
-import { patchProofTx } from '../utils/proofsApi';
-import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '../utils/c2cAbi';
-import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
-import { getDemoUserAddresses } from '../utils/demoUsers';
-import { decodeContractError, formatContractAwareError } from '../utils/contractErrors';
-import { buildProofDebugSnapshot, type ExtensionProveResponse } from '../utils/proofTransformer';
-
-/**
- * Backfill verifier proof_store with txHash (PATCH /proof/:id/tx).
- * Best-effort — 409 = already-committed (skip), other errors logged but not thrown.
- * See PROOF_AUDIT_PLAN §5.5.
- */
-async function backfillProofsTx(
-  proofs: ExtensionProveResponse[],
-  txHash: Hex,
-  userAddr: Hex,
-  addLog: (m: string, level?: 'info' | 'success' | 'error') => void,
-): Promise<void> {
-  const sids = Array.from(
-    new Set(
-      proofs
-        .map((p) => p?.verifierSignature?.sessionId)
-        .filter((s): s is string => !!s),
-    ),
-  );
-  if (sids.length === 0) return;
-  const results = await Promise.allSettled(
-    sids.map((sid) => patchProofTx(sid, txHash, hardhatChain.id, userAddr)),
-  );
-  const failed: string[] = [];
-  results.forEach((r, i) => {
-    if (r.status === 'fulfilled' && (r.value.ok || r.value.alreadyCommitted)) return;
-    const reason =
-      r.status === 'fulfilled' ? String(r.value.status) : String((r.reason as any)?.message ?? r.reason);
-    failed.push(`${sids[i]} → ${reason}`);
-  });
-  if (failed.length) {
-    addLog(`⚠ ${failed.length}/${sids.length} 链上回填失败(不影响留存): ${failed.join('; ')}`);
-  } else {
-    addLog(`链上回填完成 (${sids.length} session)`);
-  }
-}
+import {
+  publicClient,
+  getUserClientByAddress,
+  hardhatChain,
+  addresses as c2cConfig,
+  isConfigured as isC2CConfigured,
+  decodeContractError,
+} from '../utils/chain';
+import { getDemoUserAddresses } from '../utils/chain';
+import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '../utils/abis';
+import { buildProofDebugSnapshot, backfillProofTx } from '../utils/proof';
+import { fiatEstimate, formatUserFacingError } from '../utils/lib';
+import { tryGetAdapter } from '../utils/platforms';
 import {
   placeWiseCryptoOrder,
   placeWiseFiatOrder,
@@ -238,31 +208,16 @@ const S = {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function resolvePlatformName(platformId: Hex): string {
-  if (platformId === PLATFORM_WISE)   return 'Wise';
-  if (platformId === PLATFORM_ALIPAY) return 'Alipay';
-  return platformId.slice(0, 10) + '…';
+  return tryGetAdapter(platformId)?.label ?? `${platformId.slice(0, 10)}…`;
 }
 
 function getCurrencyForPlatform(platformId: Hex): string {
-  if (platformId === PLATFORM_WISE)   return 'MYR';
-  if (platformId === PLATFORM_ALIPAY) return 'CNY';
-  return 'FIAT';
+  return tryGetAdapter(platformId)?.currency ?? 'FIAT';
 }
 
 function rateDisplay(c: ProductCard): string {
   const curr = getCurrencyForPlatform(c.platformId);
   return `${(Number(c.rate) / 1e8).toFixed(3)} ${curr}/USDT`;
-}
-
-function fiatEstimate(rate: bigint, assetType: 0 | 1, usdtAmount: number, curr: string): string {
-  if (!usdtAmount || usdtAmount <= 0) return '—';
-  void assetType;
-  const fiat = usdtAmount * (Number(rate) / 1e8);
-  return `≈ ${fiat.toFixed(2)} ${curr}`;
-}
-
-function formatUserFacingError(err: unknown): string {
-  return formatContractAwareError(err);
 }
 
 function Spinner({ size = 14 }: { size?: number }) {
@@ -604,7 +559,12 @@ function ProductDetailModal({
         addLog('Proofs generated, submitting to contract…');
         const txHash = await submitWiseCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, contacts, transfer);
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
-        await backfillProofsTx([contacts, transfer], txHash, buyerAddr, addLog);
+        {
+          const r = await backfillProofTx([contacts, transfer], txHash, buyerAddr, hardhatChain.id);
+          const total = r.patched + r.alreadyCommitted + r.failed;
+          if (r.failed) addLog(`⚠ ${r.failed}/${total} 链上回填失败(不影响留存): ${r.failures.join('; ')}`);
+          else addLog(`链上回填完成 (${total} session)`);
+        }
         setDone(true);
 
       } else if (card.platformId === PLATFORM_WISE && card.direction === 'Fiat') {
@@ -631,7 +591,12 @@ function ProductDetailModal({
         addLog('Proof generated, submitting to contract…');
         const txHash = await submitAlipayCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, proof);
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
-        await backfillProofsTx([proof], txHash, buyerAddr, addLog);
+        {
+          const r = await backfillProofTx([proof], txHash, buyerAddr, hardhatChain.id);
+          const total = r.patched + r.alreadyCommitted + r.failed;
+          if (r.failed) addLog(`⚠ ${r.failed}/${total} 链上回填失败(不影响留存): ${r.failures.join('; ')}`);
+          else addLog(`链上回填完成 (${total} session)`);
+        }
         setDone(true);
 
       } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Fiat') {

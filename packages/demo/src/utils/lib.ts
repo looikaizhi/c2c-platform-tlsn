@@ -35,6 +35,24 @@ export function fmt4(balance: bigint, decimals: number): string {
   return `${whole.toString()}.${fracStr}`;
 }
 
+/**
+ * Estimate the fiat equivalent of a USDT amount given an on-chain rate
+ * (8-decimal fixed-point). Used by TradingHall product cards and the order
+ * preview form. Returns "—" for non-positive inputs.
+ */
+export function fiatEstimate(
+  rate: bigint,
+  // `assetType` kept in the signature for caller-side symmetry with on-chain
+  // (CRYPTO/FIAT direction); same formula either way.
+  _assetType: 0 | 1,
+  usdtAmount: number,
+  curr: string,
+): string {
+  if (!usdtAmount || usdtAmount <= 0) return '—';
+  const fiat = usdtAmount * (Number(rate) / 1e8);
+  return `≈ ${fiat.toFixed(2)} ${curr}`;
+}
+
 // ─── Error formatting (single source of truth) ──────────────────────────────
 
 /**
