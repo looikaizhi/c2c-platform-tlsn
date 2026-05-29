@@ -894,20 +894,17 @@ export interface BackfillResult {
   failures: string[];
 }
 
-export async function backfillProofTx(
-  proofs: ExtensionProveResponse[],
+/**
+ * Direct sessionIds variant — used by callers (UserPanel) that have already
+ * extracted session ids (e.g. from a stored PaymentProofArtifact) and don't
+ * need the proofs[] array anymore. Behavior identical to backfillProofTx.
+ */
+export async function backfillSessionIds(
+  sessionIds: string[],
   txHash: Hex,
   signerAddr: Hex,
   chainId: number,
 ): Promise<BackfillResult> {
-  const sessionIds = Array.from(
-    new Set(
-      proofs
-        .map((p) => p?.verifierSignature?.sessionId)
-        .filter((s): s is string => !!s),
-    ),
-  );
-
   if (sessionIds.length === 0) {
     return { patched: 0, alreadyCommitted: 0, failed: 0, failures: [] };
   }
@@ -943,3 +940,20 @@ export async function backfillProofTx(
     failures,
   };
 }
+
+export async function backfillProofTx(
+  proofs: ExtensionProveResponse[],
+  txHash: Hex,
+  signerAddr: Hex,
+  chainId: number,
+): Promise<BackfillResult> {
+  const sessionIds = Array.from(
+    new Set(
+      proofs
+        .map((p) => p?.verifierSignature?.sessionId)
+        .filter((s): s is string => !!s),
+    ),
+  );
+  return backfillSessionIds(sessionIds, txHash, signerAddr, chainId);
+}
+

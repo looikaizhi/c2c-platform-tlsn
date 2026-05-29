@@ -9,13 +9,20 @@ import {
   getUserClientByAddress,
   MERCHANT_ADDRESSES,
   publicClient,
-} from '../utils/hardhatAccounts';
-import { C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, C2C_BOND_VAULT_ABI, ERC20_ABI } from '../utils/c2cAbi';
-import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+  hardhatChain,
+  addresses as c2cConfig,
+  isConfigured as isC2CConfigured,
+  getDemoUserAddresses,
+  normalizeOrder,
+} from '../utils/chain';
+import {
+  C2C_ESCROW_ABI,
+  C2C_RISK_MANAGER_ABI,
+  C2C_BOND_VAULT_ABI,
+  ERC20_ABI,
+} from '../utils/abis';
 import { ReputationBadge, type ReputationView } from './ReputationBadge';
 import { claimBond } from '../utils/wiseC2cActions';
-import { getDemoUserAddresses } from '../utils/demoUsers';
-import { normalizeOrder } from '../utils/orderView';
 import {
   generateWiseCryptoProof,
   makeWiseCryptoBindingContext,
@@ -28,21 +35,21 @@ import {
   PLATFORM_ALIPAY,
   submitAlipayCryptoProof,
 } from '../utils/alipayC2cActions';
-import { getAllUserBindings, type BindingView } from '../utils/userBindingActions';
+import { getAllUserBindings, type BindingView } from '../utils/services';
 import { BindingRow } from './BindingRow';
 import {
   buildPaymentProofArtifactStorageKey,
   PAYMENT_PROOF_ARTIFACT_SCHEMA_VERSION,
+  backfillSessionIds,
+  computeOrderBindingHash,
+  loginAsUser,
+  ZERO_HASH_32,
   type PaymentProofArtifactV1,
-} from '../utils/paymentProofArtifact';
-import { computeOrderBindingHash, type ExtensionProveResponse } from '../utils/proofTransformer';
-import { loginAsUser } from '../utils/verifierAuth';
-import { patchProofTx } from '../utils/proofsApi';
-import { hardhatChain } from '../utils/hardhatAccounts';
+  type ExtensionProveResponse,
+} from '../utils/proof';
+import { fmt4, formatUserFacingError } from '../utils/lib';
+import { tryGetAdapter } from '../utils/platforms';
 import { MyProofs } from './MyProofs';
-
-// -- Constants ---------------------------------------------------------------
-const ZERO_HASH_32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as Hex;
 
 // -- Design tokens -----------------------------------------------------------
 const CARD: React.CSSProperties = {
@@ -80,62 +87,8 @@ const STATUS_STYLE: Record<number, { bg: string; color: string; label: string }>
 
 // -- Helpers -----------------------------------------------------------------
 /** Format a token balance to exactly 4 decimal places using the token's real decimals. */
-function fmt4(balance: bigint, decimals: number): string {
-  return parseFloat(formatUnits(balance, decimals)).toFixed(4);
-}
-
 function resolvePlatformLabel(platformId: Hex): string {
-  if (platformId === PLATFORM_WISE) return 'Wise';
-  if (platformId === PLATFORM_ALIPAY) return 'Alipay';
-  return `${platformId.slice(0, 10)}...`;
-}
-
-function formatUserFacingError(err: unknown): string {
-  const e = err as any;
-  return (
-    e?.details ||
-    e?.cause?.message ||
-    e?.message ||
-    e?.shortMessage ||
-    String(err)
-  );
-}
-
-/**
- * Backfill verifier proof_store rows with on-chain txHash so audit UI can
- * filter on `status=committed`. Best-effort: 409 = already committed (skip),
- * any other failure becomes a console warning — does NOT roll back the on-chain payment.
- */
-async function backfillTx(
-  sessionIds: string[],
-  txHash: Hex,
-  userAddr: Hex,
-  onLog: (message: string) => void,
-): Promise<void> {
-  if (sessionIds.length === 0) return;
-  const results = await Promise.allSettled(
-    sessionIds.map((sid) =>
-      patchProofTx(sid, txHash, hardhatChain.id, userAddr),
-    ),
-  );
-  const failed: string[] = [];
-  let alreadyCount = 0;
-  results.forEach((r, i) => {
-    if (r.status === 'fulfilled') {
-      if (r.value.alreadyCommitted) alreadyCount += 1;
-      else if (!r.value.ok) failed.push(`${sessionIds[i]} → ${r.value.status}`);
-    } else {
-      failed.push(`${sessionIds[i]} → ${(r.reason as any)?.message ?? r.reason}`);
-    }
-  });
-  if (alreadyCount > 0) {
-    onLog(`ℹ ${alreadyCount}/${sessionIds.length} 链上回填已完成(409,跳过)`);
-  }
-  if (failed.length) {
-    onLog(`⚠ ${failed.length}/${sessionIds.length} 链上回填失败(不影响留存): ${failed.join('; ')}`);
-  } else {
-    onLog(`链上回填完成 (${sessionIds.length} session)`);
-  }
+  return tryGetAdapter(platformId)?.label ?? `${platformId.slice(0, 10)}...`;
 }
 
 function extractSessionIds(proofs: ExtensionProveResponse[]): string[] {
@@ -713,9 +666,18 @@ function UserTab({ address }: { address: Hex }) {
         : '⚠ Submitted, but local proof artifact save failed.');
 
       // Backfill txHash → verifier proof_store (best-effort, see PROOF_AUDIT_PLAN §5.5)
-      await backfillTx(artifact.sessionIds, txHash, checkedAddress, (m) =>
-        appendOrderLog(orderKey, m),
-      );
+      {
+        const r = await backfillSessionIds(artifact.sessionIds, txHash, checkedAddress, hardhatChain.id);
+        const total = r.patched + r.alreadyCommitted + r.failed;
+        if (r.alreadyCommitted > 0) {
+          appendOrderLog(orderKey, `ℹ ${r.alreadyCommitted}/${total} 链上回填已完成(409,跳过)`);
+        }
+        if (r.failed > 0) {
+          appendOrderLog(orderKey, `⚠ ${r.failed}/${total} 链上回填失败(不影响留存): ${r.failures.join('; ')}`);
+        } else {
+          appendOrderLog(orderKey, `链上回填完成 (${total} session)`);
+        }
+      }
 
       updateRowState(orderKey, (prev) => ({
         ...prev,

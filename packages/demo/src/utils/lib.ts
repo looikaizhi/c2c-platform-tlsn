@@ -7,6 +7,7 @@
 // (fiatEstimate, etc.) are added incrementally by each Phase 6.X commit
 // when the consuming panel actually needs them.
 
+import { formatUnits } from 'viem';
 import { formatContractAwareError } from './chain';
 
 // ─── Format ─────────────────────────────────────────────────────────────────
@@ -23,16 +24,15 @@ export function truncateAddr(addr: string, front = 6, back = 4): string {
 }
 
 /**
- * Format a token balance to exactly 4 fractional digits.
+ * Format a token balance to exactly 4 fractional digits (rounded).
  *
  * `decimals` is the ERC-20 decimals of the token (6 for USDT/USDC, 18 for DAI).
- * No rounding — we slice the fractional part so display matches the raw value.
+ * Implementation matches UserPanel's pre-Phase-6 inline `fmt4`: viem.formatUnits
+ * → parseFloat → toFixed(4) — so the user-visible balance values stay identical
+ * after panels move off the inline copy.
  */
 export function fmt4(balance: bigint, decimals: number): string {
-  const denom    = 10n ** BigInt(decimals);
-  const whole    = balance / denom;
-  const fracStr  = (balance % denom).toString().padStart(decimals, '0').slice(0, 4);
-  return `${whole.toString()}.${fracStr}`;
+  return parseFloat(formatUnits(balance, decimals)).toFixed(4);
 }
 
 /**
