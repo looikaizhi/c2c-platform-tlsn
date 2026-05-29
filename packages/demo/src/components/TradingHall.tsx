@@ -25,6 +25,7 @@ import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '
 import { buildProofDebugSnapshot, backfillProofTx } from '../utils/proof';
 import { fiatEstimate, formatUserFacingError } from '../utils/lib';
 import { tryGetAdapter } from '../utils/platforms';
+import { Spinner } from './ui';
 import {
   placeWiseCryptoOrder,
   placeWiseFiatOrder,
@@ -218,16 +219,6 @@ function getCurrencyForPlatform(platformId: Hex): string {
 function rateDisplay(c: ProductCard): string {
   const curr = getCurrencyForPlatform(c.platformId);
   return `${(Number(c.rate) / 1e8).toFixed(3)} ${curr}/USDT`;
-}
-
-function Spinner({ size = 14 }: { size?: number }) {
-  return (
-    <span style={{ display: 'inline-block', width: size, height: size }}>
-      <svg viewBox="0 0 24 24" style={{ animation: 'spin 0.8s linear infinite', width: size, height: size }}>
-        <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="3" strokeDasharray="31.4" strokeDashoffset="10" />
-      </svg>
-    </span>
-  );
 }
 
 // ─── SkeletonRow ──────────────────────────────────────────────────────────────
