@@ -22,20 +22,20 @@ import {
   ERC20_ABI,
 } from '../utils/abis';
 import { ReputationBadge, type ReputationView } from './ReputationBadge';
-import { claimBond } from '../utils/wiseC2cActions';
 import {
-  generateWiseCryptoProof,
-  makeWiseCryptoBindingContext,
+  claimBond,
+  getAllUserBindings,
+  makeBindingContext,
+  submitPaymentProofs,
+  type BindingView,
+} from '../utils/services';
+import {
   PLATFORM_WISE,
-  submitWiseCryptoProof,
-} from '../utils/wiseC2cActions';
-import {
-  generateAlipayCryptoProof,
-  makeAlipayCryptoBindingContext,
   PLATFORM_ALIPAY,
-  submitAlipayCryptoProof,
-} from '../utils/alipayC2cActions';
-import { getAllUserBindings, type BindingView } from '../utils/services';
+  getAdapter,
+  runPaymentPlugin,
+} from '../utils/platforms';
+import { qk, useInvalidateAfterTx } from '../utils/hooks';
 import { BindingRow } from './BindingRow';
 import {
   buildPaymentProofArtifactStorageKey,
@@ -45,6 +45,7 @@ import {
   loginAsUser,
   ZERO_HASH_32,
   type PaymentProofArtifactV1,
+  type PaymentProofPayloadV1,
   type ExtensionProveResponse,
 } from '../utils/proof';
 import { fmt4, formatUserFacingError } from '../utils/lib';
@@ -356,6 +357,7 @@ function CopyButton({ text }: { text: string }) {
 
 // -- Per-user tab ------------------------------------------------------------
 function UserTab({ address }: { address: Hex }) {
+  const invalidate = useInvalidateAfterTx();
   const [data, setData] = useState<UserData | null>(null);
   const [loading, setLoading] = useState(false);
   const [rowStates, setRowStates] = useState<Record<string, ProofActionState>>({});
@@ -505,118 +507,76 @@ function UserTab({ address }: { address: Hex }) {
         throw new Error(`No local wallet client found for user ${checkedAddress}.`);
       }
 
-      const isWise = order.platformId === PLATFORM_WISE;
-      const isAlipay = order.platformId === PLATFORM_ALIPAY;
-      if (!isWise && !isAlipay) {
-        throw new Error(`Unsupported platform for buyer proof flow: ${order.platformId}`);
-      }
+      // PlatformAdapter-driven proof flow (Phase 6.3c). Single code path for
+      // any registered platform; the adapter's proofShape governs whether the
+      // plugin yields one or two proofs.
+      const adapter = getAdapter(order.platformId);
 
       appendOrderLog(orderKey, 'Building order binding context...');
+      const ctx = await makeBindingContext(
+        adapter,
+        order.merchantAddress,
+        checkedAddress,
+        order.productId,
+        order.assetType,
+        order.amount,
+        order.orderId,
+      );
+      const bindingHash = computeOrderBindingHash(ctx);
+      appendOrderLog(orderKey, `Binding hash ready: ${bindingHash.slice(0, 12)}...`);
+      appendOrderLog(orderKey, `Launching ${adapter.label} TLSN plugin...`);
 
-      let txHash: Hex;
-      let artifact: PaymentProofArtifactV1;
+      const platformProof = await runPaymentPlugin(adapter, ctx);
+      const proofsArr     = platformProof.shape === 'single'
+        ? [platformProof.data]
+        : [platformProof.data.contacts, platformProof.data.transfer];
 
-      if (isWise) {
-        const ctx = await makeWiseCryptoBindingContext(
-          order.merchantAddress,
-          checkedAddress,
-          order.productId,
-          order.amount,
-          order.orderId,
-        );
-        const bindingHash = computeOrderBindingHash(ctx);
-        appendOrderLog(orderKey, `Binding hash ready: ${bindingHash.slice(0, 12)}...`);
-        appendOrderLog(orderKey, 'Launching Wise TLSN plugin...');
+      appendOrderLog(
+        orderKey,
+        proofsArr.length === 2 ? 'Proofs generated, submitting on-chain...' : 'Proof generated, submitting on-chain...',
+      );
 
-        const { contacts, transfer } = await generateWiseCryptoProof(ctx);
-        appendOrderLog(orderKey, 'Proofs generated, submitting on-chain...');
+      const txHash: Hex = await submitPaymentProofs(walletClient, {
+        merchant:  order.merchantAddress,
+        productId: order.productId,
+        orderId:   order.orderId,
+        proofs:    proofsArr,
+      });
 
-        txHash = await submitWiseCryptoProof(
-          walletClient,
-          order.merchantAddress,
-          order.productId,
-          order.orderId,
-          contacts,
-          transfer,
-        );
+      const proofsPayload: PaymentProofPayloadV1 = platformProof.shape === 'contacts+transfer'
+        ? {
+            type:          'wise',
+            contactsProof: platformProof.data.contacts,
+            transferProof: platformProof.data.transfer,
+          }
+        : {
+            type:  'alipay',
+            proof: platformProof.data,
+          };
 
-        artifact = {
-          schemaVersion: PAYMENT_PROOF_ARTIFACT_SCHEMA_VERSION,
-          createdAt: new Date().toISOString(),
-          order: {
-            buyer: checkedAddress,
-            merchant: order.merchantAddress,
-            productId: order.productId.toString(),
-            orderId: order.orderId.toString(),
-            assetType: order.assetType,
-            amount: order.amount.toString(),
-            rate: order.rate.toString(),
-            rateVersion: order.rateVersion,
-            deadline: order.deadline.toString(),
-          },
-          platform: {
-            platformId: order.platformId,
-            platformLabel: order.platformLabel,
-          },
-          orderBindingHash: bindingHash,
-          sessionIds: extractSessionIds([contacts, transfer]),
-          txHash,
-          proofs: {
-            type: 'wise',
-            contactsProof: contacts,
-            transferProof: transfer,
-          },
-        };
-      } else {
-        const ctx = await makeAlipayCryptoBindingContext(
-          order.merchantAddress,
-          checkedAddress,
-          order.productId,
-          order.amount,
-          order.orderId,
-        );
-        const bindingHash = computeOrderBindingHash(ctx);
-        appendOrderLog(orderKey, `Binding hash ready: ${bindingHash.slice(0, 12)}...`);
-        appendOrderLog(orderKey, 'Launching Alipay TLSN plugin...');
-
-        const proof = await generateAlipayCryptoProof(ctx);
-        appendOrderLog(orderKey, 'Proof generated, submitting on-chain...');
-
-        txHash = await submitAlipayCryptoProof(
-          walletClient,
-          order.merchantAddress,
-          order.productId,
-          order.orderId,
-          proof,
-        );
-
-        artifact = {
-          schemaVersion: PAYMENT_PROOF_ARTIFACT_SCHEMA_VERSION,
-          createdAt: new Date().toISOString(),
-          order: {
-            buyer: checkedAddress,
-            merchant: order.merchantAddress,
-            productId: order.productId.toString(),
-            orderId: order.orderId.toString(),
-            assetType: order.assetType,
-            amount: order.amount.toString(),
-            rate: order.rate.toString(),
-            rateVersion: order.rateVersion,
-            deadline: order.deadline.toString(),
-          },
-          platform: {
-            platformId: order.platformId,
-            platformLabel: order.platformLabel,
-          },
-          orderBindingHash: bindingHash,
-          sessionIds: extractSessionIds([proof]),
-          txHash,
-          proofs: {
-            type: 'alipay',
-            proof,
-          },
-        };
-      }
+      const artifact: PaymentProofArtifactV1 = {
+        schemaVersion: PAYMENT_PROOF_ARTIFACT_SCHEMA_VERSION,
+        createdAt:     new Date().toISOString(),
+        order: {
+          buyer:       checkedAddress,
+          merchant:    order.merchantAddress,
+          productId:   order.productId.toString(),
+          orderId:     order.orderId.toString(),
+          assetType:   order.assetType,
+          amount:      order.amount.toString(),
+          rate:        order.rate.toString(),
+          rateVersion: order.rateVersion,
+          deadline:    order.deadline.toString(),
+        },
+        platform: {
+          platformId:    order.platformId,
+          platformLabel: order.platformLabel,
+        },
+        orderBindingHash: bindingHash,
+        sessionIds:       extractSessionIds(proofsArr),
+        txHash,
+        proofs:           proofsPayload,
+      };
 
       const saved = saveStoredArtifact(orderKey, artifact);
       setSavedArtifacts((prev) => ({ ...prev, [orderKey]: artifact }));
@@ -646,6 +606,10 @@ function UserTab({ address }: { address: Hex }) {
         txHash,
         artifactSaved: saved,
       }));
+
+      // Write-after-invalidate (C17): make any panel using these query keys
+      // pick up the new on-chain state within the next render cycle.
+      invalidate([qk.user(checkedAddress), qk.merchant(order.merchantAddress), qk.products()]);
 
       setTimeout(() => { reload(); }, 800);
     } catch (err) {

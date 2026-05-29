@@ -23,6 +23,7 @@ import {
 } from './chain';
 import {
   C2C_ADMIN_ABI,
+  C2C_BOND_VAULT_ABI,
   C2C_ESCROW_ABI,
   C2C_RISK_MANAGER_ABI,
   ERC20_ABI,
@@ -487,4 +488,25 @@ export async function submitPaymentProofs(
       ].join(' | '),
     );
   }
+}
+
+// ─── claimBond (= wiseC2cActions.claimBond, platform-agnostic) ──────────────
+//
+// Buyer or merchant claims their accrued bond from BondVault for `tokenAddress`
+// (typically USDT). Returns the tx hash after waitForTransactionReceipt.
+
+export async function claimBond(
+  callerClient: WalletClient,
+  tokenAddress: Hex,
+): Promise<Hex> {
+  const hash = await callerClient.writeContract({
+    account:      callerClient.account!,
+    chain,
+    address:      addresses.bondVaultAddress,
+    abi:          C2C_BOND_VAULT_ABI,
+    functionName: 'claim',
+    args:         [tokenAddress],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return hash;
 }
