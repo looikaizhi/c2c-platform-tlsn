@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { DeployPanel }   from './components/DeployPanel';
 import { AdminPanel }    from './components/AdminPanel';
 import { MerchantPanel } from './components/MerchantPanel';
@@ -13,16 +14,14 @@ import { HowItWorks }    from './components/HowItWorks';
 import { WhyPlugins }    from './components/WhyPlugins';
 import { BuildYourOwn }  from './components/BuildYourOwn';
 import { plugins }       from './plugins';
-import { checkBrowserCompatibility, checkExtension, checkVerifier, formatTimestamp } from './utils';
-import { ConsoleEntry, CheckStatus, PluginResult as PluginResultType } from './types';
+import { checkBrowserCompatibility, checkExtension, checkVerifier } from './utils';
+import { CheckStatus, PluginResult as PluginResultType } from './types';
+import { queryClient } from './utils/hooks';
+import { useConsoleStore } from './utils/store';
 import './App.css';
 
 export function App() {
-    const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([{
-        timestamp: formatTimestamp(),
-        message: '💡 TLSNotary C2C Demo — deploy contracts with the Deploy Panel, then use the Trading Hall.',
-        type: 'info',
-    }]);
+    const append = useConsoleStore((s) => s.append);
 
     const [browserCheck, setBrowserCheck]   = useState<{ status: CheckStatus; message: string }>({ status: 'checking', message: 'Checking…' });
     const [extensionCheck, setExtensionCheck] = useState<{ status: CheckStatus; message: string }>({ status: 'checking', message: 'Checking…' });
@@ -32,18 +31,6 @@ export function App() {
     const [runningPlugins, setRunningPlugins] = useState<Set<string>>(new Set());
     const [pluginResults, setPluginResults]   = useState<Record<string, { resultHtml: string; debugJson: string }>>({});
     const [consoleExpanded, setConsoleExpanded] = useState(false);
-
-    const addConsoleEntry = useCallback((message: string, type: ConsoleEntry['type'] = 'info') => {
-        setConsoleEntries((prev) => [...prev, { timestamp: formatTimestamp(), message, type }]);
-    }, []);
-
-    const handleClearConsole = useCallback(() => {
-        setConsoleEntries([{ timestamp: formatTimestamp(), message: 'Console cleared', type: 'info' }]);
-    }, []);
-
-    const handleOpenExtensionLogs = useCallback(() => {
-        window.open('chrome://extensions/', '_blank');
-    }, []);
 
     const runAllChecks = useCallback(async () => {
         const browserOk = checkBrowserCompatibility();
@@ -84,7 +71,7 @@ export function App() {
             const startTime = performance.now();
             const pluginCode = await fetch(plugin.file).then((r) => r.text());
 
-            addConsoleEntry('🔧 Executing plugin code...', 'info');
+            append('🔧 Executing plugin code...', 'info');
             const result = await window.tlsn!.execCode(pluginCode);
             const executionTime = (performance.now() - startTime).toFixed(2);
 
@@ -102,10 +89,10 @@ export function App() {
                 },
             }));
 
-            addConsoleEntry(`✅ ${plugin.name} completed successfully in ${executionTime}ms`, 'success');
+            append(`✅ ${plugin.name} completed successfully in ${executionTime}ms`, 'success');
         } catch (err) {
             console.error(err);
-            addConsoleEntry(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, 'error');
+            append(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, 'error');
         } finally {
             setRunningPlugins((prev) => {
                 const newSet = new Set(prev);
@@ -113,16 +100,16 @@ export function App() {
                 return newSet;
             });
         }
-    }, [addConsoleEntry]);
+    }, [append]);
 
     useEffect(() => {
-        addConsoleEntry('TLSNotary C2C Demo initialized', 'success');
-        const handleTlsnLoaded = () => addConsoleEntry('TLSNotary extension loaded', 'success');
+        append('TLSNotary C2C Demo initialized', 'success');
+        const handleTlsnLoaded = () => append('TLSNotary extension loaded', 'success');
         window.addEventListener('tlsn_loaded', handleTlsnLoaded);
 
         const handleMessage = (event: MessageEvent) => {
             if (event.origin !== window.location.origin) return;
-            if (event.data?.type === 'TLSN_OFFSCREEN_LOG') addConsoleEntry(event.data.message, event.data.level);
+            if (event.data?.type === 'TLSN_OFFSCREEN_LOG') append(event.data.message, event.data.level);
         };
         window.addEventListener('message', handleMessage);
 
@@ -132,9 +119,10 @@ export function App() {
             window.removeEventListener('tlsn_loaded', handleTlsnLoaded);
             window.removeEventListener('message', handleMessage);
         };
-    }, [runAllChecks, addConsoleEntry]);
+    }, [runAllChecks, append]);
 
     return (
+      <QueryClientProvider client={queryClient}>
         <div className="app-container">
             <div className="hero-section">
                 <h1 className="hero-title">TLSNotary C2C Demo</h1>
@@ -218,11 +206,7 @@ export function App() {
 
             {/* Console */}
             <CollapsibleSection title="Console Output" expanded={consoleExpanded}>
-                <ConsoleOutput
-                    entries={consoleEntries}
-                    onClear={handleClearConsole}
-                    onOpenExtensionLogs={handleOpenExtensionLogs}
-                />
+                <ConsoleOutput />
             </CollapsibleSection>
 
             <footer className="app-footer">
@@ -236,6 +220,7 @@ export function App() {
                 <span className="footer-version">{__GIT_COMMIT_HASH__}</span>
             </footer>
         </div>
+      </QueryClientProvider>
     );
 }
 

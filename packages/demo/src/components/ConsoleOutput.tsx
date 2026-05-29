@@ -1,12 +1,18 @@
+// packages/demo/src/components/ConsoleOutput.tsx
+//
+// Subscribes to useConsoleStore directly; takes no props. App.tsx renders
+// <ConsoleOutput /> bare. "View Extension Logs" navigation lives here now
+// (it has no parent-supplied state).
 
+import { useConsoleStore } from '../utils/store';
 
-interface ConsoleEntryProps {
+interface ConsoleEntryRowProps {
     timestamp: string;
-    message: string;
-    type: 'info' | 'success' | 'error' | 'warning';
+    message:   string;
+    type:      'info' | 'success' | 'error' | 'warning';
 }
 
-export function ConsoleEntry({ timestamp, message, type }: ConsoleEntryProps) {
+function ConsoleEntryRow({ timestamp, message, type }: ConsoleEntryRowProps) {
     return (
         <div className={`console-entry ${type}`}>
             <span className="console-timestamp">[{timestamp}]</span>
@@ -15,29 +21,30 @@ export function ConsoleEntry({ timestamp, message, type }: ConsoleEntryProps) {
     );
 }
 
-interface ConsoleOutputProps {
-    entries: ConsoleEntryProps[];
-    onClear: () => void;
-    onOpenExtensionLogs: () => void;
+function openExtensionLogs() {
+    window.open('chrome://extensions/', '_blank');
 }
 
-export function ConsoleOutput({ entries, onClear, onOpenExtensionLogs }: ConsoleOutputProps) {
+export function ConsoleOutput() {
+    const entries = useConsoleStore((s) => s.entries);
+    const clear   = useConsoleStore((s) => s.clear);
+
     return (
         <div className="console-section">
             <div className="console-header">
                 <div className="console-title">Console Output</div>
                 <div style={{ display: 'flex', gap: '10px' }}>
-                    <button className="btn-console" onClick={onOpenExtensionLogs} style={{ background: '#6c757d' }}>
+                    <button className="btn-console" onClick={openExtensionLogs} style={{ background: '#6c757d' }}>
                         View Extension Logs
                     </button>
-                    <button className="btn-console" onClick={onClear}>
+                    <button className="btn-console" onClick={clear}>
                         Clear
                     </button>
                 </div>
             </div>
             <div className="console-output" id="consoleOutput">
                 {entries.map((entry, index) => (
-                    <ConsoleEntry key={index} {...entry} />
+                    <ConsoleEntryRow key={index} {...entry} />
                 ))}
             </div>
         </div>
