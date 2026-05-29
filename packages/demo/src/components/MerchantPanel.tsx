@@ -1,17 +1,32 @@
 // packages/demo/src/components/MerchantPanel.tsx
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { formatUnits, keccak256, stringToBytes, parseUnits, parseAbiItem } from 'viem';
+import { formatUnits, keccak256, parseUnits, parseAbiItem, stringToBytes } from 'viem';
 import type { Hex, WalletClient } from 'viem';
-import { publicClient, merchantClients } from '../utils/hardhatAccounts';
-import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, C2C_BOND_VAULT_ABI, ERC20_ABI } from '../utils/c2cAbi';
-import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
-import { normalizeOrder } from '../utils/orderView';
+import {
+  publicClient,
+  merchantClients,
+  addresses as c2cConfig,
+  isConfigured as isC2CConfigured,
+  normalizeOrder,
+} from '../utils/chain';
+import {
+  C2C_ADMIN_ABI,
+  C2C_ESCROW_ABI,
+  C2C_RISK_MANAGER_ABI,
+  C2C_BOND_VAULT_ABI,
+  ERC20_ABI,
+} from '../utils/abis';
+import {
+  PLATFORM_WISE,
+  PLATFORM_ALIPAY,
+  tryGetAdapter,
+} from '../utils/platforms';
+import { claimBond } from '../utils/services';
 import {
   makeWiseFiatBindingContext,
   generateWiseFiatProof,
   submitWiseFiatProof,
-  claimBond,
 } from '../utils/wiseC2cActions';
 import {
   makeAlipayFiatBindingContext,
@@ -22,8 +37,9 @@ import { ReputationBadge } from './ReputationBadge';
 import type { ReputationView } from './ReputationBadge';
 
 // ── Platform constants ────────────────────────────────────────────────────────
-const PLATFORM_WISE   = keccak256(stringToBytes('wise'))   as Hex;
-const PLATFORM_ALIPAY = keccak256(stringToBytes('alipay')) as Hex;
+// Phase 6.4a removes the per-file local keccak256(stringToBytes('wise'|'alipay'))
+// declarations (§1.4 + §5.1 + §11 audit item C6). Single source of truth lives
+// in utils/platforms.ts and is imported above.
 const PLATFORMS = [
   { id: PLATFORM_WISE,   label: 'Wise' },
   { id: PLATFORM_ALIPAY, label: 'Alipay' },
@@ -220,14 +236,14 @@ function timeToSeconds(t: string): number {
 }
 
 function resolvePlatformLabel(id: Hex): string {
-  if (id === PLATFORM_WISE) return 'Wise';
-  if (id === PLATFORM_ALIPAY) return 'Alipay';
-  return 'Unknown';
+  return tryGetAdapter(id)?.label ?? 'Unknown';
 }
 
 function resolvePlatformVariant(id: Hex): BadgeVariant {
-  if (id === PLATFORM_WISE) return 'info';
-  if (id === PLATFORM_ALIPAY) return 'warning';
+  // Visual variant is panel-specific; mapping is by adapter tenant id.
+  const t = tryGetAdapter(id)?.tenantId;
+  if (t === 'wise')   return 'info';
+  if (t === 'alipay') return 'warning';
   return 'neutral';
 }
 
