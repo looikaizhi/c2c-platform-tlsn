@@ -1,102 +1,51 @@
 // packages/demo/src/components/DeployPanel.tsx
+//
 // Shows the contract addresses deployed automatically by `npm run dev`.
 // Deployment is handled by packages/contracts/scripts/deploy-c2c-demo.ts
 // (Node.js / Hardhat) and written to packages/demo/.env before Vite starts.
+//
+// Phase 6.1 refactor:
+//   - chain.addresses / chain.isConfigured replace c2cContractConfig shim
+//   - env reader → utils/lib.env
+//   - inline truncate / CopyButton / IconCopy / IconCheck → ui.tsx primitives
+//     (CopyButton uses the new iconOnly mode added in this commit for the
+//      28x28 icon button look used by address rows)
+//   - SectionCard / AddressRow / MetaRow / IconDot remain inline (DeployPanel-
+//     only sub-components; not worth promoting to ui.tsx)
 
-import React, { useState, useCallback } from 'react';
-import { isC2CConfigured, c2cConfig } from '../utils/c2cContractConfig';
+import React from 'react';
+import { addresses, isConfigured } from '../utils/chain';
+import { env } from '../utils/lib';
+import { truncateAddr } from '../utils/lib';
+import { CopyButton } from './ui';
 
 // ─── Env helpers ────────────────────────────────────────────────────────────
 
-const env = (import.meta as any).env as Record<string, string>;
 const verifierHost = env['VITE_VERIFIER_HOST'] || '';
-const useSSL = env['VITE_SSL'] === 'true';
-const chainId = env['VITE_CHAIN_ID'] || '';
-const verifierUrl = verifierHost
-  ? `${useSSL ? 'wss' : 'ws'}://${verifierHost}`
-  : '';
+const useSSL       = env['VITE_SSL'] === 'true';
+const chainId      = env['VITE_CHAIN_ID'] || '';
+const verifierUrl  = verifierHost ? `${useSSL ? 'wss' : 'ws'}://${verifierHost}` : '';
 
-// ─── Address helpers ─────────────────────────────────────────────────────────
-
-function truncate(addr: string): string {
-  if (!addr || addr.length <= 2) return '';
-  return `${addr.slice(0, 10)}…${addr.slice(-6)}`;
-}
+// ─── Address helper ─────────────────────────────────────────────────────────
 
 function isValidAddr(addr: string): boolean {
   return Boolean(addr && addr.length > 2);
 }
 
-// ─── SVG icons ───────────────────────────────────────────────────────────────
+// ─── IconDot (status pip) ───────────────────────────────────────────────────
 
-const IconCopy = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-  </svg>
-);
-
-const IconCheck = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-
-const IconDot = ({ color }: { color: string }) => (
-  <svg width="8" height="8" viewBox="0 0 8 8">
-    <circle cx="4" cy="4" r="4" fill={color} />
-  </svg>
-);
-
-// ─── CopyButton ───────────────────────────────────────────────────────────────
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const [hovered, setHovered] = useState(false);
-
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }, [text]);
-
+function IconDot({ color }: { color: string }) {
   return (
-    <button
-      onClick={handleCopy}
-      title={copied ? 'Copied!' : 'Copy address'}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: 28,
-        height: 28,
-        padding: 0,
-        border: 'none',
-        borderRadius: 6,
-        background: copied
-          ? '#dcfce7'
-          : hovered
-          ? '#e2e8f0'
-          : 'transparent',
-        color: copied ? '#16a34a' : '#64748b',
-        cursor: 'pointer',
-        transition: 'background 150ms ease, color 150ms ease',
-        flexShrink: 0,
-      }}
-    >
-      {copied ? <IconCheck /> : <IconCopy />}
-    </button>
+    <svg width="8" height="8" viewBox="0 0 8 8">
+      <circle cx="4" cy="4" r="4" fill={color} />
+    </svg>
   );
 }
 
-// ─── AddressRow ───────────────────────────────────────────────────────────────
+// ─── AddressRow ─────────────────────────────────────────────────────────────
 
 function AddressRow({ label, address }: { label: string; address: string }) {
   if (!isValidAddr(address)) return null;
-
   return (
     <div
       style={{
@@ -132,14 +81,14 @@ function AddressRow({ label, address }: { label: string; address: string }) {
           whiteSpace: 'nowrap',
         }}
       >
-        {truncate(address)}
+        {truncateAddr(address, 10, 6)}
       </code>
-      <CopyButton text={address} />
+      <CopyButton value={address} iconOnly />
     </div>
   );
 }
 
-// ─── SectionCard ──────────────────────────────────────────────────────────────
+// ─── SectionCard ────────────────────────────────────────────────────────────
 
 interface SectionCardProps {
   title: string;
@@ -178,7 +127,7 @@ function SectionCard({ title, accent, bg, children }: SectionCardProps) {
   );
 }
 
-// ─── MetaRow ─────────────────────────────────────────────────────────────────
+// ─── MetaRow ────────────────────────────────────────────────────────────────
 
 function MetaRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -191,37 +140,37 @@ function MetaRow({ label, value, mono = false }: { label: string; value: string;
   );
 }
 
-// ─── DeployPanel ──────────────────────────────────────────────────────────────
+// ─── DeployPanel ────────────────────────────────────────────────────────────
 
 export function DeployPanel() {
-  const configured = isC2CConfigured();
+  const configured = isConfigured();
 
-  const coreContracts: Array<{ label: string; address: string }> = [
-    { label: 'Escrow',      address: c2cConfig.escrowAddress },
-    { label: 'Admin',       address: c2cConfig.adminAddress },
-    { label: 'Verifier',    address: c2cConfig.verifierSignerAddress },
-    { label: 'RiskManager', address: c2cConfig.riskManagerAddress },
-    { label: 'BondVault',   address: c2cConfig.bondVaultAddress },
+  const coreContracts = [
+    { label: 'Escrow',      address: addresses.escrowAddress },
+    { label: 'Admin',       address: addresses.adminAddress },
+    { label: 'Verifier',    address: addresses.verifierSignerAddress },
+    { label: 'RiskManager', address: addresses.riskManagerAddress },
+    { label: 'BondVault',   address: addresses.bondVaultAddress },
   ].filter(({ address }) => isValidAddr(address));
 
-  const tokens: Array<{ label: string; address: string }> = [
-    { label: 'USDT', address: c2cConfig.usdtAddress },
-    { label: 'USDC', address: c2cConfig.usdcAddress },
-    { label: 'DAI', address: c2cConfig.daiAddress },
+  const tokenList = [
+    { label: 'USDT', address: addresses.usdtAddress },
+    { label: 'USDC', address: addresses.usdcAddress },
+    { label: 'DAI',  address: addresses.daiAddress },
   ].filter(({ address }) => isValidAddr(address));
 
-  const merchants: Array<{ label: string; address: string }> = [
-    { label: 'Merchant 1', address: c2cConfig.merchant1Address || c2cConfig.merchantAddress },
-    { label: 'Merchant 2', address: c2cConfig.merchant2Address },
-    { label: 'Merchant 3', address: c2cConfig.merchant3Address },
+  const merchants = [
+    { label: 'Merchant 1', address: addresses.merchant1Address || addresses.merchantAddress },
+    { label: 'Merchant 2', address: addresses.merchant2Address },
+    { label: 'Merchant 3', address: addresses.merchant3Address },
   ].filter(({ address }) => isValidAddr(address));
 
-  const users: Array<{ label: string; address: string }> = [
-    { label: 'User 1', address: c2cConfig.user1Address || c2cConfig.buyerAddress },
-    { label: 'User 2', address: c2cConfig.user2Address },
-    { label: 'User 3', address: c2cConfig.user3Address },
-    { label: 'User 4', address: c2cConfig.user4Address },
-    { label: 'User 5', address: c2cConfig.user5Address },
+  const users = [
+    { label: 'User 1', address: addresses.user1Address || addresses.buyerAddress },
+    { label: 'User 2', address: addresses.user2Address },
+    { label: 'User 3', address: addresses.user3Address },
+    { label: 'User 4', address: addresses.user4Address },
+    { label: 'User 5', address: addresses.user5Address },
   ].filter(({ address }) => isValidAddr(address));
 
   return (
@@ -234,16 +183,7 @@ export function DeployPanel() {
         marginBottom: 24,
       }}
     >
-      {/* ── Header ── */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-          marginBottom: 16,
-          gap: 12,
-        }}
-      >
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16, gap: 12 }}>
         <div>
           <h2 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 700, color: '#0f172a' }}>
             Deploy Panel
@@ -257,16 +197,7 @@ export function DeployPanel() {
           </p>
         </div>
 
-        {/* Status badge */}
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'flex-end',
-            gap: 4,
-            flexShrink: 0,
-          }}
-        >
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
           <div
             style={{
               display: 'inline-flex',
@@ -284,36 +215,15 @@ export function DeployPanel() {
             {configured ? 'Deployed' : 'Not Deployed'}
           </div>
           {chainId && (
-            <span
-              style={{
-                fontSize: 11,
-                color: '#94a3b8',
-                background: '#f8fafc',
-                border: '1px solid #e2e8f0',
-                borderRadius: 6,
-                padding: '2px 7px',
-              }}
-            >
+            <span style={{ fontSize: 11, color: '#94a3b8', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '2px 7px' }}>
               Chain ID: {chainId}
             </span>
           )}
         </div>
       </div>
 
-      {/* ── Verifier meta ── */}
       {verifierUrl && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 16,
-            marginBottom: 16,
-            padding: '8px 12px',
-            background: '#f8fafc',
-            borderRadius: 8,
-            border: '1px solid #e2e8f0',
-          }}
-        >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16, padding: '8px 12px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
           <MetaRow label="Verifier" value={verifierUrl} mono />
           <MetaRow label="Protocol" value={useSSL ? 'wss (TLS)' : 'ws (plain)'} />
         </div>
@@ -321,8 +231,6 @@ export function DeployPanel() {
 
       {configured ? (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
-
-          {/* Core Contracts */}
           {coreContracts.length > 0 && (
             <SectionCard title="Core Contracts" accent="#2563eb" bg="#eff6ff">
               {coreContracts.map(({ label, address }) => (
@@ -330,17 +238,13 @@ export function DeployPanel() {
               ))}
             </SectionCard>
           )}
-
-          {/* Tokens */}
-          {tokens.length > 0 && (
+          {tokenList.length > 0 && (
             <SectionCard title="Tokens" accent="#059669" bg="#f0fdf4">
-              {tokens.map(({ label, address }) => (
+              {tokenList.map(({ label, address }) => (
                 <AddressRow key={label} label={label} address={address} />
               ))}
             </SectionCard>
           )}
-
-          {/* Merchants */}
           {merchants.length > 0 && (
             <SectionCard title="Merchants" accent="#7c3aed" bg="#f5f3ff">
               {merchants.map(({ label, address }) => (
@@ -348,8 +252,6 @@ export function DeployPanel() {
               ))}
             </SectionCard>
           )}
-
-          {/* Users */}
           {users.length > 0 && (
             <SectionCard title="Users" accent="#d97706" bg="#fffbeb">
               {users.map(({ label, address }) => (
@@ -359,17 +261,7 @@ export function DeployPanel() {
           )}
         </div>
       ) : (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 12,
-            padding: '14px 16px',
-            background: '#fffbeb',
-            borderRadius: 10,
-            border: '1px solid #fde68a',
-          }}
-        >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '14px 16px', background: '#fffbeb', borderRadius: 10, border: '1px solid #fde68a' }}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
             <circle cx="12" cy="12" r="10" />
             <line x1="12" y1="8" x2="12" y2="12" />
