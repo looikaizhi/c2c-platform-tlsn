@@ -29,7 +29,7 @@ import {
   submitAlipayCryptoProof,
 } from '../utils/alipayC2cActions';
 import { getAllUserBindings, type BindingView } from '../utils/userBindingActions';
-import { BindingRow } from './binding/BindingRow';
+import { BindingRow } from './BindingRow';
 import {
   buildPaymentProofArtifactStorageKey,
   PAYMENT_PROOF_ARTIFACT_SCHEMA_VERSION,

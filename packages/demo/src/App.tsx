@@ -6,7 +6,7 @@ import { UserPanel }     from './components/UserPanel';
 import { TradingHall }   from './components/TradingHall';
 import { StatusBar }     from './components/StatusBar';
 import { SystemChecks }  from './components/SystemChecks';
-import { ConsoleOutput } from './components/Console';
+import { ConsoleOutput } from './components/ConsoleOutput';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { PluginButtons } from './components/PluginButtons';
 import { HowItWorks }    from './components/HowItWorks';

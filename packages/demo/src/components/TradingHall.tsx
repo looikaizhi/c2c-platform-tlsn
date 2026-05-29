@@ -11,7 +11,7 @@ import {
   type BindingView,
   type PlatformBinding,
 } from '../utils/userBindingActions';
-import { BindingRow } from './binding/BindingRow';
+import { BindingRow } from './BindingRow';
 import { publicClient, getUserClientByAddress, hardhatChain } from '../utils/hardhatAccounts';
 import { patchProofTx } from '../utils/proofsApi';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '../utils/c2cAbi';

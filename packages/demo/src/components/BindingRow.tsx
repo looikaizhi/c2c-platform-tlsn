@@ -1,4 +1,4 @@
-// packages/demo/src/components/binding/BindingRow.tsx
+// packages/demo/src/components/BindingRow.tsx
 //
 // Shared per-platform binding row used by UserPanel (buyer self-bind) and
 // TradingHall's ProductDetailModal (inline bind-then-order flow). Wraps
@@ -10,7 +10,7 @@ import type { Hex, WalletClient } from 'viem';
 import {
   setUserPlatformBinding,
   type BindingView,
-} from '../../utils/userBindingActions';
+} from '../utils/userBindingActions';
 
 // ─── Design tokens (kept local so this component is drop-in self-contained) ──
 
