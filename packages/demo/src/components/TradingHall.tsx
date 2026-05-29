@@ -24,24 +24,19 @@ import { getDemoUserAddresses } from '../utils/chain';
 import { C2C_ADMIN_ABI, C2C_ESCROW_ABI, C2C_RISK_MANAGER_ABI, ERC20_ABI } from '../utils/abis';
 import { buildProofDebugSnapshot, backfillProofTx } from '../utils/proof';
 import { fiatEstimate, formatUserFacingError } from '../utils/lib';
-import { tryGetAdapter } from '../utils/platforms';
-import { Spinner } from './ui';
 import {
-  placeWiseCryptoOrder,
-  placeWiseFiatOrder,
-  makeWiseCryptoBindingContext,
-  generateWiseCryptoProof,
-  submitWiseCryptoProof,
   PLATFORM_WISE,
-} from '../utils/wiseC2cActions';
+  getAdapter,
+  tryGetAdapter,
+  runPaymentPlugin,
+} from '../utils/platforms';
 import {
-  placeAlipayCryptoOrder,
-  placeAlipayFiatOrder,
-  makeAlipayCryptoBindingContext,
-  generateAlipayCryptoProof,
-  submitAlipayCryptoProof,
-  PLATFORM_ALIPAY,
-} from '../utils/alipayC2cActions';
+  placeOrder,
+  makeBindingContext,
+  submitPaymentProofs,
+} from '../utils/services';
+import { qk, useInvalidateAfterTx } from '../utils/hooks';
+import { Spinner } from './ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -333,6 +328,7 @@ function ProductDetailModal({
   onClose: () => void;
 }) {
   const demoUserAddresses = useMemo(() => getDemoUserAddresses(), []);
+  const invalidate = useInvalidateAfterTx();
   const [selectedUserAddress, setSelectedUserAddress] = useState<Hex | ''>(demoUserAddresses[0] ?? '');
   const [amount, setAmount]           = useState('1');
   const [log, setLog]                 = useState<{ msg: string; type: 'info' | 'error' | 'success' }[]>([]);
@@ -530,78 +526,83 @@ function ProductDetailModal({
       }
       const { buyerClient, buyerAddr, amountBig } = precheck;
 
-      addLog(`Placing ${card.platformName}-${card.direction} order…`);
+      // PlatformAdapter-driven flow — single code path for all
+      // (platform × direction) combinations (Phase 6.2c).
+      const adapter  = getAdapter(card.platformId);
+      const isCrypto = card.direction === 'Crypto';
 
-      if (card.platformId === PLATFORM_WISE && card.direction === 'Crypto') {
+      if (!isCrypto && !buyerBinding?.isSet) {
+        throw new Error('Buyer binding not set — UI gate bypassed.');
+      }
+      const buyerInfo = !isCrypto
+        ? { nameHash: buyerBinding!.nameHash, idHash: buyerBinding!.idHash }
+        : undefined;
+
+      addLog(`Placing ${adapter.label}-${card.direction} order…`);
+      if (isCrypto) {
         addLog('步骤 1/4: 查询保证金比率 (RiskManager.requiredBondBps)…');
         addLog('步骤 2/4: 检查并授权 BondVault (approve if needed)…');
         addLog('步骤 3/4: 提交下单 (placeOrder)…');
-        const { orderId, deadline: dl } = await placeWiseCryptoOrder(buyerClient, card.merchantAddr, card.productId, amountBig);
-        addLog(`步骤 4/4: 链上确认 — orderId=${orderId}  deadline=${new Date(Number(dl) * 1000).toLocaleTimeString()}`);
-        addLog('Building binding context (reads rateVersion from chain)…');
-        const ctx = await makeWiseCryptoBindingContext(card.merchantAddr, buyerAddr, card.productId, amountBig, orderId);
-        addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
-        addLog('Launching TLSN Wise plugin (contacts + transfer)…');
-        const { contacts, transfer } = await generateWiseCryptoProof(ctx);
-        proofDiagnostics = await Promise.all([
-          buildProofDebugSnapshot(contacts),
-          buildProofDebugSnapshot(transfer),
-        ]);
-        addLog('Proofs generated, submitting to contract…');
-        const txHash = await submitWiseCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, contacts, transfer);
-        addLog(`Transaction confirmed — tx=${txHash}`, 'success');
-        {
-          const r = await backfillProofTx([contacts, transfer], txHash, buyerAddr, hardhatChain.id);
-          const total = r.patched + r.alreadyCommitted + r.failed;
-          if (r.failed) addLog(`⚠ ${r.failed}/${total} 链上回填失败(不影响留存): ${r.failures.join('; ')}`);
-          else addLog(`链上回填完成 (${total} session)`);
-        }
-        setDone(true);
+      }
 
-      } else if (card.platformId === PLATFORM_WISE && card.direction === 'Fiat') {
-        if (!buyerBinding?.isSet) throw new Error('Buyer binding not set — UI gate bypassed.');
-        const { orderId } = await placeWiseFiatOrder(
-          buyerClient, card.merchantAddr, card.productId, amountBig,
-          buyerBinding.nameHash, buyerBinding.idHash,
-        );
+      const { orderId, deadline: dl } = await placeOrder(
+        buyerClient,
+        card.merchantAddr,
+        card.productId,
+        card.assetType,
+        amountBig,
+        buyerInfo,
+      );
+
+      if (!isCrypto) {
         addLog(`Order placed — orderId=${orderId}  USDT locked.`);
-        addLog('Merchant must now pay MYR and submit Wise proof (see Merchant Panel).', 'success');
-        setDone(true);
-
-      } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Crypto') {
-        addLog('步骤 1/4: 查询保证金比率 (RiskManager.requiredBondBps)…');
-        addLog('步骤 2/4: 检查并授权 BondVault (approve if needed)…');
-        addLog('步骤 3/4: 提交下单 (placeOrder)…');
-        const { orderId } = await placeAlipayCryptoOrder(buyerClient, card.merchantAddr, card.productId, amountBig);
-        addLog(`步骤 4/4: 链上确认 — orderId=${orderId}`);
-        const ctx = await makeAlipayCryptoBindingContext(card.merchantAddr, buyerAddr, card.productId, amountBig, orderId);
-        addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
-        addLog('Launching TLSN Alipay plugin…');
-        const proof = await generateAlipayCryptoProof(ctx);
-        proofDiagnostics = [await buildProofDebugSnapshot(proof)];
-        addLog('Proof generated, submitting to contract…');
-        const txHash = await submitAlipayCryptoProof(buyerClient, card.merchantAddr, card.productId, orderId, proof);
-        addLog(`Transaction confirmed — tx=${txHash}`, 'success');
-        {
-          const r = await backfillProofTx([proof], txHash, buyerAddr, hardhatChain.id);
-          const total = r.patched + r.alreadyCommitted + r.failed;
-          if (r.failed) addLog(`⚠ ${r.failed}/${total} 链上回填失败(不影响留存): ${r.failures.join('; ')}`);
-          else addLog(`链上回填完成 (${total} session)`);
-        }
-        setDone(true);
-
-      } else if (card.platformId === PLATFORM_ALIPAY && card.direction === 'Fiat') {
-        if (!buyerBinding?.isSet) throw new Error('Buyer binding not set — UI gate bypassed.');
-        const { orderId } = await placeAlipayFiatOrder(
-          buyerClient, card.merchantAddr, card.productId, amountBig,
-          buyerBinding.nameHash, buyerBinding.idHash,
+        addLog(
+          `Merchant must now pay ${adapter.currency} and submit ${adapter.label} proof (see Merchant Panel).`,
+          'success',
         );
-        addLog(`Order placed — orderId=${orderId}  USDT locked.`);
-        addLog('Merchant must now pay CNY and submit Alipay proof (see Merchant Panel).', 'success');
+        invalidate([qk.user(buyerAddr), qk.merchant(card.merchantAddr)]);
         setDone(true);
-
       } else {
-        addLog(`Unsupported platform: ${card.platformName} (${card.platformId})`, 'error');
+        addLog(
+          `步骤 4/4: 链上确认 — orderId=${orderId}  deadline=${new Date(Number(dl) * 1000).toLocaleTimeString()}`,
+        );
+        addLog('Building binding context (reads rateVersion from chain)…');
+        const ctx = await makeBindingContext(
+          adapter,
+          card.merchantAddr,
+          buyerAddr,
+          card.productId,
+          card.assetType,
+          amountBig,
+          orderId,
+        );
+        addLog(`rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
+        addLog(
+          `Launching TLSN ${adapter.label} plugin (${
+            adapter.proofShape === 'contacts+transfer' ? 'contacts + transfer' : 'single proof'
+          })…`,
+        );
+        const platformProof = await runPaymentPlugin(adapter, ctx);
+        const proofsArr     = platformProof.shape === 'single'
+          ? [platformProof.data]
+          : [platformProof.data.contacts, platformProof.data.transfer];
+        proofDiagnostics = await Promise.all(proofsArr.map(buildProofDebugSnapshot));
+        addLog('Proof generated, submitting to contract…');
+        const txHash = await submitPaymentProofs(buyerClient, {
+          merchant:  card.merchantAddr,
+          productId: card.productId,
+          orderId,
+          proofs:    proofsArr,
+        });
+        addLog(`Transaction confirmed — tx=${txHash}`, 'success');
+        {
+          const r = await backfillProofTx(proofsArr, txHash, buyerAddr, hardhatChain.id);
+          const total = r.patched + r.alreadyCommitted + r.failed;
+          if (r.failed) addLog(`⚠ ${r.failed}/${total} 链上回填失败(不影响留存): ${r.failures.join('; ')}`);
+          else addLog(`链上回填完成 (${total} session)`);
+        }
+        invalidate([qk.user(buyerAddr), qk.merchant(card.merchantAddr), qk.products()]);
+        setDone(true);
       }
     } catch (err: unknown) {
       if (proofDiagnostics.length > 0) {

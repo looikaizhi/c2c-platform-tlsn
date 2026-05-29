@@ -9,13 +9,33 @@
 // refactor — adding them here on demand keeps every commit small and lets
 // type-check verify behavior parity panel-by-panel.
 
-import { keccak256, parseEventLogs, stringToBytes } from 'viem';
+import { keccak256, parseAbiItem, parseEventLogs, stringToBytes } from 'viem';
 import type { Hex, WalletClient } from 'viem';
 
-import { addresses, publicClient } from './chain';
-import { C2C_ADMIN_ABI, C2C_ESCROW_ABI } from './abis';
-import { PLATFORM_ALIPAY, PLATFORM_WISE } from './platforms';
-import type { ProofExportResponse } from './proof';
+import {
+  addresses,
+  chain,
+  publicClient,
+  decodeContractError,
+  formatContractAwareError,
+  normalizeOrder,
+  type OrderView,
+} from './chain';
+import {
+  C2C_ADMIN_ABI,
+  C2C_ESCROW_ABI,
+  C2C_RISK_MANAGER_ABI,
+  ERC20_ABI,
+} from './abis';
+import { PLATFORM_ALIPAY, PLATFORM_WISE, type PlatformAdapter } from './platforms';
+import {
+  buildContractProof,
+  buildProofDebugSnapshot,
+  ZERO_HASH_32,
+  type ExtensionProveResponse,
+  type OrderBindingContext,
+  type ProofExportResponse,
+} from './proof';
 
 // ─── Binding (= userBindingActions.ts) ──────────────────────────────────────
 //
@@ -218,5 +238,253 @@ export async function reconcileOnChain(proof: ProofExportResponse): Promise<Reco
       status: 'no_tx',
       error: (err as any)?.message ?? String(err),
     };
+  }
+}
+
+// ─── Order placement (= placeWise/AlipayCryptoOrder + Fiat variants) ────────
+//
+// Single generic placeOrder used by Phase 6.2c onwards. Behavior parity with
+// wise/alipay actions:
+//   - CRYPTO branch: query requiredBondBps + approve bondVault if needed +
+//     placeOrder with NULL_BUYER_INFO
+//   - FIAT branch: resolve crypto token for product + approve escrow +
+//     placeOrder with buyer's binding hashes
+// Decodes the OrderPlaced event from the receipt for { orderId, deadline }.
+
+const NULL_BUYER_INFO = {
+  nameHash: ZERO_HASH_32,
+  idHash:   ZERO_HASH_32,
+  isSet:    false,
+} as const;
+
+async function readOrder(
+  merchant: Hex,
+  productId: bigint,
+  assetType: 0 | 1,
+  orderId: bigint,
+): Promise<OrderView> {
+  const raw = await publicClient.readContract({
+    address:      addresses.escrowAddress,
+    abi:          C2C_ESCROW_ABI,
+    functionName: 'getOrder',
+    args:         [merchant, productId, assetType, orderId],
+  });
+  return normalizeOrder(raw);
+}
+
+async function resolveFiatProductCryptoToken(
+  merchantAddress: Hex,
+  productId: bigint,
+): Promise<Hex> {
+  try {
+    const logs = await publicClient.getLogs({
+      address: addresses.escrowAddress,
+      event: parseAbiItem(
+        'event ProductListed(address indexed merchant, uint256 indexed productId, uint8 indexed assetType, uint256 cryptoID, uint256 fiatID, uint256 collateralAmount, bool isActive)',
+      ),
+      args: { merchant: merchantAddress, productId, assetType: 1 } as any,
+      fromBlock: 0n,
+    });
+    if (logs.length === 0) return addresses.usdtAddress;
+    const cryptoID = (logs[logs.length - 1].args as any).cryptoID as bigint;
+    const cryptoList = await publicClient.readContract({
+      address:      addresses.adminAddress,
+      abi:          C2C_ADMIN_ABI,
+      functionName: 'getSupportCryptoList',
+      args:         [],
+    }) as any[];
+    const match = cryptoList.find((c: any) => BigInt(c.id ?? c[0]) === cryptoID);
+    return (match?.tokenAddress ?? match?.[2] ?? addresses.usdtAddress) as Hex;
+  } catch {
+    return addresses.usdtAddress;
+  }
+}
+
+export async function placeOrder(
+  buyerClient: WalletClient,
+  merchant: Hex,
+  productId: bigint,
+  assetType: 0 | 1,
+  amount: bigint,
+  /** Required for FIAT (buyer's binding hashes); ignored for CRYPTO. */
+  buyerInfo?: { nameHash: Hex; idHash: Hex },
+): Promise<{ orderId: bigint; deadline: bigint; txHash: Hex }> {
+  const buyerAddr = buyerClient.account?.address as Hex | undefined;
+  if (!buyerAddr) throw new Error('Wallet client has no account attached.');
+
+  if (assetType === 0) {
+    // CRYPTO: bond pre-check + approve if needed
+    let bondBps: bigint;
+    try {
+      bondBps = BigInt(await publicClient.readContract({
+        address:      addresses.riskManagerAddress,
+        abi:          C2C_RISK_MANAGER_ABI,
+        functionName: 'requiredBondBps',
+        args:         [buyerAddr],
+      }) as number);
+    } catch (err: unknown) {
+      const msg = (err as any)?.message ?? String(err);
+      if (msg.includes('UserBlacklisted')) throw new Error('账户已被列入黑名单，无法下单');
+      if (msg.includes('UserTemporarilyFrozen')) throw new Error('账户暂时冻结中，请等待解冻');
+      throw new Error(`风险参数查询失败: ${msg}`);
+    }
+    const estimatedBond = (amount * bondBps) / 10000n;
+    if (estimatedBond > 0n) {
+      const currentAllowance = await publicClient.readContract({
+        address:      addresses.usdtAddress,
+        abi:          ERC20_ABI,
+        functionName: 'allowance',
+        args:         [buyerAddr, addresses.bondVaultAddress],
+      }) as bigint;
+      if (currentAllowance < estimatedBond) {
+        const MAX_UINT256 = (2n ** 256n) - 1n;
+        const approveTx = await buyerClient.writeContract({
+          account:      buyerClient.account!,
+          chain,
+          address:      addresses.usdtAddress,
+          abi:          ERC20_ABI,
+          functionName: 'approve',
+          args:         [addresses.bondVaultAddress, MAX_UINT256],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+      }
+    }
+  } else {
+    // FIAT: resolve token + approve escrow
+    if (!buyerInfo) throw new Error('FIAT order requires buyerInfo { nameHash, idHash }.');
+    const tokenAddress = await resolveFiatProductCryptoToken(merchant, productId);
+    const approveTx = await buyerClient.writeContract({
+      account:      buyerClient.account!,
+      chain,
+      address:      tokenAddress,
+      abi:          ERC20_ABI,
+      functionName: 'approve',
+      args:         [addresses.escrowAddress, amount],
+    });
+    await publicClient.waitForTransactionReceipt({ hash: approveTx });
+  }
+
+  const placeArgs = assetType === 0
+    ? [merchant, productId, 0, amount, NULL_BUYER_INFO]
+    : [merchant, productId, 1, amount, { nameHash: buyerInfo!.nameHash, idHash: buyerInfo!.idHash, isSet: true }];
+
+  const hash = await buyerClient.writeContract({
+    account:      buyerClient.account!,
+    chain,
+    address:      addresses.escrowAddress,
+    abi:          C2C_ESCROW_ABI,
+    functionName: 'placeOrder',
+    args:         placeArgs as any,
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+  let orderId = 0n;
+  let deadline = 0n;
+  const logs = parseEventLogs({
+    abi: C2C_ESCROW_ABI,
+    logs: receipt.logs,
+    eventName: 'OrderPlaced',
+  });
+  if (logs.length > 0) {
+    orderId  = (logs[0].args as any).orderId  ?? 0n;
+    deadline = (logs[0].args as any).deadline ?? 0n;
+  }
+  return { orderId, deadline, txHash: hash };
+}
+
+// ─── makeBindingContext (= makeWise/AlipayCryptoBindingContext) ─────────────
+//
+// Build the OrderBindingContext that gets injected into the plugin. The
+// adapter contributes the merchant's platform binding (resolved via the
+// adapter's PlatformId on-chain) and the tenant tag.
+//   - CRYPTO: payee = merchant (buyer pays merchant on the platform)
+//   - FIAT:   payee = buyer    (merchant pays buyer on the platform)
+
+export async function makeBindingContext(
+  adapter: PlatformAdapter,
+  merchant: Hex,
+  buyer: Hex,
+  productId: bigint,
+  assetType: 0 | 1,
+  amount: bigint,
+  orderId: bigint,
+  /** Required for FIAT (buyer's binding hashes). */
+  buyerInfo?: { nameHash: Hex; idHash: Hex },
+): Promise<OrderBindingContext> {
+  const [merchantBinding, order] = await Promise.all([
+    getUserPlatformBinding(merchant, adapter.id),
+    readOrder(merchant, productId, assetType, orderId),
+  ]);
+  if (!merchantBinding.isSet) {
+    throw new Error(
+      `Merchant ${merchant.slice(0, 10)}… has not bound their ${adapter.label} account on-chain.`,
+    );
+  }
+
+  const payeeNameHash = assetType === 0 ? merchantBinding.nameHash : buyerInfo!.nameHash;
+  const payeeIdHash   = assetType === 0 ? merchantBinding.idHash   : buyerInfo!.idHash;
+
+  return {
+    escrowAddress:       addresses.escrowAddress,
+    chainId:             chain.id,
+    merchant,
+    buyer,
+    productId,
+    orderId,
+    assetType,
+    amount,
+    rate:                order.rate,
+    rateVersion:         BigInt(order.rateVersion),
+    deadline:            order.deadline,
+    merchantNameHash:    merchantBinding.nameHash,
+    merchantIdHash:      merchantBinding.idHash,
+    payeeNameHash,
+    payeeIdHash,
+    ownerAddress:        buyer.toLowerCase() as Hex,
+    counterpartyAddress: merchant.toLowerCase() as Hex,
+    tenantId:            adapter.tenantId as 'wise' | 'alipay',
+  };
+}
+
+// ─── submitPaymentProofs (= submitWise/AlipayCryptoProof) ───────────────────
+//
+// Buyer (CRYPTO) or merchant (FIAT, future) submits one-or-two TLSN proofs to
+// the escrow's payOrderByPlatform. The diagnostic snapshot is surfaced in the
+// thrown error so panels can log the full context on failure.
+
+export async function submitPaymentProofs(
+  client: WalletClient,
+  args: {
+    merchant:  Hex;
+    productId: bigint;
+    orderId:   bigint;
+    proofs:    ExtensionProveResponse[];
+  },
+): Promise<Hex> {
+  const contractProofs = args.proofs.map(buildContractProof) as any;
+  const diagnostics    = await Promise.all(args.proofs.map(buildProofDebugSnapshot));
+  try {
+    const hash = await client.writeContract({
+      account:      client.account!,
+      chain,
+      address:      addresses.escrowAddress,
+      abi:          C2C_ESCROW_ABI,
+      functionName: 'payOrderByPlatform',
+      args:         [args.merchant, args.productId, args.orderId, contractProofs],
+    });
+    await publicClient.waitForTransactionReceipt({ hash });
+    return hash;
+  } catch (err) {
+    const decoded = decodeContractError(err);
+    const summary = decoded
+      ? `${decoded.errorName ?? 'UnknownCustomError'} (${decoded.selector})`
+      : 'Unknown contract error';
+    throw new Error(
+      [
+        `payOrderByPlatform failed: ${summary}`,
+        `diagnostics=${JSON.stringify(diagnostics)}`,
+        `raw=${formatContractAwareError(err)}`,
+      ].join(' | '),
+    );
   }
 }
