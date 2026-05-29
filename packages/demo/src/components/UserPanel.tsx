@@ -49,6 +49,7 @@ import {
 } from '../utils/proof';
 import { fmt4, formatUserFacingError } from '../utils/lib';
 import { tryGetAdapter } from '../utils/platforms';
+import { SkeletonBlock, StatusBadge } from './ui';
 import { MyProofs } from './MyProofs';
 
 // -- Design tokens -----------------------------------------------------------
@@ -75,14 +76,6 @@ const GRID: React.CSSProperties = {
 };
 const GRID_CELL: React.CSSProperties = {
   background: '#f8f9fa', borderRadius: 8, padding: '10px 12px',
-};
-
-// Order status badge colours (V4: 0=PENDING, 1=EXPIRED, 2=COMPLETED, 3=WAITING)
-const STATUS_STYLE: Record<number, { bg: string; color: string; label: string }> = {
-  0: { bg: '#e6f4ff', color: '#1677ff', label: 'PENDING' },
-  1: { bg: '#fff7e6', color: '#d46b08', label: 'EXPIRED' },
-  2: { bg: '#f6ffed', color: '#52c41a', label: 'COMPLETED' },
-  3: { bg: '#e6f4ff', color: '#1677ff', label: 'WAITING' },
 };
 
 // -- Helpers -----------------------------------------------------------------
@@ -304,19 +297,6 @@ const shimmerKeyframes = `
   100% { background-position: 400px 0; }
 }`;
 
-function SkeletonBlock({ width = '100%', height = 14 }: { width?: string | number; height?: number }) {
-  return (
-    <div style={{
-      width,
-      height,
-      background: 'linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%)',
-      backgroundSize: '800px 100%',
-      animation: 'shimmer 1.4s infinite linear',
-      borderRadius: 4,
-    }} />
-  );
-}
-
 function SkeletonTab() {
   return (
     <>
@@ -371,25 +351,6 @@ function CopyButton({ text }: { text: string }) {
     >
       {copied ? '✓' : '⎘'}
     </button>
-  );
-}
-
-// -- Status badge ------------------------------------------------------------
-function StatusBadge({ status }: { status: number }) {
-  const style = STATUS_STYLE[status] ?? { bg: '#f5f5f5', color: '#595959', label: String(status) };
-  return (
-    <span style={{
-      display: 'inline-block',
-      padding: '1px 8px',
-      borderRadius: 10,
-      background: style.bg,
-      color: style.color,
-      fontSize: 11,
-      fontWeight: 600,
-      lineHeight: '18px',
-    }}>
-      {style.label}
-    </span>
   );
 }
 
@@ -1004,7 +965,7 @@ function UserTab({ address }: { address: Hex }) {
                 <span style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                   {fmt4(order.amount, data.usdtDecimals)} USDT
                 </span>
-                <StatusBadge status={order.status} />
+                <StatusBadge status={order.status as 0 | 1 | 2 | 3} />
                 <span style={{ fontSize: 11, color: '#767676', marginLeft: 'auto' }}>
                   Deadline: {new Date(Number(order.deadline) * 1000).toLocaleTimeString()}
                   {' · '}RateV: {order.rateVersion}
