@@ -409,7 +409,11 @@ export async function makeBindingContext(
   assetType: 0 | 1,
   amount: bigint,
   orderId: bigint,
-  /** Required for FIAT (buyer's binding hashes). */
+  /**
+   * Required for FIAT when caller is buyer-side (TradingHall). For merchant-
+   * side FIAT (MerchantPanel) leave undefined — buyer's payment info is read
+   * from chain via getBuyerPaymentInfo.
+   */
   buyerInfo?: { nameHash: Hex; idHash: Hex },
 ): Promise<OrderBindingContext> {
   const [merchantBinding, order] = await Promise.all([
@@ -422,8 +426,20 @@ export async function makeBindingContext(
     );
   }
 
-  const payeeNameHash = assetType === 0 ? merchantBinding.nameHash : buyerInfo!.nameHash;
-  const payeeIdHash   = assetType === 0 ? merchantBinding.idHash   : buyerInfo!.idHash;
+  let resolvedBuyerInfo = buyerInfo;
+  if (assetType === 1 && !resolvedBuyerInfo) {
+    // Merchant-side FIAT: fetch buyer's binding hashes from the on-chain order.
+    const raw = await publicClient.readContract({
+      address:      addresses.escrowAddress,
+      abi:          C2C_ESCROW_ABI,
+      functionName: 'getBuyerPaymentInfo',
+      args:         [merchant, productId, orderId],
+    }) as { nameHash: Hex; idHash: Hex; isSet: boolean };
+    resolvedBuyerInfo = { nameHash: raw.nameHash, idHash: raw.idHash };
+  }
+
+  const payeeNameHash = assetType === 0 ? merchantBinding.nameHash : resolvedBuyerInfo!.nameHash;
+  const payeeIdHash   = assetType === 0 ? merchantBinding.idHash   : resolvedBuyerInfo!.idHash;
 
   return {
     escrowAddress:       addresses.escrowAddress,
@@ -447,31 +463,42 @@ export async function makeBindingContext(
   };
 }
 
-// ─── submitPaymentProofs (= submitWise/AlipayCryptoProof) ───────────────────
+// ─── submitPaymentProofs (= submitWise/AlipayCryptoProof + FiatProof) ───────
 //
-// Buyer (CRYPTO) or merchant (FIAT, future) submits one-or-two TLSN proofs to
-// the escrow's payOrderByPlatform. The diagnostic snapshot is surfaced in the
-// thrown error so panels can log the full context on failure.
+// Routes to the correct on-chain entry point based on assetType:
+//   - CRYPTO (assetType 0): buyer calls payOrderByPlatform(merchant, ...)
+//   - FIAT   (assetType 1): merchant calls receiveCryptoWithPlatformPayment(...)
+// The diagnostic snapshot is surfaced in the thrown error so panels can log
+// the full context on failure.
 
 export async function submitPaymentProofs(
   client: WalletClient,
   args: {
-    merchant:  Hex;
+    /** Required for CRYPTO; unused for FIAT (merchant is the caller). */
+    merchant?: Hex;
     productId: bigint;
     orderId:   bigint;
+    assetType: 0 | 1;
     proofs:    ExtensionProveResponse[];
   },
 ): Promise<Hex> {
   const contractProofs = args.proofs.map(buildContractProof) as any;
   const diagnostics    = await Promise.all(args.proofs.map(buildProofDebugSnapshot));
+
+  const isCrypto = args.assetType === 0;
+  const functionName = isCrypto ? 'payOrderByPlatform' : 'receiveCryptoWithPlatformPayment';
+  const fnArgs       = isCrypto
+    ? [args.merchant!, args.productId, args.orderId, contractProofs]
+    : [args.productId, args.orderId, contractProofs];
+
   try {
     const hash = await client.writeContract({
       account:      client.account!,
       chain,
       address:      addresses.escrowAddress,
       abi:          C2C_ESCROW_ABI,
-      functionName: 'payOrderByPlatform',
-      args:         [args.merchant, args.productId, args.orderId, contractProofs],
+      functionName,
+      args:         fnArgs as any,
     });
     await publicClient.waitForTransactionReceipt({ hash });
     return hash;
@@ -482,7 +509,7 @@ export async function submitPaymentProofs(
       : 'Unknown contract error';
     throw new Error(
       [
-        `payOrderByPlatform failed: ${summary}`,
+        `${functionName} failed: ${summary}`,
         `diagnostics=${JSON.stringify(diagnostics)}`,
         `raw=${formatContractAwareError(err)}`,
       ].join(' | '),

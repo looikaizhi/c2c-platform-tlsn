@@ -20,19 +20,16 @@ import {
 import {
   PLATFORM_WISE,
   PLATFORM_ALIPAY,
+  getAdapter,
   tryGetAdapter,
+  runPaymentPlugin,
 } from '../utils/platforms';
-import { claimBond } from '../utils/services';
 import {
-  makeWiseFiatBindingContext,
-  generateWiseFiatProof,
-  submitWiseFiatProof,
-} from '../utils/wiseC2cActions';
-import {
-  makeAlipayFiatBindingContext,
-  generateAlipayFiatProof,
-  submitAlipayFiatProof,
-} from '../utils/alipayC2cActions';
+  claimBond,
+  makeBindingContext,
+  submitPaymentProofs,
+} from '../utils/services';
+import { qk, useInvalidateAfterTx } from '../utils/hooks';
 import { ReputationBadge } from './ReputationBadge';
 import type { ReputationView } from './ReputationBadge';
 
@@ -1126,6 +1123,7 @@ function FiatPendingOrders({ address, products, walletClient }: {
   products: Product[];
   walletClient: WalletClient | undefined;
 }) {
+  const invalidate                = useInvalidateAfterTx();
   const [orders, setOrders]       = useState<FiatOrderItem[]>([]);
   const [loading, setLoading]     = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -1192,25 +1190,40 @@ function FiatPendingOrders({ address, products, walletClient }: {
     setRunningId(key);
     setLogs((p) => ({ ...p, [key]: [] }));
     try {
-      addLog(key, 'Building binding context…');
-      const isWise = o.platformId === PLATFORM_WISE;
-      const ctx = isWise
-        ? await makeWiseFiatBindingContext(address, o.buyer, o.productId, o.amount, o.orderId)
-        : await makeAlipayFiatBindingContext(address, o.buyer, o.productId, o.amount, o.orderId);
-      addLog(key, `rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
-      addLog(key, 'Launching TLSN plugin…');
+      // PlatformAdapter-driven FIAT proof flow (Phase 6.4c). makeBindingContext
+      // reads the buyer's nameHash/idHash from chain when buyerInfo is omitted
+      // (merchant-side path); submitPaymentProofs with assetType=1 routes to
+      // receiveCryptoWithPlatformPayment(productId, orderId, proofs).
+      const adapter = getAdapter(o.platformId);
 
-      let txHash: Hex;
-      if (isWise) {
-        const { contacts, transfer } = await generateWiseFiatProof(ctx);
-        addLog(key, 'Proofs generated, submitting…');
-        txHash = await submitWiseFiatProof(walletClient, o.productId, o.orderId, contacts, transfer);
-      } else {
-        const proof = await generateAlipayFiatProof(ctx);
-        addLog(key, 'Proof generated, submitting…');
-        txHash = await submitAlipayFiatProof(walletClient, o.productId, o.orderId, proof);
-      }
+      addLog(key, 'Building binding context…');
+      const ctx = await makeBindingContext(
+        adapter,
+        address,
+        o.buyer,
+        o.productId,
+        1, // FIAT
+        o.amount,
+        o.orderId,
+      );
+      addLog(key, `rateVersion=${ctx.rateVersion}  rate=${ctx.rate}`);
+      addLog(key, `Launching TLSN ${adapter.label} plugin…`);
+
+      const platformProof = await runPaymentPlugin(adapter, ctx);
+      const proofsArr     = platformProof.shape === 'single'
+        ? [platformProof.data]
+        : [platformProof.data.contacts, platformProof.data.transfer];
+
+      addLog(key, proofsArr.length === 2 ? 'Proofs generated, submitting…' : 'Proof generated, submitting…');
+      const txHash = await submitPaymentProofs(walletClient, {
+        productId: o.productId,
+        orderId:   o.orderId,
+        assetType: 1,
+        proofs:    proofsArr,
+      });
       addLog(key, `✅ Done — tx=${txHash}`);
+
+      invalidate([qk.merchant(address), qk.user(o.buyer), qk.products()]);
       setTimeout(loadOrders, 800);
     } catch (e: any) {
       addLog(key, `❌ ${e?.shortMessage ?? e?.message ?? String(e)}`);

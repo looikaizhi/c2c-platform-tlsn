@@ -540,6 +540,7 @@ function UserTab({ address }: { address: Hex }) {
         merchant:  order.merchantAddress,
         productId: order.productId,
         orderId:   order.orderId,
+        assetType: order.assetType,
         proofs:    proofsArr,
       });
 

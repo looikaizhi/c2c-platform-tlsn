@@ -592,6 +592,7 @@ function ProductDetailModal({
           merchant:  card.merchantAddr,
           productId: card.productId,
           orderId,
+          assetType: card.assetType,
           proofs:    proofsArr,
         });
         addLog(`Transaction confirmed — tx=${txHash}`, 'success');
