@@ -10,7 +10,7 @@ import type { Hex, WalletClient } from 'viem';
 import {
   setUserPlatformBinding,
   type BindingView,
-} from '../utils/userBindingActions';
+} from '../utils/services';
 
 // ─── Design tokens (kept local so this component is drop-in self-contained) ──
 
