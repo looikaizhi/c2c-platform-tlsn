@@ -9,9 +9,8 @@ import { useEffect, useState, type CSSProperties } from 'react';
 import type { Hex, WalletClient } from 'viem';
 import { ProofsList } from './ProofsList';
 import { ProofDetail } from './ProofDetail';
-import type { ListItem } from '../utils/proofsApi';
-import { loginAsUser } from '../utils/verifierAuth';
-import { getUserClientByAddress } from '../utils/hardhatAccounts';
+import { loginAsUser, type ListItem } from '../utils/proof';
+import { getUserClientByAddress } from '../utils/chain';
 
 export interface MyProofsProps {
     /** Active wallet address whose proofs to show. Required — backend forces owner=this. */
