@@ -15,12 +15,15 @@ import {
   user4Client,
   user5Client,
   verifierSignerClient,
-} from '../utils/hardhatAccounts';
-import { C2C_ADMIN_ABI, C2C_RISK_MANAGER_ABI } from '../utils/c2cAbi';
-import { c2cConfig, isC2CConfigured } from '../utils/c2cContractConfig';
+  addresses as c2cConfig,
+  isConfigured as isC2CConfigured,
+} from '../utils/chain';
+import { C2C_ADMIN_ABI, C2C_RISK_MANAGER_ABI } from '../utils/abis';
+import { loginAsAdmin, logoutAdmin } from '../utils/proof';
+import { truncateAddr } from '../utils/lib';
+import { CopyButton } from './ui';
 import { ReputationBadge } from './ReputationBadge';
 import type { ReputationView } from './ReputationBadge';
-import { loginAsAdmin, logoutAdmin } from '../utils/verifierAuth';
 import { AdminAudit } from './AdminAudit';
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -42,11 +45,6 @@ function findClientByAddress(addr: string) {
   return ALL_WALLET_CLIENTS.find(
     (c) => c.account?.address.toLowerCase() === addr.toLowerCase(),
   );
-}
-
-function truncate(addr: string, front = 10, back = 6): string {
-  if (!addr || addr.length <= front + back) return addr;
-  return `${addr.slice(0, front)}…${addr.slice(-back)}`;
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -177,12 +175,6 @@ const S: Record<string, CSSProperties> = {
 // SVG icons (inline, no emoji)
 // ────────────────────────────────────────────────────────────────────────────────
 
-const IconCopy = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="9" y="9" width="13" height="13" rx="2" />
-    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-  </svg>
-);
 const IconCheck = () => (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
     <polyline points="20 6 9 17 4 12" />
@@ -222,38 +214,6 @@ const IconAlert = () => (
     <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
   </svg>
 );
-
-// ────────────────────────────────────────────────────────────────────────────────
-// CopyButton
-// ────────────────────────────────────────────────────────────────────────────────
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const [hov, setHov]       = useState(false);
-
-  return (
-    <button
-      onClick={() => {
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        });
-      }}
-      onMouseEnter={() => setHov(true)}
-      onMouseLeave={() => setHov(false)}
-      title={copied ? 'Copied!' : 'Copy'}
-      style={{
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        width: 26, height: 26, padding: 0, border: 'none', borderRadius: 5,
-        background: copied ? '#dcfce7' : hov ? '#e2e8f0' : 'transparent',
-        color: copied ? C.success : C.muted,
-        cursor: 'pointer', transition: 'background 150ms, color 150ms', flexShrink: 0,
-      }}
-    >
-      {copied ? <IconCheck /> : <IconCopy />}
-    </button>
-  );
-}
 
 // ────────────────────────────────────────────────────────────────────────────────
 // StatusBadge
@@ -1245,9 +1205,9 @@ export function AdminPanel() {
               fontFamily: '"Fira Code", monospace',
               flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
-              {truncate(contractAdmin || ADMIN_ADDRESS)}
+              {truncateAddr(contractAdmin || ADMIN_ADDRESS, 10, 6)}
             </code>
-            <CopyButton text={contractAdmin || ADMIN_ADDRESS} />
+            <CopyButton value={contractAdmin || ADMIN_ADDRESS} iconOnly />
           </div>
         </KpiCard>
 
@@ -1328,8 +1288,8 @@ export function AdminPanel() {
                 <td style={{ ...S.tdPlain, fontWeight: 600 }}>{c.tokenSymbol}</td>
                 <td style={S.td} title={c.tokenAddress}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    {truncate(c.tokenAddress)}
-                    <CopyButton text={c.tokenAddress} />
+                    {truncateAddr(c.tokenAddress, 10, 6)}
+                    <CopyButton value={c.tokenAddress} iconOnly />
                   </div>
                 </td>
                 <td style={S.tdPlain}><StatusBadge active={c.isActive} /></td>
@@ -1411,8 +1371,8 @@ export function AdminPanel() {
                 <td style={{ ...S.tdPlain, fontWeight: 600 }}>{i + 1}</td>
                 <td style={S.td} title={m.address}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    {truncate(m.address)}
-                    <CopyButton text={m.address} />
+                    {truncateAddr(m.address, 10, 6)}
+                    <CopyButton value={m.address} iconOnly />
                   </div>
                 </td>
                 <td style={S.tdPlain}><StatusBadge active={m.isActive} /></td>
@@ -1477,17 +1437,17 @@ export function AdminPanel() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
                 <span style={{ fontWeight: 600, width: 52, flexShrink: 0 }}>Current:</span>
                 <code style={{ fontSize: 11, fontFamily: '"Fira Code", monospace' }}>
-                  {truncate(contractAdmin || ADMIN_ADDRESS)}
+                  {truncateAddr(contractAdmin || ADMIN_ADDRESS, 10, 6)}
                 </code>
-                <CopyButton text={contractAdmin || ADMIN_ADDRESS} />
+                <CopyButton value={contractAdmin || ADMIN_ADDRESS} iconOnly />
               </div>
               {hasPending && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
                   <span style={{ fontWeight: 600, width: 52, flexShrink: 0 }}>Pending:</span>
                   <code style={{ fontSize: 11, fontFamily: '"Fira Code", monospace' }}>
-                    {truncate(pendingAdminAddr)}
+                    {truncateAddr(pendingAdminAddr, 10, 6)}
                   </code>
-                  <CopyButton text={pendingAdminAddr} />
+                  <CopyButton value={pendingAdminAddr} iconOnly />
                 </div>
               )}
             </div>
