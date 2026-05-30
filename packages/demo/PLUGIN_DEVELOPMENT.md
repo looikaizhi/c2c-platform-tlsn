@@ -436,12 +436,12 @@ npm run dev
    },
    ```
 3. 在 `accountCheckFields` 里告诉 verifier「第 N 个 handler 抽出来的 json_value 应该等于哪个 hash」。
-4. 前端在 `execCode()` 之前用真实订单数据 `replace()` 这些 sentinel；提交链上时 `src/utils/contractSubmitter.ts` 会把 `proofs.contacts` / `proofs.transfer` 包成 `PaymentProof` 调合约。
+4. 前端在 `execCode()` 之前用真实订单数据 `replace()` 这些 sentinel；提交链上时 `src/utils/services.ts` 的 `submitPaymentProofs` 会把 `proofs.contacts` / `proofs.transfer`（或单 `proof`）包成 `PaymentProof` 调合约（按 `assetType` 路由到 `payOrderByPlatform` / `receiveCryptoWithPlatformPayment`）。
 
 详细映射逻辑参考：
-- [src/utils/paymentProofArtifact.ts](src/utils/paymentProofArtifact.ts)
-- [src/utils/proofTransformer.ts](src/utils/proofTransformer.ts)
-- [src/utils/alipayC2cActions.ts](src/utils/alipayC2cActions.ts) / [src/utils/wiseC2cActions.ts](src/utils/wiseC2cActions.ts)
+- [src/utils/proof.ts](src/utils/proof.ts) — Transformer + Sentinels + Artifact + BackfillTx
+- [src/utils/platforms.ts](src/utils/platforms.ts) — PlatformAdapter + runPaymentPlugin
+- [src/utils/services.ts](src/utils/services.ts) — 业务用例（placeOrder / makeBindingContext / submitPaymentProofs / claimBond）
 
 ---
 

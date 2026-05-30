@@ -62,45 +62,40 @@ packages/demo/
 │   ├── config.ts            # 读取 VITE_VERIFIER_HOST / VITE_SSL
 │   │
 │   ├── components/          # UI 组件
+│   │   ├── ui.tsx                 # UI 原语 + design tokens（单一信源）
+│   │   ├── ui.module.css          # 原语 CSS（btn / badge / skeleton / modal）
 │   │   ├── DeployPanel.tsx        # 显示已部署合约地址
 │   │   ├── AdminPanel.tsx         # 平台/链状态总览
 │   │   ├── MerchantPanel.tsx      # 商家库存/挂单
 │   │   ├── UserPanel.tsx          # 用户余额/订单
-│   │   ├── TradingHall.tsx        # 下单入口
+│   │   ├── TradingHall.tsx        # 下单入口（PlatformAdapter-driven）
+│   │   ├── BindingRow.tsx         # 平台账号绑定行（跨 UserPanel / TradingHall）
 │   │   ├── PluginButtons.tsx      # 运行插件入口
 │   │   ├── HowItWorks.tsx         # 三步说明
 │   │   ├── WhyPlugins.tsx
 │   │   ├── BuildYourOwn.tsx
 │   │   ├── SystemChecks.tsx       # 浏览器/扩展/verifier 体检
 │   │   ├── StatusBar.tsx          # 顶部状态条
-│   │   ├── Console.tsx            # 控制台输出
-│   │   ├── ContractSubmit.tsx     # 把 proof 提交上链
+│   │   ├── ConsoleOutput.tsx      # 控制台输出（订阅 useConsoleStore）
 │   │   ├── MyProofs.tsx           # 浏览已生成的 proofs
 │   │   ├── ProofDetail.tsx        # 单条 proof 详情
 │   │   ├── ProofsList.tsx
+│   │   ├── AdminAudit.tsx
 │   │   ├── ReputationBadge.tsx
 │   │   └── CollapsibleSection.tsx
 │   │
-│   └── utils/               # 业务工具层
-│       ├── c2cContractConfig.ts   # 合约地址 + ABI 加载
-│       ├── c2cAbi.ts              # C2C 主合约 ABI
-│       ├── contractConfig.ts
-│       ├── contractAbi.ts
-│       ├── contractSubmitter.ts   # 通用提交器
-│       ├── contractErrors.ts      # revert reason 解析
-│       ├── alipayC2cActions.ts    # Alipay → 合约的入参拼装
-│       ├── wiseC2cActions.ts      # Wise → 合约的入参拼装
-│       ├── paymentProofArtifact.ts# 从插件返回组装 PaymentProof
-│       ├── proofTransformer.ts    # PluginResult → on-chain payload
-│       ├── proofsApi.ts           # 列出/查询历史 proofs
-│       ├── reconcileOnChain.ts    # 链上/链下状态对账
-│       ├── deployDemoState.ts     # 部署后种子数据
-│       ├── hardhatAccounts.ts     # 内置测试账户
-│       ├── walletDiscovery.ts     # 钱包探测/切换
-│       ├── verifierAuth.ts        # 与 verifier 的认证 handshake
+│   └── utils/               # 业务工具层（10 个文件，无子目录，路径深度统一为 2）
+│       ├── chain.ts               # 链选择 + 合约地址 + 钱包客户端 + 错误解码 + OrderView
+│       ├── abis.ts                # 5 个 ABI 常量（纯数据，与 chain 分离）
+│       ├── platforms.ts           # PlatformAdapter 注册表 + runPaymentPlugin
+│       ├── proof.ts               # Transformer + API + Auth + Artifact + backfillProofTx
+│       ├── services.ts            # 业务用例（placeOrder / submitPaymentProofs / claimBond / Binding / Reconcile）
+│       ├── hooks.ts               # React Query 单实例 + qk 工厂 + use*Data
+│       ├── store.ts               # zustand 三 store（UI tabs / Toast / Console，禁 persist）
+│       ├── lib.ts                 # 纯工具（truncateAddr / fmt4 / fiatEstimate / formatUserFacingError）
+│       ├── deployDemoState.ts     # 部署后种子数据（与重构无关，保持原状）
 │       ├── verifySignature.ts     # 客户端验签
-│       ├── orderView.ts           # 订单视图模型
-│       └── demoUsers.ts
+│       └── verifySignature.test.ts
 │
 ├── scripts/start-dev.js     # `npm run dev` 的真实入口：编译插件 → 拉起 vite
 └── experiments/             # 性能/网络实验脚本（4G / broadband / 跨区域）
@@ -214,7 +209,13 @@ App.tsx parseResult() 渲染结果 + 保存 debug JSON
 
 **C. 提交到链上**
 
-`ContractSubmit.tsx` + `utils/contractSubmitter.ts` 负责把 `proofs.contacts / proofs.transfer / payment` 等结构通过钱包（hardhat accounts）发到 C2C 合约。`utils/proofTransformer.ts` 与 `paymentProofArtifact.ts` 负责把插件返回的 `displayResults` + raw transcript 序列化成合约期望的 `PaymentProof` 结构体。
+PlatformAdapter 驱动的单一调用路径（Phase 6 后）：
+- `utils/services.ts` 的 `placeOrder` / `makeBindingContext` / `submitPaymentProofs` 跨 CRYPTO 与 FIAT 路径统一签名；按 `assetType` 路由到链上 `payOrderByPlatform`（CRYPTO）或 `receiveCryptoWithPlatformPayment`（FIAT）。
+- `utils/platforms.ts` 的 `runPaymentPlugin(adapter, ctx)` 注入 8 个 sentinel（`utils/proof.ts: injectPluginContext`）+ 可选 adapter.injectExtra（Wise 用于 TRANSFER 哈希），执行后按 `adapter.proofShape` 折叠出单 / 双 proof。
+- `utils/proof.ts` 的 `buildContractProof` / `buildProofDebugSnapshot` 把 ExtensionProveResponse 序列化为合约 `TLSNProof` struct。
+- `utils/proof.ts` 的 `backfillProofTx` / `backfillSessionIds` 在 tx confirm 后回填 verifier `proof_store.txHash`，409 计入 alreadyCommitted（非失败）。
+
+新增第 3 个支付平台 = 在 `utils/platforms.ts` 加一个 PlatformAdapter 对象 + 一行 `adapters.set`，其它文件零修改。
 
 ---
 

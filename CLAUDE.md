@@ -617,6 +617,43 @@ npm run docker:up
 VITE_VERIFIER_HOST=verifier.example.com VITE_SSL=true docker compose up --build
 ```
 
+**Frontend layout (post-refactor, see `DEMO_REFACTOR_PLAN.md`):**
+
+`src/utils/` is flat (no subdirectories, path depth = 2):
+
+| File | Role |
+|---|---|
+| `chain.ts`     | Chain selection + addresses + wallet clients + error decoder + OrderView |
+| `abis.ts`      | 5 ABI constants (pure data; separated from chain logic) |
+| `platforms.ts` | PlatformAdapter registry + `runPaymentPlugin` |
+| `proof.ts`     | Transformer + API + Auth + Artifact + `backfillProofTx` / `backfillSessionIds` |
+| `services.ts`  | Business use cases (`placeOrder`, `makeBindingContext`, `submitPaymentProofs`, `claimBond`, Binding, Reconcile) |
+| `hooks.ts`     | Single React Query client + `qk` key factory + `use*Data` + `useInvalidateAfterTx` |
+| `store.ts`     | Three zustand stores (UI tabs / Toast / Console) — **no `persist`** middleware |
+| `lib.ts`       | Pure helpers (`truncateAddr`, `fmt4`, `fiatEstimate`, `formatUserFacingError`) |
+| `verifySignature.ts` + `.test.ts` | Client-side verifier signature check |
+| `deployDemoState.ts` | Post-deploy seed (not part of the refactor) |
+
+`src/components/` is also flat (no `binding/` subdirectory). `ui.tsx` +
+`ui.module.css` hold the visual primitives (Card / Button / CopyButton /
+Badge / Spinner / Skeleton / Modal / ConfirmDialog / PlatformChip) and the
+`tokens` design-token table.
+
+**Adding a 3rd payment platform** — three mechanical steps:
+1. In `utils/platforms.ts`, add a `PlatformAdapter` object (id = keccak256 of
+   the tenant name; `proofShape`, `currency`, `pluginUrl`, optional
+   `injectExtra`).
+2. Register it in the `adapters` Map at the bottom of the same file.
+3. Drop the plugin source at `public/plugins/<tenant>.js`.
+
+Everything else (TradingHall, UserPanel, MerchantPanel, services, proof
+artifact) is platform-agnostic — `getAdapter(id)` / `runPaymentPlugin(adapter,
+ctx)` / `submitPaymentProofs(client, { …, assetType })` handle the rest.
+
+**App.tsx wrap:** `<QueryClientProvider client={queryClient}>` is the
+outermost wrapper. `<ConsoleOutput />` takes no props and subscribes to
+`useConsoleStore` directly.
+
 ## Important Implementation Notes
 
 ### Plugin API Changes
