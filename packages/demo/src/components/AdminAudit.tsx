@@ -6,7 +6,7 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { ProofsList } from './ProofsList';
 import { ProofDetail } from './ProofDetail';
-import type { ListItem } from '../utils/proofsApi';
+import type { ListItem } from '../utils/proof';
 
 const C = { text: '#0F172A', muted: '#64748B' } as const;
 

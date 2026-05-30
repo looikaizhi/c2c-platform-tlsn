@@ -23,7 +23,7 @@ import {
     numberToHex,
     type Hex,
 } from 'viem';
-import type { ProofExportResponse } from './proofsApi';
+import type { ProofExportResponse } from './proof';
 
 const ZERO32: Hex = `0x${'00'.repeat(32)}`;
 

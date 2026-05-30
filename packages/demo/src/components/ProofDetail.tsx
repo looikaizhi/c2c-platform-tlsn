@@ -4,9 +4,9 @@
 
 import { useCallback, useEffect, useState, type CSSProperties } from 'react';
 import type { Hex } from 'viem';
-import { getProof, type ProofExportResponse } from '../utils/proofsApi';
+import { getProof, type ProofExportResponse } from '../utils/proof';
 import { verifyVerifierSignature, type VerifyResult } from '../utils/verifySignature';
-import { reconcileOnChain, type ReconcileResult } from '../utils/reconcileOnChain';
+import { reconcileOnChain, type ReconcileResult } from '../utils/services';
 
 export interface ProofDetailProps {
     attestationId: string;

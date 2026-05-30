@@ -10,7 +10,7 @@ import {
     type ListPage,
     type ListFilters,
     type ProofStatus,
-} from '../utils/proofsApi';
+} from '../utils/proof';
 
 export interface ProofsListProps {
     mode: 'admin' | 'user';
