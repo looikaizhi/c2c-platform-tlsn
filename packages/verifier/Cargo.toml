@@ -59,6 +59,10 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 hmac = "0.12"
 sha2 = "0.10"
 
+# Stage 6: SIWE (EIP-4361) authentication for end-user wallets + stateless JWT
+siwe = "0.6"
+jsonwebtoken = "9"
+
 [dev-dependencies]
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 http-body-util = "0.1"
