@@ -88,7 +88,10 @@ async fn start_proxy_test_verifier(
         sessions: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(config),
         db,
-        proof_api_key: None,
+        proof_api_keys: HashMap::new(),
+        jwt_secret: None,
+        siwe_domain: None,
+        siwe_nonces: Arc::new(std::sync::Mutex::new(HashMap::new())),
         ws_rate_limiter,
     });
 

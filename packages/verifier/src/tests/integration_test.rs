@@ -182,7 +182,10 @@ webhooks:
         sessions: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(config),
         db,
-        proof_api_key: None,
+        proof_api_keys: HashMap::new(), // dev passthrough
+        jwt_secret: None,
+        siwe_domain: None,
+        siwe_nonces: Arc::new(std::sync::Mutex::new(HashMap::new())),
         ws_rate_limiter: Arc::new(std::sync::Mutex::new(HashMap::new())),
     });
 
@@ -1152,11 +1155,19 @@ async fn start_verifier_server_with_key(verifier_port: u16, key: &str) -> JoinHa
     let conn = crate::init_db(":memory:");
     let db = Arc::new(std::sync::Mutex::new(conn));
 
+    let mut keys = HashMap::new();
+    keys.insert(
+        key.to_string(),
+        crate::auth::api_key::KeyScope { tenant_id: None }, // SuperAdmin (legacy single-key)
+    );
     let app_state = Arc::new(crate::AppState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(config),
         db,
-        proof_api_key: Some(key.to_string()),
+        proof_api_keys: keys,
+        jwt_secret: None,
+        siwe_domain: None,
+        siwe_nonces: Arc::new(std::sync::Mutex::new(HashMap::new())),
         ws_rate_limiter: Arc::new(std::sync::Mutex::new(HashMap::new())),
     });
 
@@ -1399,4 +1410,614 @@ async fn test_get_proof_by_tx_invalid_format() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "0x + invalid chars should be 400");
 
     verifier_handle.abort();
+}
+
+// ============================================================================
+// Stage 5 — GET /proofs HTTP integration: auth + tenant isolation (§5.3, §6.2)
+// ============================================================================
+
+/// Start a verifier server with an arbitrary keys map and routes including `/proofs`.
+async fn start_verifier_server_with_keys(
+    verifier_port: u16,
+    keys: HashMap<String, crate::auth::api_key::KeyScope>,
+) -> JoinHandle<()> {
+    let config: crate::Config = serde_yaml::from_str("webhooks: {}").unwrap();
+    let conn = crate::init_db(":memory:");
+    let db = Arc::new(std::sync::Mutex::new(conn));
+
+    let app_state = Arc::new(crate::AppState {
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        config: Arc::new(config),
+        db,
+        proof_api_keys: keys,
+        jwt_secret: None,
+        siwe_domain: None,
+        siwe_nonces: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        ws_rate_limiter: Arc::new(std::sync::Mutex::new(HashMap::new())),
+    });
+
+    let app = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route("/proof/:session_id", axum::routing::get(crate::get_proof_handler))
+        .route("/proof/:session_id/tx", axum::routing::patch(crate::patch_proof_tx_handler))
+        .route("/proof", axum::routing::get(crate::get_proof_by_tx_handler))
+        .route("/proofs", axum::routing::get(crate::list_proofs_handler))
+        .route("/test/seed", axum::routing::post(crate::test_seed_proof_handler))
+        .layer(CorsLayer::permissive())
+        .with_state(app_state);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], verifier_port));
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    })
+}
+
+fn seed_body(session_id: &str, tenant: Option<&str>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": "wise.com",
+        "policy_version": "v1.0.0",
+        "order_binding_hash": "0xdeadbeef",
+        "commitments_hash": "0xcafebabe",
+        "verifier_signature": "0xsig",
+        "verifier_address": "0xaddr",
+        "handler_results": "[]",
+        "account_checks": null,
+        "redacted_sent": null,
+        "redacted_recv": null,
+        "session_data": null,
+        "tx_hash": null,
+        "recorded_at": "2026-05-01T00:00:00Z",
+        "retain_until": "2031-05-01T00:00:00Z",
+        "transcript_commitments": null,
+        "signing_chain_id": null
+    });
+    if let Some(t) = tenant {
+        body["tenant_id"] = serde_json::json!(t);
+    }
+    body
+}
+
+/// §5.3 invariant: `GET /proofs` requires authentication EVEN in dev mode (empty
+/// keys map). Returning 200 with the full proof_store to an anonymous caller
+/// would be a data-egress hole — the handler refuses regardless of dev mode.
+#[tokio::test]
+async fn test_proofs_list_anonymous_returns_401_even_in_dev() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let verifier = start_verifier_server_with_keys(VERIFIER_PORT + 20, HashMap::new()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let base = format!("http://127.0.0.1:{}", VERIFIER_PORT + 20);
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/proofs", base))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/proofs must require auth even when no key is configured"
+    );
+
+    // Single-record endpoint still falls through in dev mode (existing behavior).
+    let resp = reqwest::Client::new()
+        .get(format!("{}/proof/any-id", base))
+        .send()
+        .await
+        .expect("send");
+    // 404 (no such record) — proves dev passthrough applied (otherwise we'd see 401).
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    verifier.abort();
+}
+
+/// §6.2 invariant: a tenant-scoped key sees ONLY its tenant's rows on /proofs.
+/// `k1:tenantA` + `k2:tenantB` + super → only relevant slice per caller.
+#[tokio::test]
+async fn test_proofs_list_tenant_isolation() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let mut keys = HashMap::new();
+    keys.insert("k1".to_string(), crate::auth::api_key::KeyScope { tenant_id: Some("tenantA".to_string()) });
+    keys.insert("k2".to_string(), crate::auth::api_key::KeyScope { tenant_id: Some("tenantB".to_string()) });
+    keys.insert("super".to_string(), crate::auth::api_key::KeyScope { tenant_id: None });
+
+    let port = VERIFIER_PORT + 21;
+    let verifier = start_verifier_server_with_keys(port, keys).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let base = format!("http://127.0.0.1:{}", port);
+    // Disable connection pooling — the existing reqwest+axum integration tests in
+    // this binary exhibit an IncompleteMessage flake when a single Client pipelines
+    // many short requests back-to-back. Fresh TCP per request avoids the race.
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("reqwest client");
+
+    // Seed: 2 rows in tenantA, 1 in tenantB, 1 untenanted.
+    for (sid, tenant) in [("a1", Some("tenantA")), ("a2", Some("tenantA")), ("b1", Some("tenantB")), ("orphan", None)] {
+        let resp = client
+            .post(format!("{}/test/seed", base))
+            .json(&seed_body(sid, tenant))
+            .send()
+            .await
+            .expect("seed");
+        assert_eq!(resp.status(), StatusCode::CREATED, "seed {} should succeed", sid);
+    }
+
+    // k1 (tenantA) → must see only a1 + a2.
+    let resp = client
+        .get(format!("{}/proofs", base))
+        .header("X-TLSN-Api-Key", "k1")
+        .send()
+        .await
+        .expect("k1 list");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let ids: Vec<String> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["attestationId"].as_str().unwrap().to_string())
+        .collect();
+    let ids_set: std::collections::HashSet<_> = ids.iter().cloned().collect();
+    assert_eq!(ids_set, std::collections::HashSet::from(["a1".to_string(), "a2".to_string()]),
+               "tenantA key must see exactly a1+a2, got {:?}", ids);
+
+    // k2 (tenantB) → must see only b1.
+    let resp = client
+        .get(format!("{}/proofs", base))
+        .header("X-TLSN-Api-Key", "k2")
+        .send()
+        .await
+        .expect("k2 list");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let ids: Vec<String> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["attestationId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec!["b1".to_string()], "tenantB key must see only b1");
+
+    // super → sees all 4 rows.
+    let resp = client
+        .get(format!("{}/proofs", base))
+        .header("Authorization", "Bearer super")
+        .send()
+        .await
+        .expect("super list");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["items"].as_array().unwrap().len(), 4, "super sees all rows");
+
+    // Bogus key → 401.
+    let resp = client
+        .get(format!("{}/proofs", base))
+        .header("X-TLSN-Api-Key", "bogus")
+        .send()
+        .await
+        .expect("bogus list");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    verifier.abort();
+}
+
+// ============================================================================
+// Stage 6 — SIWE HTTP integration: /auth/* + ownership filtering (§6.3, §6.4)
+// ============================================================================
+
+/// Start a verifier server with SIWE configured + all routes mounted.
+async fn start_verifier_server_with_siwe(
+    verifier_port: u16,
+    jwt_secret: &str,
+    siwe_domain: &str,
+) -> JoinHandle<()> {
+    let config: crate::Config = serde_yaml::from_str("webhooks: {}").unwrap();
+    let conn = crate::init_db(":memory:");
+    let db = Arc::new(std::sync::Mutex::new(conn));
+
+    let app_state = Arc::new(crate::AppState {
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        config: Arc::new(config),
+        db,
+        proof_api_keys: HashMap::new(),
+        jwt_secret: Some(jwt_secret.to_string()),
+        siwe_domain: Some(siwe_domain.to_string()),
+        siwe_nonces: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        ws_rate_limiter: Arc::new(std::sync::Mutex::new(HashMap::new())),
+    });
+
+    let app = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route("/proof/:session_id", axum::routing::get(crate::get_proof_handler))
+        .route("/proof/:session_id/tx", axum::routing::patch(crate::patch_proof_tx_handler))
+        .route("/proof", axum::routing::get(crate::get_proof_by_tx_handler))
+        .route("/proofs", axum::routing::get(crate::list_proofs_handler))
+        .route("/auth/nonce", axum::routing::get(crate::api::auth::nonce_handler))
+        .route("/auth/verify", axum::routing::post(crate::api::auth::verify_handler))
+        .route("/test/seed", axum::routing::post(crate::test_seed_proof_handler))
+        .layer(CorsLayer::permissive())
+        .with_state(app_state);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], verifier_port));
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    })
+}
+
+/// Derive an Ethereum address (`0x...` lowercase, 42 chars) from a k256 SigningKey.
+fn test_address_of(sk: &k256::ecdsa::SigningKey) -> String {
+    use sha3::{Digest, Keccak256};
+    let vk = sk.verifying_key();
+    let point = vk.to_encoded_point(false);
+    let pubkey = &point.as_bytes()[1..];
+    let hash: [u8; 32] = Keccak256::digest(pubkey).into();
+    format!("0x{}", hex::encode(&hash[12..]))
+}
+
+/// EIP-55 mixed-case rendering of the SigningKey's address (siwe message parser
+/// requires checksum casing on the address line).
+fn eip55_of(sk: &k256::ecdsa::SigningKey) -> String {
+    use sha3::{Digest, Keccak256};
+    let vk = sk.verifying_key();
+    let point = vk.to_encoded_point(false);
+    let pubkey = &point.as_bytes()[1..];
+    let hash: [u8; 32] = Keccak256::digest(pubkey).into();
+    let mut addr: [u8; 20] = [0; 20];
+    addr.copy_from_slice(&hash[12..]);
+    siwe::eip55(&addr)
+}
+
+/// Build + sign a SIWE message for a given (domain, nonce). Returns the
+/// EIP-4361 text body and the `0x...` 65-byte hex signature.
+fn sign_siwe_for_test(
+    sk: &k256::ecdsa::SigningKey,
+    domain: &str,
+    nonce: &str,
+) -> (String, String) {
+    let address_eip55 = eip55_of(sk);
+    // SIWE format with NO statement requires TWO blank lines between the address
+    // line and `URI:` (one is skipped by the parser, one is the empty statement
+    // slot). See siwe-0.6.1 src/lib.rs::Message::from_str.
+    let msg_text = format!(
+        "{domain} wants you to sign in with your Ethereum account:\n{addr}\n\n\n\
+         URI: http://{domain}/\n\
+         Version: 1\n\
+         Chain ID: 1\n\
+         Nonce: {nonce}\n\
+         Issued At: 2026-05-22T00:00:00Z",
+        domain = domain,
+        addr = address_eip55,
+        nonce = nonce,
+    );
+    let msg: siwe::Message = msg_text
+        .parse()
+        .expect("hand-crafted SIWE text must parse");
+    let hash = msg.eip191_hash().expect("eip191_hash");
+    let (sig, recid) = sk.sign_prehash_recoverable(&hash).expect("sign");
+    let mut signature = [0u8; 65];
+    let r_bytes = sig.r().to_bytes();
+    let s_bytes = sig.s().to_bytes();
+    signature[..32].copy_from_slice(&r_bytes);
+    signature[32..64].copy_from_slice(&s_bytes);
+    signature[64] = recid.to_byte() + 27;
+    (msg_text, format!("0x{}", hex::encode(signature)))
+}
+
+fn nopool_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("reqwest client")
+}
+
+fn seed_owned(session_id: &str, owner: Option<&str>, counterparty: Option<&str>) -> Value {
+    json!({
+        "session_id": session_id,
+        "server_name": "wise.com",
+        "policy_version": "v1.0.0",
+        "order_binding_hash": "0xdeadbeef",
+        "commitments_hash": "0xcafebabe",
+        "verifier_signature": null,
+        "verifier_address": null,
+        "handler_results": "[]",
+        "account_checks": null,
+        "redacted_sent": null,
+        "redacted_recv": null,
+        "session_data": null,
+        "tx_hash": null,
+        "recorded_at": "2026-05-01T00:00:00Z",
+        "retain_until": "2031-05-01T00:00:00Z",
+        "transcript_commitments": null,
+        "signing_chain_id": null,
+        "owner_address": owner,
+        "counterparty_address": counterparty,
+    })
+}
+
+const SIWE_TEST_DOMAIN: &str = "example.com";
+const SIWE_TEST_SECRET: &str = "stage6-test-secret-do-not-use-in-prod";
+
+/// /auth/* routes are only mounted when SIWE is configured. With no SIWE env
+/// vars the routes simply don't exist → 404.
+#[tokio::test]
+async fn test_auth_routes_not_mounted_when_siwe_disabled() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let verifier = start_verifier_server_with_keys(VERIFIER_PORT + 22, HashMap::new()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let base = format!("http://127.0.0.1:{}", VERIFIER_PORT + 22);
+    let resp = reqwest::get(format!("{}/auth/nonce", base)).await.expect("get");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    verifier.abort();
+}
+
+/// Happy path: nonce → sign → verify → JWT → User reads OWN record (200) but
+/// not someone else's (403). Plus: nonce replay is rejected.
+#[tokio::test]
+async fn test_siwe_full_flow_then_user_reads_own_record_only() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let port = VERIFIER_PORT + 23;
+    let verifier =
+        start_verifier_server_with_siwe(port, SIWE_TEST_SECRET, SIWE_TEST_DOMAIN).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let base = format!("http://127.0.0.1:{}", port);
+    let client = nopool_client();
+
+    let sk_buyer = k256::ecdsa::SigningKey::from_bytes(&[1u8; 32].into()).unwrap();
+    let sk_other = k256::ecdsa::SigningKey::from_bytes(&[2u8; 32].into()).unwrap();
+    let addr_buyer = test_address_of(&sk_buyer);
+    let addr_other = test_address_of(&sk_other);
+
+    for body in [
+        seed_owned("sess-buyer", Some(&addr_buyer), None),
+        seed_owned("sess-other", Some(&addr_other), None),
+    ] {
+        let r = client.post(format!("{}/test/seed", base)).json(&body).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+
+    let r = client.get(format!("{}/auth/nonce", base)).send().await.expect("nonce");
+    assert_eq!(r.status(), StatusCode::OK);
+    let nonce_body: Value = r.json().await.unwrap();
+    let nonce = nonce_body["nonce"].as_str().expect("nonce").to_string();
+    assert!(nonce_body["expiresAt"].as_u64().unwrap_or(0) > 0);
+
+    let (message, signature) = sign_siwe_for_test(&sk_buyer, SIWE_TEST_DOMAIN, &nonce);
+    let r = client
+        .post(format!("{}/auth/verify", base))
+        .json(&json!({ "message": message, "signature": signature }))
+        .send()
+        .await
+        .expect("verify");
+    assert_eq!(r.status(), StatusCode::OK, "valid SIWE signature must be accepted");
+    let verify_body: Value = r.json().await.unwrap();
+    let token = verify_body["token"].as_str().expect("token").to_string();
+    assert_eq!(verify_body["address"].as_str().unwrap_or(""), addr_buyer);
+
+    // OWN record → 200.
+    let r = client
+        .get(format!("{}/proof/sess-buyer", base))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "buyer must read their own record");
+
+    // SOMEONE ELSE's record → 403.
+    let r = client
+        .get(format!("{}/proof/sess-other", base))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "buyer must NOT read another address's record (§6.4)"
+    );
+
+    // Replayed nonce → 401.
+    let (msg2, sig2) = sign_siwe_for_test(&sk_buyer, SIWE_TEST_DOMAIN, &nonce);
+    let r = client
+        .post(format!("{}/auth/verify", base))
+        .json(&json!({ "message": msg2, "signature": sig2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "nonce replay must be rejected");
+
+    verifier.abort();
+}
+
+/// PATCH /tx as User: only the OWNER can write tx_hash; counterparty (who can
+/// READ the proof) cannot promote it (§6.4 write rule).
+#[tokio::test]
+async fn test_siwe_user_patch_write_only_by_owner() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let port = VERIFIER_PORT + 24;
+    let verifier =
+        start_verifier_server_with_siwe(port, SIWE_TEST_SECRET, SIWE_TEST_DOMAIN).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let base = format!("http://127.0.0.1:{}", port);
+    let client = nopool_client();
+
+    let sk = k256::ecdsa::SigningKey::from_bytes(&[3u8; 32].into()).unwrap();
+    let addr = test_address_of(&sk);
+    let stranger = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    for body in [
+        seed_owned("sess-owns", Some(&addr), Some(stranger)),
+        seed_owned("sess-counterparty", Some(stranger), Some(&addr)),
+    ] {
+        let r = client.post(format!("{}/test/seed", base)).json(&body).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+
+    let nonce = client
+        .get(format!("{}/auth/nonce", base))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["nonce"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (message, signature) = sign_siwe_for_test(&sk, SIWE_TEST_DOMAIN, &nonce);
+    let token = client
+        .post(format!("{}/auth/verify", base))
+        .json(&json!({ "message": message, "signature": signature }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = client
+        .patch(format!("{}/proof/sess-owns/tx", base))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&json!({ "txHash": "0xabc123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "owner may PATCH their record");
+
+    let r = client
+        .patch(format!("{}/proof/sess-counterparty/tx", base))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&json!({ "txHash": "0xdef456" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "counterparty must NOT PATCH the proof (§6.4 write rule)"
+    );
+
+    verifier.abort();
+}
+
+/// GET /proofs as User: forced owner=address filter; sees only own owned rows.
+#[tokio::test]
+async fn test_siwe_user_proofs_list_locks_to_own_address() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let port = VERIFIER_PORT + 25;
+    let verifier =
+        start_verifier_server_with_siwe(port, SIWE_TEST_SECRET, SIWE_TEST_DOMAIN).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let base = format!("http://127.0.0.1:{}", port);
+    let client = nopool_client();
+
+    let sk = k256::ecdsa::SigningKey::from_bytes(&[4u8; 32].into()).unwrap();
+    let addr = test_address_of(&sk);
+    let stranger = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    for body in [
+        seed_owned("u1", Some(&addr), None),
+        seed_owned("u2", Some(&addr), None),
+        seed_owned("u3", Some(stranger), None),
+    ] {
+        let r = client.post(format!("{}/test/seed", base)).json(&body).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+
+    let nonce = client
+        .get(format!("{}/auth/nonce", base))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["nonce"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (message, signature) = sign_siwe_for_test(&sk, SIWE_TEST_DOMAIN, &nonce);
+    let token = client
+        .post(format!("{}/auth/verify", base))
+        .json(&json!({ "message": message, "signature": signature }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = client
+        .get(format!("{}/proofs", base))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = r.json().await.unwrap();
+    let ids: std::collections::HashSet<String> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["attestationId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        std::collections::HashSet::from(["u1".to_string(), "u2".to_string()]),
+        "User /proofs must only return rows where owner_address == User.address"
+    );
+
+    verifier.abort();
+}
+
+/// Cross-site replay defense: a SIWE message addressed to a different domain
+/// must be rejected at /auth/verify.
+#[tokio::test]
+async fn test_siwe_verify_rejects_wrong_domain() {
+    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let port = VERIFIER_PORT + 26;
+    let verifier =
+        start_verifier_server_with_siwe(port, SIWE_TEST_SECRET, SIWE_TEST_DOMAIN).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let base = format!("http://127.0.0.1:{}", port);
+    let client = nopool_client();
+
+    let sk = k256::ecdsa::SigningKey::from_bytes(&[5u8; 32].into()).unwrap();
+    let nonce = client
+        .get(format!("{}/auth/nonce", base))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["nonce"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (message, signature) = sign_siwe_for_test(&sk, "evil.com", &nonce);
+    let r = client
+        .post(format!("{}/auth/verify", base))
+        .json(&json!({ "message": message, "signature": signature }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "domain mismatch must reject the SIWE message"
+    );
+
+    verifier.abort();
 }
