@@ -102,7 +102,8 @@ async function expectRevert(promise: Promise<unknown>, expected: string | RegExp
   }
 }
 
-/** Spawn a new buyer wallet with funded ETH, USDT, and full approvals. */
+/** Spawn a new buyer wallet with funded ETH, USDT, full approvals, and
+ *  pre-set platform bindings (Phase 1.2+ placeOrder requires them). */
 async function spawnBuyer(d: DeployResult, viem: any) {
   const address = privateKeyToAccount(generatePrivateKey()).address;
   const tc      = await viem.getTestClient();
@@ -115,12 +116,20 @@ async function spawnBuyer(d: DeployResult, viem: any) {
 
   const usdtWc   = await viem.getContractAt("MockERC20", d.usdt.address,      { client: { wallet: wc } });
   const escrowWc = await viem.getContractAt("C2CEscrow", d.c2cEscrow.address, { client: { wallet: wc } });
+  const adminWc  = await viem.getContractAt("C2CAdmin",  d.c2cAdmin.address,  { client: { wallet: wc } });
 
   await usdtWc.write.approve([d.c2cEscrow.address,    MAX_UINT]);
   await usdtWc.write.approve([d.c2cBondVault.address, MAX_UINT]);
 
   await d.c2cRiskManager.write.initReputation([address]);
   await d.c2cBondVault.write.initClaimable([address, d.usdt.address]);
+
+  // Bind on both platforms — same hashes as FIAT_BUYER_INFO so FIAT placeOrder
+  // post-Phase-1.2 passes the BuyerBindingMismatch check.
+  const PLATFORM_WISE   = await d.tlsnVerifier.read.PLATFORM_WISE();
+  const PLATFORM_ALIPAY = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
+  await adminWc.write.setPlatformBinding([PLATFORM_WISE,   BUYER_NAME_HASH, BUYER_ID_HASH]);
+  await adminWc.write.setPlatformBinding([PLATFORM_ALIPAY, BUYER_NAME_HASH, BUYER_ID_HASH]);
 
   return { address: address as Address, escrowWc };
 }
@@ -169,7 +178,7 @@ async function setupBase(viem: any, collateral = COLLATERAL) {
   const PLATFORM_WISE: `0x${string}` = await d.tlsnVerifier.read.PLATFORM_WISE();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
 

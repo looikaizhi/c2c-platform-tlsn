@@ -109,6 +109,7 @@ async function spawnBuyer(d: DeployResult, viem: any) {
 
   const usdtWc   = await viem.getContractAt("MockERC20",    d.usdt.address,         { client: { wallet: wc } });
   const escrowWc = await viem.getContractAt("C2CEscrow",    d.c2cEscrow.address,    { client: { wallet: wc } });
+  const adminWc  = await viem.getContractAt("C2CAdmin",     d.c2cAdmin.address,     { client: { wallet: wc } });
 
   await usdtWc.write.approve([d.c2cEscrow.address,    MAX_UINT]);
   await usdtWc.write.approve([d.c2cBondVault.address, MAX_UINT]);
@@ -119,6 +120,13 @@ async function spawnBuyer(d: DeployResult, viem: any) {
   // access control; we call them via the deployer-connected instances.
   await d.c2cRiskManager.write.initReputation([address]);
   await d.c2cBondVault.write.initClaimable([address, d.usdt.address]);
+
+  // Phase 1.2+ placeOrder requires buyer to be bound on the platform.
+  // Use the same hashes as FIAT_BUYER_INFO so FIAT placeOrder also passes.
+  const PLATFORM_WISE   = await d.tlsnVerifier.read.PLATFORM_WISE();
+  const PLATFORM_ALIPAY = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
+  await adminWc.write.setPlatformBinding([PLATFORM_WISE,   BUYER_NAME_HASH, BUYER_ID_HASH]);
+  await adminWc.write.setPlatformBinding([PLATFORM_ALIPAY, BUYER_NAME_HASH, BUYER_ID_HASH]);
 
   return { address: address as Address, escrowWc };
 }
@@ -186,7 +194,7 @@ async function setupBase(viem: any, collateral = COLLATERAL) {
   const PLATFORM_WISE: `0x${string}` = await d.tlsnVerifier.read.PLATFORM_WISE();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
 

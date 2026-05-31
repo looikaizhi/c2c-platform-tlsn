@@ -57,7 +57,7 @@ async function setupBase(viem: any) {
   const PLATFORM_ALIPAY: Hex = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_ALIPAY,
     MERCHANT_NAME_HASH,
     MERCHANT_ID_HASH,
@@ -94,7 +94,7 @@ async function buildCryptoProof(
   rate: bigint = RATE_ALIPAY_CRYPTO,
 ) {
   const platformAlipay: Hex = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
-  const merchantInfo = await d.c2cAdmin.read.getMerchantPaymentInfoForPlatform([
+  const merchantInfo = await d.c2cAdmin.read.getPlatformBinding([
     d.merchant.account.address,
     platformAlipay,
   ]);

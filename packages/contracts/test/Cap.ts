@@ -61,7 +61,7 @@ async function setupBase(viem: any) {
   const PLATFORM_ALIPAY: Hex = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_ALIPAY,
     MERCHANT_NAME_HASH,
     MERCHANT_ID_HASH,

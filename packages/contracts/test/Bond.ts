@@ -68,6 +68,8 @@ import {
   WISE_AMOUNT_STR,
   BUYER_NAME,
   BUYER_HANDLE,
+  ALIPAY_BUYER_NAME,
+  ALIPAY_BUYER_HANDLE,
   ZERO_HASH,
 } from "./helpers/constants.js";
 
@@ -86,8 +88,17 @@ const MERCHANT_ID_HASH = keccak256(toBytes(WISE_MERCHANT_HANDLE));
 const BUYER_NAME_HASH = keccak256(toBytes(BUYER_NAME));
 const BUYER_ID_HASH = keccak256(toBytes(BUYER_HANDLE));
 
+const ALIPAY_BUYER_NAME_HASH = keccak256(toBytes(ALIPAY_BUYER_NAME));
+const ALIPAY_BUYER_ID_HASH   = keccak256(toBytes(ALIPAY_BUYER_HANDLE));
+
 const NULL_BUYER_INFO = { nameHash: ZERO_HASH, idHash: ZERO_HASH, isSet: false } as const;
 const BUYER_INFO = { nameHash: BUYER_NAME_HASH, idHash: BUYER_ID_HASH, isSet: true } as const;
+// Alipay placeOrder FIAT must pass the buyer's Alipay binding (post-Phase-1.2).
+const ALIPAY_BUYER_INFO = {
+  nameHash: ALIPAY_BUYER_NAME_HASH,
+  idHash:   ALIPAY_BUYER_ID_HASH,
+  isSet:    true,
+} as const;
 
 // Base bond rate: 1000 bps = 10%
 const BASE_BPS = 1000n;
@@ -145,10 +156,10 @@ async function setupBase(viem: any) {
   const PLATFORM_ALIPAY: Hex = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_ALIPAY, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
 
@@ -309,7 +320,7 @@ describe("Bond — V4 双边公平惩罚机制", async function () {
     });
 
     await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-    await adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+    await adminAsMerchant.write.setPlatformBinding([
       PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
     ]);
     await d.usdtAsMerchant.write.approve([freshEscrow.address, MAX_UINT]);
@@ -356,7 +367,7 @@ describe("Bond — V4 双边公平惩罚机制", async function () {
 
     await expectRevert(
       d.escrowAsBuyer.write.placeOrder([
-        d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+        d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, ALIPAY_BUYER_INFO,
       ]),
       /UserBlacklisted/,
     );
@@ -577,7 +588,7 @@ describe("Bond — V4 双边公平惩罚机制", async function () {
     const merchantBefore = await d.usdt.read.balanceOf([d.merchant.account.address]);
 
     await d.escrowAsBuyer.write.placeOrder([
-      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, ALIPAY_BUYER_INFO,
     ]);
 
     // bond taken from merchant's collateral → stored in bondVault
@@ -610,7 +621,7 @@ describe("Bond — V4 双边公平惩罚机制", async function () {
     const buyerBefore = await d.usdt.read.balanceOf([d.buyer.account.address]);
 
     await d.escrowAsBuyer.write.placeOrder([
-      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, ALIPAY_BUYER_INFO,
     ]);
     const buyerAfterPlace = await d.usdt.read.balanceOf([d.buyer.account.address]);
     // Buyer deposited TRADE_AMOUNT as escrow

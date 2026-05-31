@@ -166,7 +166,7 @@ async function setupBase(viem: any) {
   const PLATFORM_WISE: Hex = await d.tlsnVerifier.read.PLATFORM_WISE();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_WISE,
     MERCHANT_NAME_HASH,
     MERCHANT_ID_HASH,
@@ -207,7 +207,7 @@ async function setupSecondWiseMerchant(
   const escrowWallet = await escrowAs(viem, d, wallet);
   const PLATFORM_WISE: Hex = await d.tlsnVerifier.read.PLATFORM_WISE();
 
-  await adminWallet.write.setMerchantPaymentInfoForPlatform([
+  await adminWallet.write.setPlatformBinding([
     PLATFORM_WISE,
     merchantNameHash,
     merchantIdHash,
@@ -1056,7 +1056,7 @@ describe("WisePlatformVerifier", async function () {
   describe("TAMPER", () => {
     T("WISE-TAMPER-01", "商家改支付哈希后沿用旧 proof 仍可通过", async (ctx) => {
       await placeCryptoOrder(viem, d);
-      await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+      await d.adminAsMerchant.write.setPlatformBinding([
         PLATFORM_WISE,
         ALT_MERCHANT_NAME_HASH,
         ALT_MERCHANT_ID_HASH,
@@ -1183,7 +1183,7 @@ describe("WisePlatformVerifier", async function () {
 
     T("WISE-TAMPER-07", "改支付哈希后用新哈希签旧订单 -> OrderBindingHashMismatch", async (ctx) => {
       await placeCryptoOrder(viem, d);
-      await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+      await d.adminAsMerchant.write.setPlatformBinding([
         PLATFORM_WISE,
         ALT_MERCHANT_NAME_HASH,
         ALT_MERCHANT_ID_HASH,

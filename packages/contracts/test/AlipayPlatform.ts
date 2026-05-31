@@ -151,7 +151,7 @@ async function setupBase(viem: any) {
   const PLATFORM_ALIPAY: Hex = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_ALIPAY,
     MERCHANT_NAME_HASH,
     MERCHANT_ID_HASH,
@@ -1106,7 +1106,7 @@ describe("AlipayPlatformVerifier", async function () {
 
     T("ALI-TAMPER-08", "商家更新支付哈希后复用旧 proof 仍可通过", async (ctx) => {
       await placeCryptoOrder(viem, d);
-      await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+      await d.adminAsMerchant.write.setPlatformBinding([
         PLATFORM_ALIPAY,
         ALT_MERCHANT_NAME_HASH,
         ALT_MERCHANT_ID_HASH,
@@ -1135,7 +1135,7 @@ describe("AlipayPlatformVerifier", async function () {
 
     T("ALI-TAMPER-10", "改支付哈希后用新哈希签旧订单 -> OrderBindingHashMismatch", async (ctx) => {
       await placeCryptoOrder(viem, d);
-      await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+      await d.adminAsMerchant.write.setPlatformBinding([
         PLATFORM_ALIPAY,
         ALT_MERCHANT_NAME_HASH,
         ALT_MERCHANT_ID_HASH,

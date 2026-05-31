@@ -207,7 +207,7 @@ describe("C2CAdmin", async function () {
         const platformWise: Hex = await fresh.tlsnVerifier.read.PLATFORM_WISE();
 
         ctx.markVerifyStart();
-        const hash = await fresh.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+        const hash = await fresh.adminAsMerchant.write.setPlatformBinding([
           platformWise,
           MERCHANT_NAME_HASH,
           MERCHANT_ID_HASH,
@@ -215,7 +215,7 @@ describe("C2CAdmin", async function () {
         const receipt = await pc.getTransactionReceipt({ hash });
         ctx.markVerifyEnd(); ctx.setGas(receipt.gasUsed);
 
-        const info = await fresh.c2cAdmin.read.getMerchantPaymentInfoForPlatform([
+        const info = await fresh.c2cAdmin.read.getPlatformBinding([
           fresh.merchant.account.address,
           platformWise,
         ]);
@@ -224,7 +224,7 @@ describe("C2CAdmin", async function () {
         assert.equal(info.idHash, MERCHANT_ID_HASH);
         pass = true;
       } finally {
-        addRecord({ id: "ADM-FLOW-07", desc: "setMerchantPaymentInfoForPlatform(WISE) isSet=true 哈希落链",
+        addRecord({ id: "ADM-FLOW-07", desc: "setPlatformBinding(WISE) isSet=true 哈希落链",
           pass, totalMs: Date.now()-t0, verifyMs: ctx.verifyMs(), gasUsed: ctx.gasUsed });
       }
     });
@@ -236,14 +236,14 @@ describe("C2CAdmin", async function () {
         const platformWise: Hex = await fresh.tlsnVerifier.read.PLATFORM_WISE();
         const platformAlipay: Hex = await fresh.tlsnVerifier.read.PLATFORM_ALIPAY();
 
-        await fresh.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+        await fresh.adminAsMerchant.write.setPlatformBinding([
           platformWise,
           MERCHANT_NAME_HASH,
           MERCHANT_ID_HASH,
         ]);
 
         ctx.markVerifyStart();
-        const hash = await fresh.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+        const hash = await fresh.adminAsMerchant.write.setPlatformBinding([
           platformAlipay,
           ALIPAY_NAME_HASH,
           ALIPAY_ID_HASH,
@@ -251,11 +251,11 @@ describe("C2CAdmin", async function () {
         const receipt = await pc.getTransactionReceipt({ hash });
         ctx.markVerifyEnd(); ctx.setGas(receipt.gasUsed);
 
-        const wiseInfo = await fresh.c2cAdmin.read.getMerchantPaymentInfoForPlatform([
+        const wiseInfo = await fresh.c2cAdmin.read.getPlatformBinding([
           fresh.merchant.account.address,
           platformWise,
         ]);
-        const alipayInfo = await fresh.c2cAdmin.read.getMerchantPaymentInfoForPlatform([
+        const alipayInfo = await fresh.c2cAdmin.read.getPlatformBinding([
           fresh.merchant.account.address,
           platformAlipay,
         ]);
@@ -280,19 +280,19 @@ describe("C2CAdmin", async function () {
         const platformWise: Hex = await fresh.tlsnVerifier.read.PLATFORM_WISE();
         const platformAlipay: Hex = await fresh.tlsnVerifier.read.PLATFORM_ALIPAY();
 
-        await fresh.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+        await fresh.adminAsMerchant.write.setPlatformBinding([
           platformWise,
           MERCHANT_NAME_HASH,
           MERCHANT_ID_HASH,
         ]);
-        await fresh.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+        await fresh.adminAsMerchant.write.setPlatformBinding([
           platformAlipay,
           ALIPAY_NAME_HASH,
           ALIPAY_ID_HASH,
         ]);
 
         ctx.markVerifyStart();
-        const hash = await fresh.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+        const hash = await fresh.adminAsMerchant.write.setPlatformBinding([
           platformWise,
           MERCHANT_ALT_NAME_HASH,
           MERCHANT_ALT_ID_HASH,
@@ -300,11 +300,11 @@ describe("C2CAdmin", async function () {
         const receipt = await pc.getTransactionReceipt({ hash });
         ctx.markVerifyEnd(); ctx.setGas(receipt.gasUsed);
 
-        const wiseInfo = await fresh.c2cAdmin.read.getMerchantPaymentInfoForPlatform([
+        const wiseInfo = await fresh.c2cAdmin.read.getPlatformBinding([
           fresh.merchant.account.address,
           platformWise,
         ]);
-        const alipayInfo = await fresh.c2cAdmin.read.getMerchantPaymentInfoForPlatform([
+        const alipayInfo = await fresh.c2cAdmin.read.getPlatformBinding([
           fresh.merchant.account.address,
           platformAlipay,
         ]);
@@ -328,7 +328,7 @@ describe("C2CAdmin", async function () {
         const platformAlipay: Hex = await fresh.tlsnVerifier.read.PLATFORM_ALIPAY();
 
         ctx.markVerifyStart();
-        const hash = await fresh.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+        const hash = await fresh.adminAsMerchant.write.setPlatformBinding([
           platformWise,
           MERCHANT_NAME_HASH,
           MERCHANT_ID_HASH,
@@ -336,7 +336,7 @@ describe("C2CAdmin", async function () {
         const receipt = await pc.getTransactionReceipt({ hash });
         ctx.markVerifyEnd(); ctx.setGas(receipt.gasUsed);
 
-        const alipayInfo = await fresh.c2cAdmin.read.getMerchantPaymentInfoForPlatform([
+        const alipayInfo = await fresh.c2cAdmin.read.getPlatformBinding([
           fresh.merchant.account.address,
           platformAlipay,
         ]);
@@ -375,7 +375,7 @@ describe("C2CAdmin", async function () {
       const t0 = Date.now(); const ctx = makeCtx(); let pass = false;
       try {
         await fresh.c2cAdmin.write.registerMerchantByAdmin([fresh.merchant.account.address]);
-        const expiry = BigInt(Math.floor(Date.now() / 1000) + 86400);
+        const expiry = (await pc.getBlock()).timestamp + 86400n;
 
         ctx.markVerifyStart();
         const hash = await fresh.adminAsMerchant.write.publishRate([0n, 0, 7200n, expiry]);
@@ -397,7 +397,7 @@ describe("C2CAdmin", async function () {
       const t0 = Date.now(); const ctx = makeCtx(); let pass = false;
       try {
         await fresh.c2cAdmin.write.registerMerchantByAdmin([fresh.merchant.account.address]);
-        const expiry = BigInt(Math.floor(Date.now() / 1000) + 86400);
+        const expiry = (await pc.getBlock()).timestamp + 86400n;
         await fresh.adminAsMerchant.write.publishRate([0n, 0, 7200n, expiry]);
 
         ctx.markVerifyStart();
@@ -848,22 +848,30 @@ describe("C2CAdmin", async function () {
       }
     });
 
-    it("ADM-ERR-17: 非商家设置支付哈希", async () => {
+    it("ADM-ERR-17: 任意钱包可设置支付哈希（gate 已移除，binding 通用化）", async () => {
+      // Phase 1.2: NotMerchant gate on setPlatformBinding was
+      // removed so buyers can self-bind too (R3/R9). A non-merchant wallet must
+      // therefore succeed and the binding must land on the mapping.
       const t0 = Date.now(); const ctx = makeCtx(); let pass = false;
       try {
         ctx.markVerifyStart();
-        await viem.assertions.revertWithCustomError(
-          asRandom.write.setMerchantPaymentInfoForPlatform([
-            PLATFORM_WISE,
-            MERCHANT_NAME_HASH,
-            MERCHANT_ID_HASH,
-          ]),
-          d.c2cAdmin, "NotMerchant",
-        );
+        const altName = keccak256(toBytes("ADM-ERR-17-non-merchant-name"));
+        const altId   = keccak256(toBytes("ADM-ERR-17-non-merchant-id"));
+        await asRandom.write.setPlatformBinding([
+          PLATFORM_WISE,
+          altName,
+          altId,
+        ]);
+        const info = await d.c2cAdmin.read.getPlatformBinding([
+          d.randomUser.account.address, PLATFORM_WISE,
+        ]);
+        assert.equal(info.nameHash, altName);
+        assert.equal(info.idHash,   altId);
+        assert.equal(info.isSet,    true);
         ctx.markVerifyEnd();
         pass = true;
       } finally {
-        addRecord({ id: "ADM-ERR-17", desc: "非商家setMerchantPaymentInfoForPlatform → NotMerchant",
+        addRecord({ id: "ADM-ERR-17", desc: "非商家 setPlatformBinding 已可成功",
           pass, totalMs: Date.now()-t0, verifyMs: ctx.verifyMs(), gasUsed: 0n });
       }
     });
@@ -873,7 +881,7 @@ describe("C2CAdmin", async function () {
       try {
         ctx.markVerifyStart();
         await viem.assertions.revertWithCustomError(
-          asMerchant.write.setMerchantPaymentInfoForPlatform([
+          asMerchant.write.setPlatformBinding([
             PLATFORM_WISE,
             ZERO_HASH,
             MERCHANT_ID_HASH,
@@ -883,7 +891,7 @@ describe("C2CAdmin", async function () {
         ctx.markVerifyEnd();
         pass = true;
       } finally {
-        addRecord({ id: "ADM-ERR-18", desc: "nameHash=0 setMerchantPaymentInfoForPlatform → EmptyAccount",
+        addRecord({ id: "ADM-ERR-18", desc: "nameHash=0 setPlatformBinding → EmptyAccount",
           pass, totalMs: Date.now()-t0, verifyMs: ctx.verifyMs(), gasUsed: 0n });
       }
     });
@@ -894,7 +902,7 @@ describe("C2CAdmin", async function () {
         const unregisteredPlatform = keccak256(toBytes("unregistered-platform"));
         ctx.markVerifyStart();
         await viem.assertions.revertWithCustomError(
-          asMerchant.write.setMerchantPaymentInfoForPlatform([
+          asMerchant.write.setPlatformBinding([
             unregisteredPlatform,
             MERCHANT_NAME_HASH,
             MERCHANT_ID_HASH,
@@ -904,7 +912,7 @@ describe("C2CAdmin", async function () {
         ctx.markVerifyEnd();
         pass = true;
       } finally {
-        addRecord({ id: "ADM-ERR-18A", desc: "未注册平台 setMerchantPaymentInfoForPlatform → PlatformNotRegistered",
+        addRecord({ id: "ADM-ERR-18A", desc: "未注册平台 setPlatformBinding → PlatformNotRegistered",
           pass, totalMs: Date.now()-t0, verifyMs: ctx.verifyMs(), gasUsed: 0n });
       }
     });
@@ -1250,7 +1258,7 @@ describe("C2CAdmin", async function () {
     it("ADM-TAMPER-01: 商家频繁改汇率 版本严格递增", async () => {
       const t0 = Date.now(); const ctx = makeCtx(); let pass = false;
       try {
-        const expiry = BigInt(Math.floor(Date.now() / 1000) + 86400);
+        const expiry = (await pc.getBlock()).timestamp + 86400n;
         const mr0 = await d.c2cAdmin.read.getMerchantRate([d.merchant.account.address, 0n, 0]);
         const vBefore = mr0.version;
 
@@ -1413,7 +1421,7 @@ describe("C2CAdmin", async function () {
       const t0 = Date.now(); const ctx = makeCtx(); let pass = false;
       try {
         // Risk: no guard on assetType, should NOT revert currently
-        const expiry = BigInt(Math.floor(Date.now() / 1000) + 86400);
+        const expiry = (await pc.getBlock()).timestamp + 86400n;
         ctx.markVerifyStart();
         const hash = await d.adminAsMerchant.write.publishRate([0n, 2, 7200n, expiry]);
         const receipt = await pc.getTransactionReceipt({ hash });
@@ -1432,7 +1440,7 @@ describe("C2CAdmin", async function () {
     it("ADM-TAMPER-09: ⚠️ rate=0发布(风险用例-当前允许)", async () => {
       const t0 = Date.now(); const ctx = makeCtx(); let pass = false;
       try {
-        const expiry = BigInt(Math.floor(Date.now() / 1000) + 86400);
+        const expiry = (await pc.getBlock()).timestamp + 86400n;
         ctx.markVerifyStart();
         const hash = await d.adminAsMerchant.write.publishRate([0n, 0, 0n, expiry]);
         const receipt = await pc.getTransactionReceipt({ hash });

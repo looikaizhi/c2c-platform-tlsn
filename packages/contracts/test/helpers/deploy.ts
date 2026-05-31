@@ -1,5 +1,12 @@
 import type { Address } from "viem";
-import { parseUnits } from "viem";
+import { keccak256, parseUnits, toBytes } from "viem";
+
+import {
+  ALIPAY_BUYER_HANDLE,
+  ALIPAY_BUYER_NAME,
+  BUYER_HANDLE,
+  BUYER_NAME,
+} from "./constants.js";
 
 /**
  * Deploy the full C2C V4 platform stack (with RiskManager + BondVault).
@@ -118,6 +125,30 @@ export async function deployAll(viem: any) {
   await c2cRiskManager.write.initReputation([buyer.account.address]);
   await c2cBondVault.write.initClaimable([merchant.account.address, usdt.address]);
   await c2cBondVault.write.initClaimable([buyer.account.address, usdt.address]);
+
+  // 17. Default buyer bindings — Phase 1.2+ placeOrder requires buyers to be
+  // bound on the platform. Pre-seed both Wise and Alipay for every wallet
+  // EXCEPT the merchant, using the per-platform BUYER_* constants the
+  // existing FIAT tests already use, so the default BUYER_INFO /
+  // ALIPAY_BUYER_INFO in each test file lines up with the on-chain binding
+  // for any wallet that might end up placing orders (including
+  // walletClients[6..9] which Bond.ts uses for forced-timeout sequences).
+  // Merchant is intentionally LEFT UNBOUND here — each test's setupBase
+  // sets merchant binding explicitly, and C2CAdmin.ts ADM-FLOW-07C asserts
+  // a merchant whose Alipay binding has never been written reads back as
+  // isSet=false.
+  // Tests that need an "unbound buyer" must spawn a fresh wallet themselves.
+  const wiseBuyerNameHash    = keccak256(toBytes(BUYER_NAME));
+  const wiseBuyerIdHash      = keccak256(toBytes(BUYER_HANDLE));
+  const alipayBuyerNameHash  = keccak256(toBytes(ALIPAY_BUYER_NAME));
+  const alipayBuyerIdHash    = keccak256(toBytes(ALIPAY_BUYER_HANDLE));
+  const merchantAddr = merchant.account.address.toLowerCase();
+  for (const wallet of walletClients) {
+    if (wallet.account.address.toLowerCase() === merchantAddr) continue;
+    const adminWc = await viem.getContractAt("C2CAdmin", c2cAdmin.address, { client: { wallet } });
+    await adminWc.write.setPlatformBinding([PLATFORM_WISE,   wiseBuyerNameHash,   wiseBuyerIdHash]);
+    await adminWc.write.setPlatformBinding([PLATFORM_ALIPAY, alipayBuyerNameHash, alipayBuyerIdHash]);
+  }
 
   return {
     // Core contracts

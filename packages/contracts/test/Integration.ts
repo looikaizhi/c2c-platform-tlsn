@@ -39,6 +39,8 @@ import {
   type TLSNProof,
 } from "./helpers/proofBuilder.js";
 import {
+  ALIPAY_BUYER_HANDLE,
+  ALIPAY_BUYER_NAME,
   ALIPAY_SERVER,
   BUYER_HANDLE,
   BUYER_NAME,
@@ -76,8 +78,16 @@ const MERCHANT_ID_HASH   = keccak256(toBytes(WISE_MERCHANT_HANDLE));
 const BUYER_NAME_HASH    = keccak256(toBytes(BUYER_NAME));
 const BUYER_ID_HASH      = keccak256(toBytes(BUYER_HANDLE));
 
+const ALIPAY_BUYER_NAME_HASH = keccak256(toBytes(ALIPAY_BUYER_NAME));
+const ALIPAY_BUYER_ID_HASH   = keccak256(toBytes(ALIPAY_BUYER_HANDLE));
+
 const NULL_BUYER_INFO = { nameHash: ZERO_HASH, idHash: ZERO_HASH, isSet: false } as const;
 const BUYER_INFO      = { nameHash: BUYER_NAME_HASH, idHash: BUYER_ID_HASH, isSet: true } as const;
+const ALIPAY_BUYER_INFO = {
+  nameHash: ALIPAY_BUYER_NAME_HASH,
+  idHash:   ALIPAY_BUYER_ID_HASH,
+  isSet:    true,
+} as const;
 
 let _wiseTransferId = 990_000_000n;
 let _alipayCounter = 0;
@@ -117,10 +127,10 @@ async function setupBase(viem: any) {
   const PLATFORM_ALIPAY: Hex = await d.tlsnVerifier.read.PLATFORM_ALIPAY();
 
   await d.c2cAdmin.write.registerMerchantByAdmin([d.merchant.account.address]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_WISE, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
-  await d.adminAsMerchant.write.setMerchantPaymentInfoForPlatform([
+  await d.adminAsMerchant.write.setPlatformBinding([
     PLATFORM_ALIPAY, MERCHANT_NAME_HASH, MERCHANT_ID_HASH,
   ]);
 
@@ -267,7 +277,7 @@ describe("Integration (V4)", async function () {
     const merchantBefore = await d.usdt.read.balanceOf([d.merchant.account.address]);
 
     await d.escrowAsBuyer.write.placeOrder([
-      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, ALIPAY_BUYER_INFO,
     ]);
 
     const proofs = await alipayFiatProofs(d, ALIPAY_FIAT_PID, 0n);
@@ -344,7 +354,7 @@ describe("Integration (V4)", async function () {
       d.merchant.account.address, WISE_CRYPTO_PID, ASSET_CRYPTO, TRADE_AMOUNT, NULL_BUYER_INFO,
     ]);
     await d.escrowAsBuyer.write.placeOrder([
-      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, ALIPAY_BUYER_INFO,
     ]);
 
     // Complete both
@@ -688,7 +698,7 @@ describe("Integration (V4)", async function () {
 
     // Complete FIAT order 0 (Alipay, buyer = d.buyer)
     await d.escrowAsBuyer.write.placeOrder([
-      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, ALIPAY_BUYER_INFO,
     ]);
     const proofs0 = await alipayFiatProofs(d, ALIPAY_FIAT_PID, 0n);
     await d.escrowAsMerchant.write.receiveCryptoWithPlatformPayment([
@@ -703,7 +713,7 @@ describe("Integration (V4)", async function () {
     await usdtR.write.approve([d.c2cBondVault.address, MAX_UINT]);
 
     await (await escrowAs(viem, d, d.randomUser)).write.placeOrder([
-      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, BUYER_INFO,
+      d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, TRADE_AMOUNT, ALIPAY_BUYER_INFO,
     ]);
     const order1 = await getOrder(d, d.merchant.account.address, ALIPAY_FIAT_PID, ASSET_FIAT, 1n);
     assert.notEqual(order1.buyer, "0x0000000000000000000000000000000000000000",
