@@ -26,8 +26,8 @@ contract C2CAdmin {
 
     mapping(address => Merchant) public merchants;
     mapping(address => string) public merchantFiatAccounts;
-    /// @notice 商家按平台存储的支付信息：merchant => platformId => MerchantPaymentInfo
-    mapping(address => mapping(bytes32 => MerchantPaymentInfo)) public merchantPaymentInfoByPlatform;
+    /// @notice 商家按平台存储的支付信息：merchant => platformId => PlatformBinding
+    mapping(address => mapping(bytes32 => PlatformBinding)) public platformBindings;
 
     // 商家已发布汇率：merchant => productId => assetType(uint8) => MerchantRate
     mapping(address => mapping(uint256 => mapping(uint8 => MerchantRate)))
@@ -55,8 +55,8 @@ contract C2CAdmin {
     event AdminTransferAccepted(address indexed newAdmin);
     event MerchantRegistered(address indexed merchant, uint256 registeredAt);
     event MerchantFiatAccountSet(address indexed merchant, string account);
-    event MerchantPaymentInfoSet(
-        address indexed merchant,
+    event PlatformBindingSet(
+        address indexed wallet,
         bytes32 indexed platformId,
         bytes32 nameHash,
         bytes32 idHash
@@ -255,36 +255,37 @@ contract C2CAdmin {
         return merchantFiatAccounts[_merchant];
     }
 
-    /// @notice 商家为指定平台设置支付账号信息（nameHash + idHash）。
+    /// @notice 任意钱包为指定平台设置支付账号绑定（nameHash + idHash）。
+    /// @dev    商家与买家共用同一 mapping —— buyer 也通过本函数自助绑定 (R3/R9)。
+    ///         链上仅存 commit，明文与 salt 由服务器 DB 持有。
     /// @param _platformId  keccak256 of platform name，必须已在 TLSNVerifier 中注册
     /// @param _nameHash    keccak256(normalize(displayName))，不能为 0
     /// @param _idHash      keccak256(normalize(email / handle / account))，不能为 0
-    function setMerchantPaymentInfoForPlatform(
+    function setPlatformBinding(
         bytes32 _platformId,
         bytes32 _nameHash,
         bytes32 _idHash
     ) external {
-        if (!merchants[msg.sender].isActive) revert NotMerchant();
         if (verifier.platformVerifiers(_platformId) == address(0)) revert PlatformNotRegistered();
         if (_nameHash == bytes32(0) || _idHash == bytes32(0)) revert EmptyAccount();
 
-        merchantPaymentInfoByPlatform[msg.sender][_platformId] = MerchantPaymentInfo({
+        platformBindings[msg.sender][_platformId] = PlatformBinding({
             nameHash: _nameHash,
             idHash:   _idHash,
             isSet:    true
         });
-        emit MerchantPaymentInfoSet(msg.sender, _platformId, _nameHash, _idHash);
+        emit PlatformBindingSet(msg.sender, _platformId, _nameHash, _idHash);
     }
 
     /// @notice 读取商家在指定平台的支付信息。
     /// @param _merchant   商家地址
     /// @param _platformId keccak256 of platform name
-    /// @return MerchantPaymentInfo struct（若未设置则 isSet == false）
-    function getMerchantPaymentInfoForPlatform(
+    /// @return PlatformBinding struct（若未设置则 isSet == false）
+    function getPlatformBinding(
         address _merchant,
         bytes32 _platformId
-    ) external view returns (MerchantPaymentInfo memory) {
-        return merchantPaymentInfoByPlatform[_merchant][_platformId];
+    ) external view returns (PlatformBinding memory) {
+        return platformBindings[_merchant][_platformId];
     }
 
     function isMerchantActive(address _merchant) external view returns (bool) {

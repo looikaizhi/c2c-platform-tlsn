@@ -450,6 +450,9 @@ contract C2CEscrow is ReentrancyGuard {
         uint256 _amount,
         BuyerPaymentInfo calldata _buyerInfo
     ) external whenNotPaused {
+        // R4: 商家不能下自己的单
+        if (msg.sender == _merchant) revert SelfTradeNotAllowed();
+
         // 基础校验
         if (address(riskManager) == address(0) || address(bondVault) == address(0))
             revert ManagersNotSet();
@@ -478,9 +481,15 @@ contract C2CEscrow is ReentrancyGuard {
         if (mr.publishedAt == 0) revert RateNotPublished();
         if (mr.expiresAt != 0 && block.timestamp > mr.expiresAt) revert RateExpired();
 
-        MerchantPaymentInfo memory merchantPayInfo =
-            adminContract.getMerchantPaymentInfoForPlatform(_merchant, p.platformId);
-        if (!merchantPayInfo.isSet) revert MerchantPaymentInfoNotSet();
+        PlatformBinding memory merchantPayInfo =
+            adminContract.getPlatformBinding(_merchant, p.platformId);
+        if (!merchantPayInfo.isSet) revert MerchantBindingNotSet();
+
+        // R3: buyer 必须已在该 platform 绑定（链上 commit）
+        PlatformBinding memory buyerBound =
+            adminContract.getPlatformBinding(msg.sender, p.platformId);
+        if (!buyerBound.isSet) revert BuyerBindingNotSet();
+
         hasActiveOrder[msg.sender][_merchant][uint8(_assetType)][_productId] = true;
         uint256 oid = p.nextOrderId++;
         uint256 deadline = block.timestamp + ORDER_TIMEOUT;
@@ -533,6 +542,11 @@ contract C2CEscrow is ReentrancyGuard {
             if (_availableAmount(p) < _amount) revert InsufficientAvailable();
 
             if (_buyerInfo.nameHash == bytes32(0) || _buyerInfo.idHash == bytes32(0)) revert BuyerPaymentInfoRequired();
+            // R3: FIAT 路径 _buyerInfo 必须与 buyer 链上 binding 一致
+            if (_buyerInfo.nameHash != buyerBound.nameHash ||
+                _buyerInfo.idHash   != buyerBound.idHash) {
+                revert BuyerBindingMismatch();
+            }
             buyerOrderPaymentInfo[_merchant][_productId][oid] = BuyerPaymentInfo({
                 nameHash: _buyerInfo.nameHash,
                 idHash:   _buyerInfo.idHash,
@@ -738,11 +752,17 @@ contract C2CEscrow is ReentrancyGuard {
         uint256 deadline,
         uint8 status,
         uint32 rateVersion,
-        bytes32 platformTxId
+        bytes32 platformTxId,
+        bytes32 merchantNameHash,
+        bytes32 merchantIdHash
     ) {
         Product storage p = _getProduct(_merchant, _productId, AssetType(_assetType));
         Order storage o = p.orders[_orderId];
-        return (o.buyer, o.amount, o.rate, o.deadline, uint8(o.status), o.rateVersion, o.platformTxId);
+        return (
+            o.buyer, o.amount, o.rate, o.deadline,
+            uint8(o.status), o.rateVersion, o.platformTxId,
+            o.merchantNameHash, o.merchantIdHash
+        );
     }
 
     function getProductPlatformId(

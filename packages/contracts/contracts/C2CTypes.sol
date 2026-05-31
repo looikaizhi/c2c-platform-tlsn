@@ -76,7 +76,7 @@ struct Merchant {
     uint256 sellFiatAmount;
 }
 
-struct MerchantPaymentInfo {
+struct PlatformBinding {
     bytes32 nameHash;  // keccak256(normalize(displayName))
     bytes32 idHash;    // keccak256(normalize(email / handle))
     bool isSet;
@@ -171,7 +171,10 @@ error BuyerPaymentInfoNotSet();
 error OrderBindingHashMismatch();
 error AlipayTransferTooOld();
 error WiseTransferTooOld();
-error MerchantPaymentInfoNotSet();
+error MerchantBindingNotSet();
+error SelfTradeNotAllowed();
+error BuyerBindingNotSet();
+error BuyerBindingMismatch();
 error ContractPaused();
 
 // ── V4: Bond & Risk errors ────────────────────────────────────────
