@@ -13,13 +13,337 @@
  */
 
 import { network } from "hardhat";
-import { parseUnits, keccak256, toBytes } from "viem";
+import { parseUnits, keccak256, toBytes, concat, type Hex } from "viem";
+import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// ── Binding DB seed helpers ────────────────────────────────────────────────
+// These mirror packages/web/src/lib/payeeCrypto.ts + bindingRepo.ts. Cross-
+// importing is awkward (web is a Next "use client" tree); inlining keeps this
+// script self-contained while staying byte-equivalent to the API path.
+function normalize(s: string): string {
+    return s.trim().toLowerCase().normalize("NFC");
+}
+function randomSaltHex(): Hex {
+    return ("0x" + randomBytes(32).toString("hex")) as Hex;
+}
+function computeCommit(plaintext: string, salt: Hex): Hex {
+    return keccak256(concat([toBytes(normalize(plaintext)), toBytes(salt)]));
+}
+function normalizeWallet(addr: string): string {
+    return addr.toLowerCase();
+}
+
+const webDir     = path.resolve(__dirname, "../../web");
+const sqlitePath = path.resolve(webDir, "data/c2c.db");
+
+// Load better-sqlite3 (it isn't a contracts dep — it ships transitively via
+// packages/web. In npm workspaces it's typically hoisted to the workspace root,
+// so let Node's normal resolution walk the parent node_modules chain.)
+let DatabaseCtor: any | null = null;
+let dbLoadError: unknown = null;
+try {
+    const require = createRequire(import.meta.url);
+    DatabaseCtor = require("better-sqlite3");
+} catch (err) {
+    dbLoadError = err;
+}
+
+/**
+ * Run `npx drizzle-kit migrate` in packages/web so the SQLite file is created
+ * with all expected tables. Called when the script detects missing tables.
+ * Synchronous (spawnSync) so the subsequent INSERTs see the schema.
+ */
+function applyDrizzleMigrations(): void {
+    console.log("[deploy] running drizzle-kit migrate to bootstrap SQLite schema...");
+    const isWin = process.platform === "win32";
+    const result = spawnSync(
+        isWin ? "npx.cmd" : "npx",
+        ["drizzle-kit", "migrate"],
+        { cwd: webDir, stdio: "inherit", env: process.env },
+    );
+    if (result.status !== 0) {
+        throw new Error(`drizzle-kit migrate exited with code ${result.status}`);
+    }
+}
+
+/**
+ * Check whether `wallet_payment_binding` exists; if not, bootstrap via drizzle.
+ * Idempotent — does nothing once tables exist.
+ */
+function ensureSchema(): void {
+    if (!DatabaseCtor) {
+        throw new Error(
+            "better-sqlite3 not found — run `npm install` at the workspace root or in packages/web. " +
+            "Underlying error: " + (dbLoadError instanceof Error ? dbLoadError.message : String(dbLoadError)),
+        );
+    }
+    fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
+
+    let needsMigrate = false;
+    if (!fs.existsSync(sqlitePath)) {
+        needsMigrate = true;
+    } else {
+        const db = new DatabaseCtor(sqlitePath);
+        try {
+            const row = db
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='wallet_payment_binding'")
+                .get();
+            if (!row) needsMigrate = true;
+        } finally {
+            db.close();
+        }
+    }
+    if (needsMigrate) applyDrizzleMigrations();
+}
+
+/**
+ * Pure helper — generate salt + commits the same way `/api/binding/register`
+ * does. NOTHING is written to DB here. DB write happens only after the on-chain
+ * setPlatformBinding tx is confirmed successful (see writeBindingToDb below).
+ */
+function newCommits(name: string, handle: string): {
+    salt: Hex; nameCommit: Hex; idCommit: Hex;
+} {
+    const salt = randomSaltHex();
+    return {
+        salt,
+        nameCommit: computeCommit(name, salt),
+        idCommit:   computeCommit(handle, salt),
+    };
+}
+
+// ── Generic DB helpers ─────────────────────────────────────────────────────
+
+/** Open a DB connection, run `fn`, then close. */
+function withDb<T>(fn: (db: any) => T): T {
+    const db = new DatabaseCtor(sqlitePath);
+    db.pragma("foreign_keys = ON");
+    try {
+        return fn(db);
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Phase 0 — wipe the SQLite file and its journal/WAL companions before each
+ * deploy. `ensureSchema()` will recreate the schema via drizzle migrate on the
+ * next access. User asked for this so dev runs always start from a known state.
+ */
+function clearSqliteDb(): void {
+    for (const suffix of ["", "-journal", "-wal", "-shm"] as const) {
+        const f = sqlitePath + suffix;
+        if (fs.existsSync(f)) {
+            fs.rmSync(f, { force: true });
+            console.log(`[deploy] cleared ${path.basename(f)}`);
+        }
+    }
+}
+
+/** Insert or update a user_profile row. Idempotent. */
+function upsertUserProfile(
+    wallet: string,
+    role: "buyer" | "merchant" | "both",
+    db?: any,
+): void {
+    const exec = (d: any) => {
+        const w = normalizeWallet(wallet);
+        const ts = Math.floor(Date.now() / 1000);
+        const existing = d
+            .prepare("SELECT wallet_address FROM user_profile WHERE wallet_address = ?")
+            .get(w);
+        if (existing) {
+            d.prepare(
+                "UPDATE user_profile SET role = ?, updated_at = ? WHERE wallet_address = ?",
+            ).run(role, ts, w);
+        } else {
+            d.prepare(
+                "INSERT INTO user_profile (wallet_address, role, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ).run(w, role, ts, ts);
+        }
+    };
+    if (db) exec(db);
+    else withDb(exec);
+}
+
+// ── Phase 1 — sync admin-managed assets after on-chain success ─────────────
+
+/** Mirror `addCryptoInfo` into `support_crypto_assets`. */
+function writeCryptoAssetToDb(opts: {
+    cryptoId:     number;
+    tokenSymbol:  string;
+    tokenAddress: string;
+    isActive:     boolean;
+}): void {
+    ensureSchema();
+    withDb((db) => {
+        const ts = Math.floor(Date.now() / 1000);
+        db.prepare(
+            "INSERT INTO support_crypto_assets " +
+            "(crypto_id, token_symbol, token_address, is_active, edit_time, created_time) " +
+            "VALUES (?, ?, ?, ?, ?, ?)",
+        ).run(
+            opts.cryptoId,
+            opts.tokenSymbol,
+            opts.tokenAddress,
+            opts.isActive ? 1 : 0,
+            ts, ts,
+        );
+    });
+}
+
+/** Mirror `addFiatInfo` into `support_fiat_assets`. */
+function writeFiatAssetToDb(opts: {
+    fiatId:   number;
+    fiatName: string;
+    isActive: boolean;
+}): void {
+    ensureSchema();
+    withDb((db) => {
+        const ts = Math.floor(Date.now() / 1000);
+        db.prepare(
+            "INSERT INTO support_fiat_assets " +
+            "(fiat_id, fiat_name, is_active, edit_time, created_time) " +
+            "VALUES (?, ?, ?, ?, ?)",
+        ).run(opts.fiatId, opts.fiatName, opts.isActive ? 1 : 0, ts, ts);
+    });
+}
+
+/**
+ * Persist a merchant's binding row to SQLite. CALL ONLY AFTER the matching
+ * setPlatformBinding tx is confirmed successful.
+ */
+function writeBindingToDb(opts: {
+    wallet:     string;
+    platformId: Hex;
+    name:       string;
+    handle:     string;
+    salt:       Hex;
+    nameCommit: Hex;
+    idCommit:   Hex;
+}): void {
+    ensureSchema();
+    withDb((db) => {
+        const w = normalizeWallet(opts.wallet);
+        const ts = Math.floor(Date.now() / 1000);
+        db.transaction(() => {
+            upsertUserProfile(w, "merchant", db);
+
+            db.prepare(
+                "UPDATE wallet_payment_binding SET status = 'superseded', superseded_at = ? " +
+                "WHERE wallet_address = ? AND platform_id = ? AND status = 'active'",
+            ).run(ts, w, opts.platformId);
+
+            db.prepare(
+                "INSERT INTO wallet_payment_binding " +
+                "(wallet_address, platform_id, plaintext_name, plaintext_handle, salt, name_commit, id_commit, status, created_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+            ).run(
+                w,
+                opts.platformId,
+                normalize(opts.name),
+                normalize(opts.handle),
+                opts.salt,
+                opts.nameCommit,
+                opts.idCommit,
+                ts,
+            );
+        })();
+    });
+}
+
+// ── Phase 2 — seed dev-only tables that the legacy /api/order/* routes need ──
+
+/**
+ * Seed `payment_method`, `userdata`, `fiat_bank_accounts`, `order_contract`,
+ * `order_index` so `/orders/[orderId]` detail page can render the 4 demo
+ * orders. These tables have no on-chain analog — they're carry-over MySQL
+ * dictionaries the legacy detail-page routes still query.
+ *
+ * Call ONCE near the end of deploy, after all chain operations have committed.
+ */
+function seedDevTables(opts: { merchant: string }): void {
+    ensureSchema();
+    const m = normalizeWallet(opts.merchant);
+    const ts = Math.floor(Date.now() / 1000);
+
+    withDb((db) => {
+        db.transaction(() => {
+            // payment_method dictionary
+            db.prepare(
+                "INSERT INTO payment_method (method_id, method_name, icon_url, url) VALUES (?, ?, NULL, NULL)",
+            ).run(1, "Wise");
+            db.prepare(
+                "INSERT INTO payment_method (method_id, method_name, icon_url, url) VALUES (?, ?, NULL, NULL)",
+            ).run(2, "Alipay");
+
+            // userdata — merchant stats (default values, dev-only)
+            db.prepare(
+                "INSERT INTO userdata " +
+                "(wallet_address, verified, close_rate, trading_volume, close_rate_binance, trading_volume_binance, " +
+                "user_level, minimum_amount, maximum_amount, create_time, update_time) " +
+                "VALUES (?, 1, 0, 0, 0, 0, 0, 50, 100, ?, ?)",
+            ).run(m, ts, ts);
+
+            // fiat_bank_accounts — one row per (merchant, currency, method) combo.
+            // account_number_hash is a 32-byte BLOB; we use placeholder bytes since
+            // the merchant's real account info is dev-side fiction.
+            const wiseHash   = Buffer.from("a".repeat(64), "hex");
+            const alipayHash = Buffer.from("b".repeat(64), "hex");
+            db.prepare(
+                "INSERT INTO fiat_bank_accounts " +
+                "(id, wallet_address, method_id_fk, currency, account_holder_name, account_number_hash, " +
+                "account_last4, bank_verified, create_time) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            ).run(1, m, 1, "MYR", MERCHANT_WISE_NAME,   wiseHash,   "0001", ts);
+            db.prepare(
+                "INSERT INTO fiat_bank_accounts " +
+                "(id, wallet_address, method_id_fk, currency, account_holder_name, account_number_hash, " +
+                "account_last4, bank_verified, create_time) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            ).run(2, m, 2, "CNY", MERCHANT_ALIPAY_NAME, alipayHash, "0002", ts);
+
+            // order_contract — mirror the 4 chain products. `contract_address`
+            // has a UNIQUE constraint so we generate distinct hex strings per
+            // row; the field is display-only (no FK).
+            const productAddr = (i: number) => "0x" + i.toString(16).padStart(40, "0");
+            const products = [
+                { id: 1, fiat: "MYR", crypto: "USDT", fiat_to_crypto: 1 }, // CRYPTO #0 Wise
+                { id: 2, fiat: "CNY", crypto: "USDT", fiat_to_crypto: 1 }, // CRYPTO #1 Alipay
+                { id: 3, fiat: "MYR", crypto: "USDT", fiat_to_crypto: 0 }, // FIAT   #0 Wise
+                { id: 4, fiat: "CNY", crypto: "USDT", fiat_to_crypto: 0 }, // FIAT   #1 Alipay
+            ];
+            for (const p of products) {
+                db.prepare(
+                    "INSERT INTO order_contract " +
+                    "(id, wallet_address, fiat_asset_name, crypto_asset_name, fiat_to_crypto, contract_address, create_time) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ).run(p.id, m, p.fiat, p.crypto, p.fiat_to_crypto, productAddr(p.id), ts);
+            }
+
+            // order_index — link each order_contract row to the merchant's bank
+            // account that handles its currency.
+            const insertIndex = db.prepare(
+                "INSERT INTO order_index (wallet_address, order_id, bank_id) VALUES (?, ?, ?)",
+            );
+            insertIndex.run(m, 1, 1); // MYR  → Wise account
+            insertIndex.run(m, 2, 2); // CNY  → Alipay account
+            insertIndex.run(m, 3, 1); // MYR  → Wise account (FIAT side)
+            insertIndex.run(m, 4, 2); // CNY  → Alipay account (FIAT side)
+        })();
+    });
+    console.log(
+        "✅ Dev tables seeded (payment_method × 2, userdata × 1, fiat_bank_accounts × 2, order_contract × 4, order_index × 4)",
+    );
+}
 
 // ── Asset registry — single source of truth shared with the web app ─────────
 const ASSETS_PATH = path.resolve(__dirname, "../../web/src/config/assets.json");
@@ -64,6 +388,11 @@ async function main() {
   const { viem } = await network.connect();
 
   console.log("=== C2C Web Deployment ===\n");
+
+  // ── 0. Wipe SQLite (user explicitly wants every deploy to start fresh) ────
+  clearSqliteDb();
+  ensureSchema();
+  console.log("✅ SQLite schema bootstrapped");
 
   // ── 1. MockERC20 tokens (driven by assets.json) ──────────────────────────
   const tokens: Record<string, Awaited<ReturnType<typeof viem.deployContract>>> = {};
@@ -148,16 +477,37 @@ async function main() {
   console.log("✅ Platform verifiers registered (Wise + Alipay)");
 
   // ── 12. Register supported assets (driven by assets.json) ───────────────
+  // Each on-chain write is followed by a receipt check; only on success do we
+  // mirror into the corresponding SQLite table (Phase 1).
   for (const c of onChainCryptos) {
-    await c2cAdmin.write.addCryptoInfo([tokens[c.symbol].address, true]);
+    const txHash = await c2cAdmin.write.addCryptoInfo([tokens[c.symbol].address, true]);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status !== "success") {
+      throw new Error(`addCryptoInfo(${c.symbol}) reverted: ${txHash}`);
+    }
+    writeCryptoAssetToDb({
+      cryptoId:     c.onChain.id,
+      tokenSymbol:  c.symbol,
+      tokenAddress: tokens[c.symbol].address,
+      isActive:     true,
+    });
   }
   for (const [i, f] of onChainFiats.entries()) {
     if (f.onChain.id !== i) {
       throw new Error(`assets.json: fiat "${f.symbol}".onChain.id (${f.onChain.id}) ≠ on-chain array index ${i}`);
     }
-    await c2cAdmin.write.addFiatInfo([f.symbol, true]);
+    const txHash = await c2cAdmin.write.addFiatInfo([f.symbol, true]);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status !== "success") {
+      throw new Error(`addFiatInfo(${f.symbol}) reverted: ${txHash}`);
+    }
+    writeFiatAssetToDb({
+      fiatId:   f.onChain.id,
+      fiatName: f.symbol,
+      isActive: true,
+    });
   }
-  console.log("✅ Assets registered from assets.json:",
+  console.log("✅ Assets registered from assets.json + DB mirrored:",
     onChainCryptos.map((c, i) => `${c.symbol}(c=${i})`).join(", "), "|",
     onChainFiats.map((f, i) => `${f.symbol}(f=${i})`).join(", "),
   );
@@ -197,7 +547,16 @@ async function main() {
   console.log("✅ All 10 accounts approved Escrow + BondVault for USDT + USDC");
 
   // ── 16. Merchant setup (accounts[1]) ─────────────────────────────────────
-  await c2cAdmin.write.registerMerchantByAdmin([merchantAddr]);
+  {
+    const txHash = await c2cAdmin.write.registerMerchantByAdmin([merchantAddr]);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status !== "success") {
+      throw new Error(`registerMerchantByAdmin(${merchantAddr}) reverted: ${txHash}`);
+    }
+    // Persist DB role so useMyRole picks up `merchant` without needing the
+    // /api/admin/role/grant signing flow.
+    upsertUserProfile(merchantAddr, "merchant");
+  }
 
   const usdtAsM   = await viem.getContractAt("MockERC20", usdt.address, { client: { wallet: merchantWallet } });
   const usdcAsM   = await viem.getContractAt("MockERC20", usdc.address, { client: { wallet: merchantWallet } });
@@ -207,16 +566,49 @@ async function main() {
   await usdtAsM.write.approve([c2cEscrow.address, MAX_UINT256]);
   await usdcAsM.write.approve([c2cEscrow.address, MAX_UINT256]);
 
-  // Wise payment info
-  const wNameHash = keccak256(toBytes(MERCHANT_WISE_NAME));
-  const wIdHash   = keccak256(toBytes(MERCHANT_WISE_HANDLE));
-  await (adminAsM.write as any).setMerchantPaymentInfoForPlatform([PLATFORM_WISE, wNameHash, wIdHash]);
+  // Wise payment info — order is critical: chain FIRST → verify receipt →
+  // DB ONLY THEN. Crashing or reverting after step 2 leaves DB untouched.
+  const wiseSalted = newCommits(MERCHANT_WISE_NAME, MERCHANT_WISE_HANDLE);
+  {
+    const txHash = await (adminAsM.write as any).setPlatformBinding(
+      [PLATFORM_WISE, wiseSalted.nameCommit, wiseSalted.idCommit],
+    );
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status !== "success") {
+      throw new Error(`setPlatformBinding(wise) reverted: ${txHash}`);
+    }
+    writeBindingToDb({
+      wallet:     merchantAddr,
+      platformId: PLATFORM_WISE as Hex,
+      name:       MERCHANT_WISE_NAME,
+      handle:     MERCHANT_WISE_HANDLE,
+      salt:       wiseSalted.salt,
+      nameCommit: wiseSalted.nameCommit,
+      idCommit:   wiseSalted.idCommit,
+    });
+  }
 
   // Alipay payment info (literal strings, including the leading "* " and "***")
-  const aNameHash = keccak256(toBytes(MERCHANT_ALIPAY_NAME));
-  const aIdHash   = keccak256(toBytes(MERCHANT_ALIPAY_HANDLE));
-  await (adminAsM.write as any).setMerchantPaymentInfoForPlatform([PLATFORM_ALIPAY, aNameHash, aIdHash]);
-  console.log("✅ Merchant registered + Wise + Alipay payment info set");
+  const alipaySalted = newCommits(MERCHANT_ALIPAY_NAME, MERCHANT_ALIPAY_HANDLE);
+  {
+    const txHash = await (adminAsM.write as any).setPlatformBinding(
+      [PLATFORM_ALIPAY, alipaySalted.nameCommit, alipaySalted.idCommit],
+    );
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status !== "success") {
+      throw new Error(`setPlatformBinding(alipay) reverted: ${txHash}`);
+    }
+    writeBindingToDb({
+      wallet:     merchantAddr,
+      platformId: PLATFORM_ALIPAY as Hex,
+      name:       MERCHANT_ALIPAY_NAME,
+      handle:     MERCHANT_ALIPAY_HANDLE,
+      salt:       alipaySalted.salt,
+      nameCommit: alipaySalted.nameCommit,
+      idCommit:   alipaySalted.idCommit,
+    });
+  }
+  console.log("✅ Merchant registered + Wise + Alipay payment info set (chain confirmed → DB written)");
 
   // ── 17. List 4 products (all USDT collateral) ────────────────────────────
   //   CRYPTO #0: USDT(0) + MYR(0) + Wise   → buyer pays MYR via Wise, gets USDT
@@ -255,6 +647,9 @@ async function main() {
     `✅ Risk config set: min=${RISK_MIN} base=${RISK_BASE} max=${RISK_MAX} step=${RISK_STEP} `
     + `reset=${RISK_RESET} freeze=${RISK_FREEZE} reward=${RISK_REWARD} decay=${RISK_DECAY}`,
   );
+
+  // ── 18b. Seed legacy dev-only tables for /orders/[orderId] detail page ───
+  seedDevTables({ merchant: merchantAddr });
 
   // ── 19. Write packages/web/.env.local ────────────────────────────────────
   const envPath = path.resolve(__dirname, "../../web/.env.local");
@@ -326,6 +721,28 @@ async function main() {
   };
   fs.writeFileSync(deploymentsFile, JSON.stringify(deploymentsRecord, null, 2), "utf-8");
   console.log(`✅ Deployments written to ${path.relative(process.cwd(), deploymentsFile)}`);
+
+  // ── 19c. Reset the web keeper's persisted state ──────────────────────────
+  // A redeploy produces a fresh escrow + deploymentBlock. The keeper resumes
+  // from the cursor in its state.json (`lastProcessedBlock`) and never
+  // re-scans below it, so a stale cursor from a previous deploy/chain makes it
+  // silently skip the new escrow's early-block orders. Deleting the snapshot
+  // forces the keeper to start fresh from this deploymentBlock on its next
+  // launch. Matches the keeper's default STATE_FILE_PATH (`./data/state.json`
+  // relative to packages/keeper). Only the `web` keeper is reset here — the
+  // `demo` keeper tracks a different escrow and is left untouched.
+  // NOTE: this only invalidates the on-disk snapshot. A keeper process that is
+  // already running keeps the old escrow in memory and rewrites state.json on
+  // its next save — it MUST be restarted after this deploy to take effect.
+  const keeperStateFile = path.resolve(__dirname, "../../keeper/data/state.json");
+  try {
+    if (fs.existsSync(keeperStateFile)) {
+      fs.rmSync(keeperStateFile, { force: true });
+      console.log("🧹 Reset web keeper state (deleted keeper/data/state.json) — restart the keeper to pick up this deploy");
+    }
+  } catch (err) {
+    console.warn(`⚠ Could not reset keeper state at ${keeperStateFile}:`, err);
+  }
 
   console.log("\n" + "=".repeat(60));
   console.log("✅ packages/web/.env.local updated");

@@ -213,7 +213,7 @@ async function main() {
   // Set payment info for Wise
   const wNameHash = keccak256(toBytes(MERCHANT_WISE_NAMES[merchantIndex]));
   const wIdHash   = keccak256(toBytes(MERCHANT_WISE_HANDLES[merchantIndex]));
-  await (adminAsM.write as any).setMerchantPaymentInfoForPlatform([PLATFORM_WISE, wNameHash, wIdHash]);
+  await (adminAsM.write as any).setPlatformBinding([PLATFORM_WISE, wNameHash, wIdHash]);
   console.log(`  ✅ Payment info set (Wise)`);
 
   // List Wise buy-crypto product: USDT(0) -> MYR(0), productId=0 for assetType=CRYPTO
