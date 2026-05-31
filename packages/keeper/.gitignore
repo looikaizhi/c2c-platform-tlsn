@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+.env.demo
+data/*.json
+!data/.gitkeep

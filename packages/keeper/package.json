@@ -1,0 +1,40 @@
+{
+  "name": "@tlsn/keeper",
+  "version": "0.1.0",
+  "description": "Off-chain keeper for C2CEscrow.sweepExpiredBatch — watches OrderPlaced events, schedules sweeps after deadline + grace period.",
+  "type": "module",
+  "private": true,
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:demo": "DOTENV_CONFIG_PATH=.env.demo tsx src/index.ts",
+    "start": "node dist/index.js",
+    "start:demo": "DOTENV_CONFIG_PATH=.env.demo node dist/index.js",
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "npm run lint:eslint && npm run lint:prettier && npm run lint:typescript",
+    "lint:eslint": "eslint . --ext .ts",
+    "lint:prettier": "prettier --check .",
+    "lint:typescript": "tsc --noEmit",
+    "lint:fix": "eslint . --ext .ts --fix && prettier --write ."
+  },
+  "dependencies": {
+    "@tlsn/common": "1.0.0",
+    "dotenv": "^16.4.5",
+    "viem": "^2.47.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.7",
+    "@typescript-eslint/eslint-plugin": "^5.62.0",
+    "@typescript-eslint/parser": "^5.62.0",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.2",
+    "eslint-plugin-prettier": "^5.5.4",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.5.4",
+    "vitest": "^4.0.16"
+  }
+}
