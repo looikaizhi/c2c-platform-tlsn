@@ -11,3 +11,5 @@ zip
 .claude
 coverage
 packages/verifier/target/
+
+.playwright-cli/

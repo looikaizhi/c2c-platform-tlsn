@@ -41,6 +41,25 @@ function normalizeWallet(addr: string): string {
     return addr.toLowerCase();
 }
 
+// ── Alipay masking (mirrors packages/web/src/lib/proofMask/alipay.ts) ───────
+// Alipay's payment-detail response masks the payee identity. We store the FULL
+// value for display but commit over the MASKED value, because that is what the
+// proof reveals. Wise returns the full identity, so it commits over the full
+// value (no masking helper needed).
+function maskAlipayName(full: string): string {
+    const s = full.trim();
+    if (s.length === 0) return s;
+    const firstSpace = s.indexOf(" ");
+    return firstSpace > 0 ? "*" + s.slice(firstSpace) : "*" + s.slice(1);
+}
+function maskAlipayHandle(full: string): string {
+    const s = full.trim();
+    const at = s.indexOf("@");
+    if (at >= 0) return s.slice(0, 3) + "***" + s.slice(at);
+    if (s.length <= 6) return s;
+    return s.slice(0, 3) + "*".repeat(s.length - 6) + s.slice(-3);
+}
+
 const webDir     = path.resolve(__dirname, "../../web");
 const sqlitePath = path.resolve(webDir, "data/c2c.db");
 
@@ -249,8 +268,10 @@ function writeBindingToDb(opts: {
             ).run(
                 w,
                 opts.platformId,
-                normalize(opts.name),
-                normalize(opts.handle),
+                // Store the FULL identity for display (trim only) — the masked
+                // commit pre-image is reflected in nameCommit/idCommit only.
+                opts.name.trim(),
+                opts.handle.trim(),
                 opts.salt,
                 opts.nameCommit,
                 opts.idCommit,
@@ -366,8 +387,8 @@ const RATE_CNY = 1_000_000n;                   // 0.01 CNY / USDT (RATE_PRECISIO
 const RATE_MYR = 2_000_000n;                   // 0.02 MYR / USDT
 const MERCHANT_WISE_NAME     = "KAI XU LOOI";
 const MERCHANT_WISE_HANDLE   = "@kaixul1";
-const MERCHANT_ALIPAY_NAME   = "* LIM HOOI YEN";
-const MERCHANT_ALIPAY_HANDLE = "kel***@hotmail.com";
+const MERCHANT_ALIPAY_NAME   = "KELLY LIM HOOI YEN";
+const MERCHANT_ALIPAY_HANDLE = "kellylimhooiyen@hotmail.com";
 
 // Risk config (matches thesis defaults; reset/freeze/reward/decay per user spec):
 //   min=500 bps (5%), base=1000 bps (10%), max=10000 bps (100%), step=300 bps (3% per level)
@@ -588,8 +609,12 @@ async function main() {
     });
   }
 
-  // Alipay payment info (literal strings, including the leading "* " and "***")
-  const alipaySalted = newCommits(MERCHANT_ALIPAY_NAME, MERCHANT_ALIPAY_HANDLE);
+  // Alipay payment info — store the FULL identity, but commit over the MASKED
+  // form (that is what the Alipay payment-detail proof reveals).
+  const alipaySalted = newCommits(
+    maskAlipayName(MERCHANT_ALIPAY_NAME),
+    maskAlipayHandle(MERCHANT_ALIPAY_HANDLE),
+  );
   {
     const txHash = await (adminAsM.write as any).setPlatformBinding(
       [PLATFORM_ALIPAY, alipaySalted.nameCommit, alipaySalted.idCommit],

@@ -26,11 +26,21 @@
     "demo": "npm run dev --workspace=@tlsnotary/demo",
     "tutorial": "npm run dev --workspace=@tlsn/tutorial",
     "docker:up": "cd packages/demo && docker compose up --build -d",
-    "docker:down": "cd packages/demo && docker compose down"
+    "docker:down": "cd packages/demo && docker compose down",
+    "keeper:dev": "npm --workspace=@tlsn/keeper run dev",
+    "keeper:dev:demo": "npm --workspace=@tlsn/keeper run dev:demo",
+    "keeper:start": "npm --workspace=@tlsn/keeper run start",
+    "keeper:test": "npm --workspace=@tlsn/keeper run test",
+    "docker:keeper": "cd packages/demo && docker compose up --build keeper keeper-demo"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
     "vite": "^7.1.7",
     "serve": "^14.2.4"
+  },
+  "overrides": {
+    "@walletconnect/core": "2.21.1",
+    "@walletconnect/sign-client": "2.21.1",
+    "@walletconnect/universal-provider": "2.21.1"
   }
 }
