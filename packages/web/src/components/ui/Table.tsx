@@ -18,6 +18,10 @@ export interface TableProps<T extends object> {
   onRowClick?: (row: T) => void;
   stickyHeader?: boolean;
   keyField?: keyof T;
+  /** Fill remaining height of a flex parent; only the table body scrolls. */
+  fill?: boolean;
+  /** Cap the scroll area at a fixed height (ignored when `fill` is set). */
+  maxHeight?: string;
 }
 
 type SortDir = 'asc' | 'desc';
@@ -30,6 +34,8 @@ export function Table<T extends object>({
   onRowClick,
   stickyHeader = false,
   keyField,
+  fill = false,
+  maxHeight,
 }: TableProps<T>) {
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -61,8 +67,14 @@ export function Table<T extends object>({
     zIndex: stickyHeader ? 1 : undefined,
   };
 
+  const wrapperStyle: React.CSSProperties = fill
+    ? { width: '100%', flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'auto' }
+    : maxHeight
+      ? { width: '100%', maxHeight, overflowY: 'auto', overflowX: 'auto' }
+      : { width: '100%', overflowX: 'auto' };
+
   return (
-    <div style={{ width: '100%', overflowX: 'auto' }}>
+    <div style={wrapperStyle}>
       <table
         style={{
           width: '100%',

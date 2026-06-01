@@ -17,12 +17,12 @@ export function generateSalt(): bigint {
 }
 
 /** Calculate deadline as current timestamp + minutes. */
-export function calculateDeadline(minutes: number = 15): bigint {
+export function calculateDeadline(minutes = 15): bigint {
     return BigInt(Math.floor(Date.now() / 1000) + minutes * 60);
 }
 
 /** Format token amount with decimals (default 18 for ERC-20). */
-export function toTokenAmount(amount: number, decimals: number = 18): bigint {
+export function toTokenAmount(amount: number, decimals = 18): bigint {
     return BigInt(Math.round(amount * 10 ** decimals));
 }
 
@@ -37,19 +37,18 @@ export function fromRate(rate: bigint): number {
 }
 
 /** Convert on-chain token amount back to number. */
-export function fromTokenAmount(amount: bigint, decimals: number = 18): number {
+export function fromTokenAmount(amount: bigint, decimals = 18): number {
     return Number(amount) / 10 ** decimals;
 }
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
-    [OrderStatus.PENDING]: '待处理',
-    [OrderStatus.CANCELLED]: '已取消',
-    [OrderStatus.EXPIRED]: '已过期',
-    [OrderStatus.COMPLETED]: '已完成',
-    [OrderStatus.WAITING]: '等待确认',
+    [OrderStatus.PENDING]: 'Pending',
+    [OrderStatus.EXPIRED]: 'Expired',
+    [OrderStatus.COMPLETED]: 'Completed',
+    [OrderStatus.WAITING]: 'Awaiting confirmation',
 };
 
 export const ASSET_TYPE_LABELS: Record<AssetType, string> = {
-    [AssetType.CRYPTO]: '加密货币',
-    [AssetType.FIAT]: '法币',
+    [AssetType.CRYPTO]: 'Crypto',
+    [AssetType.FIAT]: 'Fiat',
 };

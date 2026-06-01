@@ -1,19 +1,32 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Sans, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
+import { cookies } from "next/headers";
+import { cookieToInitialState } from "wagmi";
 import Header from "@/components/Header";
-import AppQueryProvider from "@/providers/AppQueryProvider";
+import Web3Provider from "@/providers/Web3Provider";
+import { wagmiConfig } from "@/chain/wagmiConfig";
+import { NetworkProvider } from "@/contexts/NetworkContext";
 import "./globals.css";
 
-const uiFont = IBM_Plex_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+// Self-hosted fonts (sourced from @fontsource, copied to ./fonts) so the
+// build/dev server never reaches out to Google Fonts — works fully offline.
+const uiFont = localFont({
+  src: [
+    { path: "./fonts/ibm-plex-sans-400.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/ibm-plex-sans-500.woff2", weight: "500", style: "normal" },
+    { path: "./fonts/ibm-plex-sans-600.woff2", weight: "600", style: "normal" },
+    { path: "./fonts/ibm-plex-sans-700.woff2", weight: "700", style: "normal" },
+  ],
   variable: "--font-ui",
   display: "swap",
 });
 
-const monoFont = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
+const monoFont = localFont({
+  src: [
+    { path: "./fonts/jetbrains-mono-400.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/jetbrains-mono-500.woff2", weight: "500", style: "normal" },
+    { path: "./fonts/jetbrains-mono-600.woff2", weight: "600", style: "normal" },
+  ],
   variable: "--font-mono",
   display: "swap",
 });
@@ -23,18 +36,28 @@ export const metadata: Metadata = {
   description: "Semi-decentralized C2C exchange protocol powered by zkTLS",
 };
 
+// All pages are wallet- and contract-driven; static prerendering offers
+// no benefit. Force dynamic rendering — the app is a server-rendered SPA.
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const initialState = cookieToInitialState(
+    wagmiConfig,
+    cookies().get('wagmi.store')?.value,
+  );
   return (
     <html lang="en">
       <body className={`${uiFont.variable} ${monoFont.variable} antialiased`}>
-        <AppQueryProvider>
-          <Header />
-          {children}
-        </AppQueryProvider>
+        <Web3Provider initialState={initialState}>
+          <NetworkProvider>
+            <Header />
+            {children}
+          </NetworkProvider>
+        </Web3Provider>
       </body>
     </html>
   );

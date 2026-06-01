@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
@@ -7,8 +7,10 @@ import { useTlsnExtension } from '@/hooks/useTlsnExtension';
 import { useContract } from '@/hooks/useContract';
 import { useWallet } from '@/hooks/useWallet';
 import ProofStatus from './ProofStatus';
-import type { ExtensionProveResponse } from '@/lib/proofTransformer';
-import type { ProofAction } from '@/lib/contractSubmitter';
+import { buildContractProof, type OrderBindingContext } from '@/proofs/transformer';
+import { platformByKey } from '@/platforms/registry';
+import * as adminWriter from '@/chain/writers/adminWriter';
+import { useNetwork } from '@/contexts/NetworkContext';
 import type { Hex } from 'viem';
 
 interface VerifyPlugin {
@@ -18,19 +20,19 @@ interface VerifyPlugin {
     file: string;
 }
 
-/**
- * Available verification plugins.
- * Each maps to a .js file in public/plugins/.
- */
 const VERIFY_PLUGINS: VerifyPlugin[] = [
-    { key: 'alipay', name: '支付宝转账验证', icon: BadgeDollarSign, file: '/plugins/alipay.js' },
-    { key: 'wise', name: 'Wise 国际转账验证', icon: Globe2, file: '/plugins/wise.js' },
+    { key: 'alipay', name: 'Alipay transfer verification', icon: BadgeDollarSign, file: '/plugins/alipay.js' },
+    { key: 'wise', name: 'Wise international transfer verification', icon: Globe2, file: '/plugins/wise.js' },
 ];
 
+/** Minimal action descriptor passed from parent — proofs are generated inside this component. */
+export type VerifyContractAction =
+    | { type: 'registerMerchant' }
+    | { type: 'payOrderByPlatform'; merchant: Hex; productId: bigint; orderId: bigint }
+    | { type: 'receiveCryptoWithPlatformPayment'; productId: bigint; orderId: bigint };
+
 interface TlsnVerifyButtonProps {
-    /** Contract action to execute after proof generation */
-    contractAction: ProofAction;
-    /** Called when the entire flow (prove + submit) succeeds */
+    contractAction: VerifyContractAction;
     onSuccess?: (txHash: Hex) => void;
 }
 
@@ -38,6 +40,7 @@ export default function TlsnVerifyButton({ contractAction, onSuccess }: TlsnVeri
     const tlsn = useTlsnExtension();
     const contract = useContract();
     const wallet = useWallet();
+    const { network } = useNetwork();
     const [selectedPlugin, setSelectedPlugin] = useState<string>(VERIFY_PLUGINS[0].key);
     const [showPluginPicker, setShowPluginPicker] = useState(false);
 
@@ -45,36 +48,88 @@ export default function TlsnVerifyButton({ contractAction, onSuccess }: TlsnVeri
 
     const handleVerify = useCallback(async () => {
         try {
-            // Step 1: Run TLSN plugin to generate proof
-            const result = await tlsn.runPlugin(plugin.file);
+            // TlsnVerifyButton is the merchant self-register path. It uses a
+            // single-proof platform (Alipay) by default; we pass a minimal
+            // OrderBindingContext placeholder built from contractAction. The
+            // dual-proof (Wise) registerMerchant flow isn't currently used.
+            const platform = platformByKey(plugin.key as 'wise' | 'alipay');
 
-            // Step 2: Submit proof to contract
-            if (contractAction.type === 'payOrderByWise' && result.proofType === 'dual') {
-                // Wise needs two proofs
-                await contract.submitWiseProofs(
-                    result.contactsProof as ExtensionProveResponse,
-                    result.transferProof as ExtensionProveResponse,
-                    contractAction.merchant,
-                    contractAction.productId,
-                    contractAction.orderId,
-                    wallet.selectedWallet?.provider,
-                );
-            } else if (result.singleProof) {
-                // Single proof flow
-                await contract.submitProof(
-                    result.singleProof,
-                    contractAction,
-                    wallet.selectedWallet?.provider,
-                );
+            // Build minimum binding context for register flow (assetType=0 / crypto).
+            const ctxPlaceholder: OrderBindingContext = {
+                escrowAddress:    network.contracts.c2cEscrow,
+                chainId:          network.chainId,
+                merchant:         (wallet.address ?? ('0x' + '0'.repeat(40))) as Hex,
+                buyer:            (wallet.address ?? ('0x' + '0'.repeat(40))) as Hex,
+                productId:        0n,
+                orderId:          0n,
+                assetType:        0,
+                amount:           0n,
+                rate:             0n,
+                rateVersion:      0n,
+                deadline:         0n,
+                merchantNameHash: ('0x' + '0'.repeat(64)) as Hex,
+                merchantIdHash:   ('0x' + '0'.repeat(64)) as Hex,
+                payeeNameHash:    ('0x' + '0'.repeat(64)) as Hex,
+                payeeIdHash:      ('0x' + '0'.repeat(64)) as Hex,
+            };
+            const result = await tlsn.runPlugin(platform, ctxPlaceholder);
+
+            if (contractAction.type === 'registerMerchant') {
+                if (result.kind !== 'single') throw new Error('registerMerchant requires single proof');
+                const proof = buildContractProof(result.proof);
+                const { hash: adminHash } = await adminWriter.registerMerchant(network.chainId, proof);
+                if (onSuccess) onSuccess(adminHash);
+                return;
             }
 
-            if (contract.txHash && onSuccess) {
+            const isCrypto = contractAction.type === 'payOrderByPlatform';
+
+            if (plugin.key === 'wise') {
+                if (result.kind !== 'dual') {
+                    throw new Error('Wise requires dual proof (contacts + transfer)');
+                }
+                if (isCrypto) {
+                    await contract.submitWiseCryptoProof(
+                        result.contacts,
+                        result.transfer,
+                        (contractAction as { merchant: Hex }).merchant,
+                        contractAction.productId,
+                        contractAction.orderId,
+                    );
+                } else {
+                    await contract.submitWiseFiatProof(
+                        result.transfer,
+                        contractAction.productId,
+                        contractAction.orderId,
+                    );
+                }
+            } else {
+                if (result.kind !== 'single') {
+                    throw new Error('Alipay requires single proof');
+                }
+                if (isCrypto) {
+                    await contract.submitAlipayCryptoProof(
+                        result.proof,
+                        (contractAction as { merchant: Hex }).merchant,
+                        contractAction.productId,
+                        contractAction.orderId,
+                    );
+                } else {
+                    await contract.submitAlipayFiatProof(
+                        result.proof,
+                        contractAction.productId,
+                        contractAction.orderId,
+                    );
+                }
+            }
+
+            if (onSuccess && contract.txHash) {
                 onSuccess(contract.txHash);
             }
         } catch {
             // Errors are already captured in tlsn.error / contract.error
         }
-    }, [tlsn, contract, wallet, plugin, contractAction, onSuccess]);
+    }, [tlsn, contract, wallet, network, plugin, contractAction, onSuccess]);
 
     const isProcessing =
         tlsn.status === 'loading-plugin' ||
@@ -88,18 +143,17 @@ export default function TlsnVerifyButton({ contractAction, onSuccess }: TlsnVeri
 
     return (
         <div className="space-y-3">
-            {/* Extension + Verifier status indicators */}
             <div className="flex items-center gap-4 text-xs">
                 <div className="flex items-center gap-1.5">
                     <span className={`h-2 w-2 rounded-full ${tlsn.isExtensionAvailable ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
                     <span className="text-[var(--text-subtle)]">
-                        {tlsn.isExtensionAvailable ? '扩展已连接' : '扩展未检测到'}
+                        {tlsn.isExtensionAvailable ? 'Extension connected' : 'Extension not detected'}
                     </span>
                 </div>
                 <div className="flex items-center gap-1.5">
                     <span className={`h-2 w-2 rounded-full ${tlsn.isVerifierRunning ? 'bg-[var(--state-success)]' : 'bg-[var(--state-danger)]'}`} />
                     <span className="text-[var(--text-subtle)]">
-                        {tlsn.isVerifierRunning ? '验证器运行中' : '验证器未运行'}
+                        {tlsn.isVerifierRunning ? 'Verifier online' : 'Verifier offline'}
                     </span>
                 </div>
                 <button
@@ -107,30 +161,27 @@ export default function TlsnVerifyButton({ contractAction, onSuccess }: TlsnVeri
                     onClick={tlsn.checkStatus}
                     className="ml-auto text-xs text-[var(--state-info)] hover:text-[color:rgb(141_194_255)]"
                 >
-                    刷新状态
+                    Refresh status
                 </button>
             </div>
 
-            {/* Wallet not connected warning */}
             {!wallet.isConnected && (
                 <div role="alert" aria-live="assertive" className="rounded border border-[color:rgb(240_185_11_/_45%)] bg-[color:rgb(113_63_18_/_24%)] p-2 text-xs text-[var(--state-warning)]">
-                    请先连接钱包
+                    Please connect your wallet first
                 </div>
             )}
 
-            {/* Extension not available warning */}
             {!tlsn.isExtensionAvailable && (
                 <div role="alert" aria-live="assertive" className="rounded border border-[color:rgb(240_185_11_/_45%)] bg-[color:rgb(113_63_18_/_24%)] p-2 text-xs text-[var(--state-warning)]">
-                    请安装 TLSN Extension 并刷新页面
+                    Please install the TLSN Extension and refresh the page
                 </div>
             )}
 
-            {/* Plugin selector */}
             <div className="relative">
                 <button
                     type="button"
                     onClick={() => setShowPluginPicker(!showPluginPicker)}
-                    aria-label="选择验证插件"
+                    aria-label="Select verification plugin"
                     className="flex w-full items-center justify-between rounded-lg border border-[var(--line-soft)] bg-[var(--bg-surface-2)] p-3 text-sm transition-colors hover:border-[var(--line-strong)]"
                 >
                     <div className="flex items-center gap-2">
@@ -164,7 +215,6 @@ export default function TlsnVerifyButton({ contractAction, onSuccess }: TlsnVeri
                 )}
             </div>
 
-            {/* Verify button */}
             <button
                 type="button"
                 onClick={handleVerify}
@@ -180,15 +230,14 @@ export default function TlsnVerifyButton({ contractAction, onSuccess }: TlsnVeri
                 } disabled:cursor-not-allowed disabled:opacity-40`}
             >
                 {isProcessing
-                    ? '验证中...'
+                    ? 'Verifying…'
                     : contract.status === 'success'
-                    ? '验证完成'
+                    ? 'Verified'
                     : contract.status === 'error' || tlsn.status === 'error'
-                    ? '重试验证'
-                    : '开始验证支付'}
+                    ? 'Retry verification'
+                    : 'Start payment verification'}
             </button>
 
-            {/* Progress / status */}
             <ProofStatus
                 tlsnStatus={tlsn.status}
                 contractStatus={contract.status}

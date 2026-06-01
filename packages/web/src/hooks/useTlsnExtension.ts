@@ -1,39 +1,32 @@
 "use client";
 import { useState, useEffect, useCallback, useRef } from 'react';
-import {
-    computeOrderBindingHash,
-    injectOrderBindingHash,
-    injectMerchantNameHash,
-    injectMerchantIdHash,
-    injectPayeeNameHash,
-    injectPayeeIdHash,
-    injectTransferOrderBindingHash,
-    type OrderBindingContext,
-    type ExtensionProveResponse,
-} from '@/lib/proofTransformer';
+import { runPlugin as runPluginPipeline } from '@/proofs/runner';
+import type { OrderBindingContext } from '@/proofs/transformer';
+import type { PaymentPlatform, PluginResult } from '@/platforms/types';
 
 export type TlsnStatus = 'idle' | 'loading-plugin' | 'proving' | 'done' | 'error';
 
 export interface RunPluginOptions {
-    bindingContext?: OrderBindingContext;
+    /** Required for dual-proof platforms (Wise). */
+    transferContext?: OrderBindingContext;
     onStep?: (step: string) => void;
 }
 
-export interface TlsnResult {
-    proofType: 'single' | 'dual';
-    singleProof?: ExtensionProveResponse;
-    contactsProof?: ExtensionProveResponse;
-    transferProof?: ExtensionProveResponse;
-}
+/** Re-export so legacy call sites can still annotate hook output. */
+export type TlsnResult = PluginResult;
 
 export interface UseTlsnReturn {
     isExtensionAvailable: boolean;
-    isVerifierRunning: boolean;
-    status: TlsnStatus;
-    error: string | null;
-    result: TlsnResult | null;
-    /** Run a plugin. Pass RunPluginOptions.bindingContext to bind the proof to a specific order. */
-    runPlugin: (pluginUrl: string, options?: RunPluginOptions) => Promise<TlsnResult>;
+    isVerifierRunning:    boolean;
+    status:               TlsnStatus;
+    error:                string | null;
+    result:               PluginResult | null;
+    /** Run a platform plugin. Platform's `proofShape` decides single vs dual. */
+    runPlugin: (
+        platform: PaymentPlatform,
+        ctx: OrderBindingContext,
+        options?: RunPluginOptions,
+    ) => Promise<PluginResult>;
     checkStatus: () => Promise<void>;
 }
 
@@ -42,7 +35,7 @@ export function useTlsnExtension(): UseTlsnReturn {
     const [isVerifierRunning, setIsVerifierRunning] = useState(false);
     const [status, setStatus] = useState<TlsnStatus>('idle');
     const [error, setError] = useState<string | null>(null);
-    const [result, setResult] = useState<TlsnResult | null>(null);
+    const [result, setResult] = useState<PluginResult | null>(null);
     const checkedRef = useRef(false);
 
     const verifierHost = process.env.NEXT_PUBLIC_VERIFIER_HOST || 'localhost:7047';
@@ -92,7 +85,11 @@ export function useTlsnExtension(): UseTlsnReturn {
         };
     }, [checkStatus]);
 
-    const runPlugin = useCallback(async (pluginUrl: string, options?: RunPluginOptions): Promise<TlsnResult> => {
+    const runPlugin = useCallback(async (
+        platform: PaymentPlatform,
+        ctx: OrderBindingContext,
+        options?: RunPluginOptions,
+    ): Promise<PluginResult> => {
         setError(null);
         setResult(null);
 
@@ -106,47 +103,17 @@ export function useTlsnExtension(): UseTlsnReturn {
         try {
             options?.onStep?.('loading-plugin');
             setStatus('loading-plugin');
-            let pluginCode = await fetch(pluginUrl).then((r) => {
-                if (!r.ok) throw new Error(`Failed to load plugin: ${r.status}`);
-                return r.text();
-            });
-
-            if (options?.bindingContext) {
-                const ctx = options.bindingContext;
-                const bindingHash = computeOrderBindingHash(ctx);
-                pluginCode = injectOrderBindingHash(pluginCode, bindingHash);
-                pluginCode = injectMerchantNameHash(pluginCode, ctx.merchantNameHash);
-                pluginCode = injectMerchantIdHash(pluginCode, ctx.merchantIdHash);
-                pluginCode = injectPayeeNameHash(pluginCode, ctx.payeeNameHash);
-                pluginCode = injectPayeeIdHash(pluginCode, ctx.payeeIdHash);
-                // For Wise: inject transfer binding hash using same context (same hash)
-                pluginCode = injectTransferOrderBindingHash(pluginCode, bindingHash);
-            }
 
             options?.onStep?.('proving');
             setStatus('proving');
-            const resultStr = await window.tlsn!.execCode(pluginCode);
-            const raw = JSON.parse(resultStr);
+            const pluginResult = await runPluginPipeline(platform, ctx, {
+                transferContext: options?.transferContext,
+            });
 
-            // Detect dual-proof (Wise) vs single-proof (Alipay/generic)
-            let tlsnResult: TlsnResult;
-            if (raw?.proofs?.contacts && raw?.proofs?.transfer) {
-                tlsnResult = {
-                    proofType: 'dual',
-                    contactsProof: raw.proofs.contacts as ExtensionProveResponse,
-                    transferProof: raw.proofs.transfer as ExtensionProveResponse,
-                };
-            } else {
-                tlsnResult = {
-                    proofType: 'single',
-                    singleProof: raw as ExtensionProveResponse,
-                };
-            }
-
-            setResult(tlsnResult);
+            setResult(pluginResult);
             setStatus('done');
             options?.onStep?.('done');
-            return tlsnResult;
+            return pluginResult;
         } catch (err: any) {
             const msg = err.message || String(err);
             setError(msg);

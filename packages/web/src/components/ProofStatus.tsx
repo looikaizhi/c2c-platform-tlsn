@@ -13,19 +13,19 @@ interface ProofStatusProps {
 
 const tlsnStatusLabels: Record<TlsnStatus, string> = {
     idle: '',
-    'loading-plugin': '正在加载插件...',
-    proving: '正在生成 TLS 证明（请在扩展弹出的窗口中操作）...',
-    done: '证明生成完成',
-    error: '证明生成失败',
+    'loading-plugin': 'Loading plugin…',
+    proving: 'Generating TLS proof (please complete the flow in the extension popup)…',
+    done: 'Proof generated',
+    error: 'Failed to generate proof',
 };
 
 const contractStatusLabels: Record<ContractStatus, string> = {
     idle: '',
-    building: '正在构建合约参数...',
-    confirming: '请在钱包中确认交易...',
-    pending: '等待交易确认...',
-    success: '交易已上链',
-    error: '交易失败',
+    building: 'Building contract parameters…',
+    confirming: 'Please confirm the transaction in your wallet…',
+    pending: 'Waiting for transaction confirmation…',
+    success: 'Transaction confirmed on-chain',
+    error: 'Transaction failed',
 };
 
 export default function ProofStatus({
@@ -109,14 +109,14 @@ export default function ProofStatus({
             {/* Complete */}
             {isComplete && (
                 <div className="mt-2 text-sm font-semibold text-[var(--state-success)]">
-                    验证支付已完成，代币已释放
+                    Payment verified — tokens released
                 </div>
             )}
 
             {/* Error state */}
             {hasError && !isComplete && (
                 <div className="mt-2 text-xs text-[var(--text-subtle)]">
-                    可以重试验证流程
+                    You can retry the verification flow
                 </div>
             )}
         </div>

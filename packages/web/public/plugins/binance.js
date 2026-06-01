@@ -6,9 +6,11 @@ const QUERY = "quoteAsset=USDT&needBalanceDetail=true";
 const FULL_URL = `https://${HOST}${PATH}?${QUERY}`;
 const LANDING_URL = "https://www.binance.com/en/my/dashboard";
 const METHOD = "GET";
+const TLSN_POLICY_VERSION = "v1.0.0";
 const config = {
   name: "Binance KYC Status",
   description: "Verify Binance KYC status (selective disclosure).",
+  policyVersion: TLSN_POLICY_VERSION,
   requests: [
     {
       method: METHOD,

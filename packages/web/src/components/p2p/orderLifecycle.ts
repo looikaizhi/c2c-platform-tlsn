@@ -1,12 +1,15 @@
+import type { Hex } from 'viem';
 import type { PlaceOrderSuccessResult, SelectedOrderInfo } from './types';
 
-export type OrderLifecyclePhase = 'idle' | 'place-order' | 'payment';
+export type OrderLifecyclePhase = 'idle' | 'place-order' | 'awaiting-proof';
 
 export interface OrderLifecycleState {
     phase: OrderLifecyclePhase;
     selectedInfo: SelectedOrderInfo | null;
     onChainOrderId: bigint;
     fiatAmount: number | null;
+    deadline: bigint;
+    platformId: Hex | null;
 }
 
 export type OrderLifecycleEvent =
@@ -19,6 +22,8 @@ export const initialOrderLifecycleState: OrderLifecycleState = {
     selectedInfo: null,
     onChainOrderId: 0n,
     fiatAmount: null,
+    deadline: 0n,
+    platformId: null,
 };
 
 export function orderLifecycleReducer(
@@ -32,14 +37,18 @@ export function orderLifecycleReducer(
                 selectedInfo: event.payload,
                 onChainOrderId: 0n,
                 fiatAmount: null,
+                deadline: 0n,
+                platformId: null,
             };
         case 'ORDER_CREATED':
             if (!state.selectedInfo) return state;
             return {
-                phase: 'payment',
+                phase: 'awaiting-proof',
                 selectedInfo: state.selectedInfo,
                 onChainOrderId: event.payload.orderId,
                 fiatAmount: event.payload.fiatAmount,
+                deadline: event.payload.deadline,
+                platformId: event.payload.platformId,
             };
         case 'FLOW_RESET':
             return initialOrderLifecycleState;

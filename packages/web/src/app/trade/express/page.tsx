@@ -1,5 +1,5 @@
 import { TradingLayout } from '@/components/layout/TradingLayout';
-import { ExpressPage } from '@/components/trading/ExpressPage';
+import { ExpressPage } from '@/components/trade/ExpressPage';
 
 export default function ExpressTradeRoute() {
   return (

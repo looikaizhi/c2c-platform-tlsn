@@ -1,11 +1,13 @@
 "use client";
 import React, { useState } from 'react';
-import type { CryptoPair, MoneyPair } from '@/lib/priceModel';
+import { ArrowDownUp, Link2, ShieldCheck, Store } from 'lucide-react';
+import { allMoneySymbols, allDisplayCryptoSymbols } from '@/lib/assetRegistry';
+import type { CryptoPair, MoneyPair } from '@/lib/assetRegistry';
 import { useTradeQuote } from '@/hooks/useTradeQuote';
 import { Button } from '@/components/ui/Button';
 
-const MONEY_OPTIONS: MoneyPair[] = ['CNY', 'USD'];
-const CRYPTO_OPTIONS: CryptoPair[] = ['USDT', 'USDC', 'BTC', 'ETH'];
+const MONEY_OPTIONS: MoneyPair[]   = allMoneySymbols();          // MYR, CNY, USD
+const CRYPTO_OPTIONS: CryptoPair[] = allDisplayCryptoSymbols();  // USDT, USDC, BTC, ETH, HYPE
 
 // ── Amount input row ──────────────────────────────────────────────────────────
 
@@ -48,6 +50,7 @@ function AmountRow({
           placeholder="0.00"
           style={{
             flex: 1,
+            minWidth: 0,
             background: 'transparent',
             border: 'none',
             outline: 'none',
@@ -61,6 +64,8 @@ function AmountRow({
           value={currency}
           onChange={(e) => onCurrencyChange(e.target.value)}
           style={{
+            flexShrink: 0,
+            maxWidth: '96px',
             background: 'var(--bg-surface)',
             border: '1px solid var(--border-default)',
             borderRadius: 'var(--radius-sm)',
@@ -121,12 +126,26 @@ function ExpressHero({ isBuy, rate, cryptoPair, moneyPair }: {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
         {[
-          { icon: '🔐', title: 'zkTLS Verified', desc: 'Every payment is cryptographically verified by TLSNotary before release.' },
-          { icon: '⛓', title: 'On-Chain Settlement', desc: 'Funds are escrowed and released atomically via smart contracts.' },
-          { icon: '🏪', title: 'Best Rate', desc: 'Aggregated from verified merchants. No hidden fees.' },
+          { icon: <ShieldCheck size={20} strokeWidth={1.5} />, title: 'zkTLS Verified', desc: 'Every payment is cryptographically verified by TLSNotary before release.' },
+          { icon: <Link2 size={20} strokeWidth={1.5} />, title: 'On-Chain Settlement', desc: 'Funds are escrowed and released atomically via smart contracts.' },
+          { icon: <Store size={20} strokeWidth={1.5} />, title: 'Best Rate', desc: 'Aggregated from verified merchants. No hidden fees.' },
         ].map((f) => (
           <div key={f.title} style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-start' }}>
-            <span style={{ fontSize: '24px', flexShrink: 0 }}>{f.icon}</span>
+            <span
+              style={{
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '36px',
+                height: '36px',
+                borderRadius: 'var(--radius-md)',
+                background: 'rgba(80,210,193,0.10)',
+                color: 'var(--color-primary)',
+              }}
+            >
+              {f.icon}
+            </span>
             <div>
               <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '14px' }}>{f.title}</div>
               <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '2px' }}>{f.desc}</div>
@@ -153,18 +172,23 @@ export function ExpressPage() {
   return (
     <div
       style={{
+        flex: 1,
+        minHeight: 0,
         display: 'flex',
         flexDirection: 'column',
-        gap: 'var(--space-10)',
-        padding: 'var(--space-8) 0',
+        justifyContent: 'center',
+        overflowY: 'auto',
+        padding: 'var(--space-8) 0 var(--space-6)',
       }}
     >
       <div
         style={{
           display: 'flex',
-          gap: 'var(--space-12)',
+          gap: 'var(--space-10)',
           alignItems: 'flex-start',
+          justifyContent: 'flex-start',
           flexWrap: 'wrap',
+          rowGap: 'var(--space-8)',
         }}
       >
         {/* Hero */}
@@ -239,8 +263,8 @@ export function ExpressPage() {
             />
 
             {/* Swap icon */}
-            <div style={{ display: 'flex', justifyContent: 'center', color: 'var(--text-tertiary)', fontSize: '18px' }}>
-              ⇅
+            <div style={{ display: 'flex', justifyContent: 'center', color: 'var(--text-tertiary)' }}>
+              <ArrowDownUp size={18} strokeWidth={1.5} />
             </div>
 
             <AmountRow

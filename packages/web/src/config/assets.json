@@ -1,0 +1,15 @@
+{
+  "$schema_version": 1,
+  "crypto": [
+    { "symbol": "USDT", "displayName": "Tether USD",  "coingeckoId": "tether",      "onChain": { "id": 0, "decimals": 18 } },
+    { "symbol": "USDC", "displayName": "USD Coin",    "coingeckoId": "usd-coin",    "onChain": { "id": 1, "decimals": 6  } },
+    { "symbol": "BTC",  "displayName": "Bitcoin",     "coingeckoId": "bitcoin",     "onChain": null },
+    { "symbol": "ETH",  "displayName": "Ethereum",    "coingeckoId": "ethereum",    "onChain": null },
+    { "symbol": "HYPE", "displayName": "Hyperliquid", "coingeckoId": "hyperliquid", "onChain": null }
+  ],
+  "fiat": [
+    { "symbol": "MYR", "displayName": "Malaysian Ringgit", "coingeckoVs": "myr", "onChain": { "id": 0 } },
+    { "symbol": "CNY", "displayName": "Chinese Yuan",      "coingeckoVs": "cny", "onChain": { "id": 1 } },
+    { "symbol": "USD", "displayName": "US Dollar",         "coingeckoVs": "usd", "onChain": null }
+  ]
+}

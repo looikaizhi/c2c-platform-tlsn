@@ -1,5 +1,7 @@
 "use client";
 import React, { useState } from 'react';
+import { Check, Copy } from 'lucide-react';
+import { truncateAddr } from '@/lib/formatters';
 
 export interface AddressDisplayProps {
   address: `0x${string}`;
@@ -7,11 +9,6 @@ export interface AddressDisplayProps {
   copyable?: boolean;
   linkToExplorer?: boolean;
   explorerUrl?: string;
-}
-
-function truncateAddress(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
 export function AddressDisplay({
@@ -29,7 +26,7 @@ export function AddressDisplay({
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const display = truncate ? truncateAddress(address) : address;
+  const display = truncate ? truncateAddr(address) : address;
 
   return (
     <span
@@ -58,18 +55,20 @@ export function AddressDisplay({
         <button
           onClick={handleCopy}
           title="Copy address"
+          aria-label="Copy address"
           style={{
+            display: 'inline-flex',
+            alignItems: 'center',
             background: 'none',
             border: 'none',
             cursor: 'pointer',
             color: copied ? 'var(--status-success)' : 'var(--text-tertiary)',
             padding: '0',
-            fontSize: '12px',
             lineHeight: 1,
             transition: 'color var(--motion-fast)',
           }}
         >
-          {copied ? '✓' : '⧉'}
+          {copied ? <Check size={12} strokeWidth={2} /> : <Copy size={12} strokeWidth={1.5} />}
         </button>
       )}
     </span>

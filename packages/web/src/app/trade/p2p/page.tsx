@@ -1,5 +1,5 @@
 import { TradingLayout } from '@/components/layout/TradingLayout';
-import { P2PPage } from '@/components/trading/P2PPage';
+import { P2PPage } from '@/components/trade/P2PPage';
 
 export default function P2PTradeRoute() {
   return (

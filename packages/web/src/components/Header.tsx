@@ -2,24 +2,29 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { Menu, ShieldCheck } from "lucide-react";
 import WalletConnect from "./WalletConnect";
+import NetworkSelector from "./NetworkSelector";
+import { useIsAdmin } from "@/hooks/useIsAdmin";
 
 type NavItem = {
   href: string;
   label: string;
   match: RegExp;
+  adminOnly?: boolean;
 };
 
 const navItems: NavItem[] = [
   { label: 'Trade',     href: '/trade/express', match: /^\/trade/ },
   { label: 'Dashboard', href: '/dashboard',      match: /^\/dashboard/ },
   { label: 'Merchant',  href: '/merchant',       match: /^\/merchant/ },
-  { label: 'Admin',     href: '/admin',          match: /^\/admin/ },
+  { label: 'Admin',     href: '/admin',          match: /^\/admin/, adminOnly: true },
 ];
 
 export default function Header() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { isAdmin } = useIsAdmin();
 
   return (
     <header
@@ -61,16 +66,15 @@ export default function Header() {
               width: '32px',
               height: '32px',
               borderRadius: 'var(--radius-sm)',
-              background: 'rgba(240,185,11,0.12)',
-              border: '1px solid rgba(240,185,11,0.35)',
+              background: 'rgba(80,210,193,0.12)',
+              border: '1px solid rgba(80,210,193,0.35)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               color: 'var(--color-primary)',
-              fontSize: '16px',
             }}
           >
-            ⛨
+            <ShieldCheck size={18} strokeWidth={1.5} />
           </div>
           <span
             style={{
@@ -91,7 +95,7 @@ export default function Header() {
           style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', flex: 1 }}
           className="header-desktop-nav"
         >
-          {navItems.map((item) => {
+          {navItems.filter((item) => !item.adminOnly || isAdmin).map((item) => {
             const active = item.match.test(pathname);
             return (
               <Link
@@ -122,6 +126,9 @@ export default function Header() {
 
         {/* Wallet + mobile hamburger */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginLeft: 'auto' }}>
+          <span className="header-network-desktop" style={{ display: 'inline-flex' }}>
+            <NetworkSelector />
+          </span>
           <WalletConnect />
 
           {/* Mobile hamburger */}
@@ -131,14 +138,15 @@ export default function Header() {
             className="header-mobile-btn"
             style={{
               display: 'none',
+              alignItems: 'center',
+              justifyContent: 'center',
               background: 'none',
               border: 'none',
               color: 'var(--text-secondary)',
               cursor: 'pointer',
-              fontSize: '20px',
             }}
           >
-            ☰
+            <Menu size={22} strokeWidth={1.5} />
           </button>
         </div>
       </div>
@@ -160,7 +168,11 @@ export default function Header() {
             gap: 'var(--space-2)',
           }}
         >
-          {navItems.map((item) => {
+          {/* Network selector lives in the drawer on mobile (hidden in the bar) */}
+          <div style={{ marginBottom: 'var(--space-2)' }}>
+            <NetworkSelector />
+          </div>
+          {navItems.filter((item) => !item.adminOnly || isAdmin).map((item) => {
             const active = item.match.test(pathname);
             return (
               <Link
@@ -173,7 +185,7 @@ export default function Header() {
                   fontSize: '15px',
                   fontWeight: active ? 600 : 400,
                   color: active ? 'var(--color-primary)' : 'var(--text-primary)',
-                  background: active ? 'rgba(240,185,11,0.08)' : 'transparent',
+                  background: active ? 'rgba(80,210,193,0.10)' : 'transparent',
                   textDecoration: 'none',
                 }}
               >
@@ -188,6 +200,7 @@ export default function Header() {
         @media (max-width: 767px) {
           .header-desktop-nav { display: none !important; }
           .header-mobile-btn  { display: flex !important; }
+          .header-network-desktop { display: none !important; }
         }
       `}</style>
     </header>

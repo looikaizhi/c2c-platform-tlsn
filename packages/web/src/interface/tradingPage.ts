@@ -4,10 +4,10 @@ export enum TradingType {
     Bulk = "bulk"
 }
 
-export const TradingType_CN_Map = {
-    [TradingType.EXPRESS]: "快捷区",
-    [TradingType.P2P]: "自选区",
-    [TradingType.Bulk]: "大宗区"
+export const TradingType_Label_Map = {
+    [TradingType.EXPRESS]: "Express",
+    [TradingType.P2P]: "P2P",
+    [TradingType.Bulk]: "Block"
 }
 
 export enum CoinType{

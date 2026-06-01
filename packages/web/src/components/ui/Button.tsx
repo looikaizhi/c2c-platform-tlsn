@@ -29,7 +29,7 @@ const variantStyles: Record<ButtonVariant, React.CSSProperties> = {
   },
   buy: {
     background: 'var(--color-buy)',
-    color: '#0B0E11',
+    color: 'var(--color-primary-text)',
     border: 'none',
   },
   sell: {

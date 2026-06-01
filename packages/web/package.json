@@ -3,38 +3,49 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "node scripts/start-dev.js",
+    "dev:next-only": "next dev -p 3001",
     "copy-plugins": "node -e \"const fs=require('fs'),p='../demo/public/plugins';if(fs.existsSync(p)){fs.cpSync(p,'public/plugins',{recursive:true});console.log('Plugins copied')}else{console.log('No demo plugins found, skipping')}\"",
+    "deploy": "cd ../contracts && npx hardhat run scripts/deploy-web.ts --network localhost",
     "build": "npm run copy-plugins && next build",
     "start": "next start -p 3001",
-    "lint": "eslint . --max-warnings=0"
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
-    "@pythnetwork/price-service-client": "^1.9.0",
-    "@tanstack/react-query": "^5.96.0",
-    "ethers": "^6.15.0",
+    "@tanstack/react-query": "^5.100.11",
+    "@wagmi/connectors": "^6.2.0",
+    "@wagmi/core": "^2.22.1",
+    "better-sqlite3": "^12.10.0",
+    "drizzle-orm": "^0.45.2",
     "lucide-react": "^0.545.0",
-    "mysql2": "^3.15.2",
-    "next": "^15.3.3",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "tlsn-monorepo": "file:../..",
-    "viem": "^2.37.2"
+    "next": "^14.2.35",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "server-only": "^0.0.1",
+    "undici": "^5.29.0",
+    "viem": "^2.37.2",
+    "wagmi": "^2.19.5"
   },
   "optionalDependencies": {
-    "@next/swc-linux-x64-gnu": "^15.5.14"
+    "@next/swc-linux-x64-gnu": "^14.2.35"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3.3.1",
+    "@fontsource/ibm-plex-sans": "^5.2.6",
+    "@fontsource/jetbrains-mono": "^5.2.6",
     "@tailwindcss/postcss": "^4",
-    "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "^15.3.3",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^14.2.35",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.7"
   }
 }

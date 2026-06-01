@@ -1,28 +1,25 @@
 "use client";
 import { useCallback, useState } from 'react';
 import type { Hex, Address } from 'viem';
-import {
-    submitOrderAction,
-    submitProofToContract,
-    type OrderAction,
-} from '@/lib/contractSubmitter';
-import {
-    buildContractProof,
-    type ExtensionProveResponse,
-} from '@/lib/proofTransformer';
-import type { TlsnResult } from '@/hooks/useTlsnExtension';
-import { type SignedOrderInput } from '@/lib/eip712';
-import { createWalletClient, custom } from 'viem';
-import { chain, contractConfig } from '@/lib/contractConfig';
+import { getPublicClient } from '@/chain/clients';
+import * as escrow     from '@/chain/writers/escrowWriter';
+import * as bondVault  from '@/chain/writers/bondVaultWriter';
+import * as erc20      from '@/chain/writers/erc20Writer';
+import type { PluginResult } from '@/platforms/types';
+import { platformByKey } from '@/platforms/registry';
+import { submitProof as submitProofPipeline } from '@/proofs/submitter';
+import { C2C_RISK_MANAGER_ABI, ERC20_ABI } from '@/lib/contractAbi';
+import { useNetwork } from '@/contexts/NetworkContext';
 
-export type Platform = 'wise' | 'alipay';
+const MAX_UINT256 = (2n ** 256n) - 1n;
+const ZERO_HASH = ('0x' + '0'.repeat(64)) as Hex;
+
+export type Platform       = 'wise' | 'alipay';
 export type OrderDirection = 'crypto' | 'fiat';
 
 export type OrderFlowStatus =
     | 'idle'
-    | 'signing'
     | 'placing'
-    | 'paying-crypto'
     | 'claiming'
     | 'cancelling'
     | 'pending'
@@ -30,42 +27,48 @@ export type OrderFlowStatus =
     | 'error';
 
 export interface OrderFlowActionResult {
-    ok: boolean;
-    txHash?: Hex;
-    error?: string;
+    ok:        boolean;
+    txHash?:   Hex;
+    orderId?:  bigint;
+    deadline?: bigint;
+    error?:    string;
 }
 
 export interface SubmitProofParams {
-    platform: Platform;
+    platform:  Platform;
     direction: OrderDirection;
     merchant?: Address;
     productId: bigint;
-    orderId: bigint;
-    proof: TlsnResult;
-    provider?: any;
+    orderId:   bigint;
+    proof:     PluginResult;
+}
+
+export interface PlaceOrderParams {
+    merchant:         Address;
+    productId:        bigint;
+    assetType:        number;
+    amount:           bigint;
+    bondTokenAddress: Address;
+    buyerInfo?:       { nameHash: Hex; idHash: Hex };
 }
 
 export interface UseOrderFlowReturn {
     status: OrderFlowStatus;
     txHash: Hex | null;
-    error: string | null;
-    /** Full flow: merchant signs → buyer places order on-chain */
-    placeOrder: (order: SignedOrderInput, provider?: any) => Promise<OrderFlowActionResult>;
-    /** Cancel a pending order */
-    cancelOrder: (merchant: Address, productId: bigint, assetType: number, orderId: bigint, provider?: any) => Promise<OrderFlowActionResult>;
-    /** Buyer escrows crypto for FIAT product (Flow B step) */
-    payByCrypto: (merchant: Address, productId: bigint, orderId: bigint, provider?: any) => Promise<OrderFlowActionResult>;
-    /** Buyer claims 2x refund after merchant timeout */
-    claimRefund: (merchant: Address, productId: bigint, orderId: bigint, provider?: any) => Promise<OrderFlowActionResult>;
-    /** Submit TLSN proof to contract after generating it */
+    error:  string | null;
+    placeOrder:  (params: PlaceOrderParams) => Promise<OrderFlowActionResult>;
+    /** V4: disabled — orders expire automatically. */
+    cancelOrder: (merchant: Address, productId: bigint, assetType: number, orderId: bigint) => Promise<OrderFlowActionResult>;
+    claimRefund: (tokenAddress: Address) => Promise<OrderFlowActionResult>;
     submitProof: (params: SubmitProofParams) => Promise<OrderFlowActionResult>;
-    reset: () => void;
+    reset:       () => void;
 }
 
 export function useOrderFlow(): UseOrderFlowReturn {
+    const { network, walletChainId } = useNetwork();
     const [status, setStatus] = useState<OrderFlowStatus>('idle');
     const [txHash, setTxHash] = useState<Hex | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const [error,  setError]  = useState<string | null>(null);
 
     const reset = useCallback(() => {
         setStatus('idle');
@@ -73,173 +76,118 @@ export function useOrderFlow(): UseOrderFlowReturn {
         setError(null);
     }, []);
 
-    const exec = useCallback(async (
-        statusLabel: OrderFlowStatus,
-        action: OrderAction,
-        provider?: any,
+    function assertChain() {
+        if (walletChainId !== null && walletChainId !== network.chainId) {
+            throw new Error(`Please switch your wallet to ${network.name} (current chain ID: ${walletChainId})`);
+        }
+    }
+
+    const placeOrder = useCallback(async (params: PlaceOrderParams): Promise<OrderFlowActionResult> => {
+        try {
+            assertChain();
+            setError(null);
+            setStatus('placing');
+
+            const publicClient = getPublicClient(network.chainId);
+
+            // Resolve the active wallet account once — used both for allowance
+            // reads and writer calls.
+            const walletAccount = (await (await import('@/chain/clients')).getWalletClient(network.chainId)).account;
+            if (!walletAccount) throw new Error('Wallet not connected');
+
+            // Approve routing: CRYPTO pulls bond into BondVault; FIAT locks amount in Escrow.
+            if (params.assetType === 0) {
+                const bondBps = (await publicClient.readContract({
+                    address:      network.contracts.c2cRiskManager,
+                    abi:          C2C_RISK_MANAGER_ABI,
+                    functionName: 'requiredBondBps',
+                    args:         [walletAccount.address],
+                })) as number;
+                const estimatedBond = (params.amount * BigInt(bondBps)) / 10000n;
+                if (estimatedBond > 0n) {
+                    const allowance = (await publicClient.readContract({
+                        address:      params.bondTokenAddress,
+                        abi:          ERC20_ABI,
+                        functionName: 'allowance',
+                        args:         [walletAccount.address, network.contracts.c2cBondVault],
+                    })) as bigint;
+                    if (allowance < estimatedBond) {
+                        await erc20.approve(network.chainId, params.bondTokenAddress, network.contracts.c2cBondVault, MAX_UINT256);
+                    }
+                }
+            } else {
+                await erc20.approve(network.chainId, params.bondTokenAddress, network.contracts.c2cEscrow, params.amount);
+            }
+
+            const { hash, event } = await escrow.placeOrder(network.chainId, {
+                merchant:  params.merchant,
+                productId: params.productId,
+                assetType: params.assetType,
+                amount:    params.amount,
+                buyerInfo: params.buyerInfo ?? { nameHash: ZERO_HASH, idHash: ZERO_HASH },
+            });
+
+            setTxHash(hash);
+            setStatus('success');
+            return { ok: true, txHash: hash, orderId: event?.orderId ?? 0n, deadline: event?.deadline ?? 0n };
+        } catch (err: any) {
+            const msg = err.shortMessage || err.message || String(err);
+            setError(msg);
+            setStatus('error');
+            return { ok: false, error: msg };
+        }
+    }, [network, walletChainId]);
+
+    const cancelOrder = useCallback(async (
+        _merchant: Address, _productId: bigint, _assetType: number, _orderId: bigint,
+    ): Promise<OrderFlowActionResult> => {
+        return { ok: false, error: 'Order cancellation is disabled in V4. Orders expire automatically after 15 minutes.' };
+    }, []);
+
+    const claimRefund = useCallback(async (
+        tokenAddress: Address,
     ): Promise<OrderFlowActionResult> => {
         try {
+            assertChain();
             setError(null);
-            setStatus(statusLabel);
-            const { hash } = await submitOrderAction(action, provider);
+            setStatus('claiming');
+            const { hash } = await bondVault.claim(network.chainId, tokenAddress);
             setTxHash(hash);
             setStatus('success');
             return { ok: true, txHash: hash };
         } catch (err: any) {
-            const errorMessage = err.shortMessage || err.message || String(err);
-            setError(errorMessage);
+            const msg = err.shortMessage || err.message || String(err);
+            setError(msg);
             setStatus('error');
-            return { ok: false, error: errorMessage };
+            return { ok: false, error: msg };
         }
-    }, []);
-
-    const placeOrder = useCallback(async (order: SignedOrderInput, provider?: any) => {
-        try {
-            setError(null);
-
-            // Step 1: Sign the order (merchant signs)
-            setStatus('signing');
-            const ethereum = provider ?? (typeof window !== 'undefined' ? (window as any).ethereum : undefined);
-            const walletClient = createWalletClient({
-                chain,
-                transport: custom(ethereum),
-            });
-            const [account] = await walletClient.requestAddresses();
-
-            const signature = await walletClient.signTypedData({
-                account,
-                domain: {
-                    name: 'C2CEscrow',
-                    version: '1',
-                    chainId: chain.id,
-                    verifyingContract: contractConfig.c2cEscrow,
-                },
-                types: {
-                    SignedOrder: [
-                        { name: 'merchant', type: 'address' },
-                        { name: 'buyer', type: 'address' },
-                        { name: 'productID', type: 'uint256' },
-                        { name: 'assetType', type: 'uint8' },
-                        { name: 'amount', type: 'uint256' },
-                        { name: 'rate', type: 'uint256' },
-                        { name: 'salt', type: 'uint256' },
-                        { name: 'deadline', type: 'uint256' },
-                    ],
-                },
-                primaryType: 'SignedOrder',
-                message: {
-                    merchant: order.merchant,
-                    buyer: order.buyer,
-                    productID: order.productID,
-                    assetType: order.assetType,
-                    amount: order.amount,
-                    rate: order.rate,
-                    salt: order.salt,
-                    deadline: order.deadline,
-                },
-            });
-
-            // Step 2: Submit on-chain
-            setStatus('placing');
-            const { hash } = await submitOrderAction(
-                { type: 'placeOrder', order, signature },
-                provider,
-            );
-            setTxHash(hash);
-            setStatus('success');
-            return { ok: true, txHash: hash };
-        } catch (err: any) {
-            const errorMessage = err.shortMessage || err.message || String(err);
-            setError(errorMessage);
-            setStatus('error');
-            return { ok: false, error: errorMessage };
-        }
-    }, []);
-
-    const cancelOrder = useCallback((
-        merchant: Address, productId: bigint, assetType: number, orderId: bigint, provider?: any,
-    ) => {
-        return exec('cancelling', { type: 'cancelOrder', merchant, productId, assetType, orderId }, provider);
-    }, [exec]);
-
-    const payByCrypto = useCallback((
-        merchant: Address, productId: bigint, orderId: bigint, provider?: any,
-    ) => {
-        return exec('paying-crypto', { type: 'payOrderByCrypto', merchant, productId, orderId }, provider);
-    }, [exec]);
-
-    const claimRefund = useCallback((
-        merchant: Address, productId: bigint, orderId: bigint, provider?: any,
-    ) => {
-        return exec('claiming', { type: 'claimRefundAfterTimeout', merchant, productId, orderId }, provider);
-    }, [exec]);
+    }, [network, walletChainId]);
 
     const submitProof = useCallback(async (params: SubmitProofParams): Promise<OrderFlowActionResult> => {
-        const { platform, direction, merchant, productId, orderId, proof, provider } = params;
+        const { platform, direction, merchant, productId, orderId, proof } = params;
         try {
             setError(null);
             setStatus('pending');
 
-            if (platform === 'wise') {
-                if (proof.proofType !== 'dual' || !proof.contactsProof || !proof.transferProof) {
-                    throw new Error('Wise proof requires dual proof (contacts + transfer)');
-                }
-                const contactsProof = buildContractProof(proof.contactsProof);
-                const transferProof = buildContractProof(proof.transferProof);
-
-                if (direction === 'crypto') {
-                    if (!merchant) throw new Error('merchant address required for crypto direction');
-                    const { hash } = await submitProofToContract(
-                        transferProof,
-                        { type: 'payOrderByWise', merchant, productId, orderId, contactsProof },
-                        provider,
-                    );
-                    setTxHash(hash);
-                } else {
-                    // FIAT: merchant submits transfer proof to receive USDT
-                    const { hash } = await submitProofToContract(
-                        transferProof,
-                        { type: 'receiveCryptoWithPayment', productId, orderId },
-                        provider,
-                    );
-                    setTxHash(hash);
-                }
-            } else if (platform === 'alipay') {
-                if (proof.proofType !== 'single' || !proof.singleProof) {
-                    throw new Error('Alipay proof requires single proof');
-                }
-                const contractProof = buildContractProof(proof.singleProof as ExtensionProveResponse);
-
-                if (direction === 'crypto') {
-                    if (!merchant) throw new Error('merchant address required for crypto direction');
-                    const { hash } = await submitProofToContract(
-                        contractProof,
-                        { type: 'payOrderByAlipay', merchant, productId, orderId },
-                        provider,
-                    );
-                    setTxHash(hash);
-                } else {
-                    // FIAT: merchant submits proof to receive USDT
-                    const { hash } = await submitProofToContract(
-                        contractProof,
-                        { type: 'receiveCryptoWithAlipayPayment', productId, orderId },
-                        provider,
-                    );
-                    setTxHash(hash);
-                }
-            } else {
-                throw new Error(`Unknown platform: ${platform}`);
-            }
-
+            const { hash } = await submitProofPipeline({
+                platform:  platformByKey(platform),
+                direction,
+                merchant,
+                productId,
+                orderId,
+                proof,
+                network,
+            });
+            setTxHash(hash);
             setStatus('success');
-            return { ok: true };
+            return { ok: true, txHash: hash };
         } catch (err: any) {
             const errorMessage = err.shortMessage || err.message || String(err);
             setError(errorMessage);
             setStatus('error');
             return { ok: false, error: errorMessage };
         }
-    }, []);
+    }, [network]);
 
     return {
         status,
@@ -247,7 +195,6 @@ export function useOrderFlow(): UseOrderFlowReturn {
         error,
         placeOrder,
         cancelOrder,
-        payByCrypto,
         claimRefund,
         submitProof,
         reset,

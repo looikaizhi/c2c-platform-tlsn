@@ -6,9 +6,13 @@ const MERCHANT_ID_HASH = "0x0000000000000000000000000000000000000000000000000000
 const PAYEE_NAME_HASH = "0x0000000000000000000000000000000000000000000000000000000000000004";
 const PAYEE_ID_HASH = "0x0000000000000000000000000000000000000000000000000000000000000005";
 const TRANSFER_ORDER_BINDING_HASH = "0x0000000000000000000000000000000000000000000000000000000000000006";
+const OWNER_ADDRESS = "0x0000000000000000000000000000000000000000000000000000000000000007";
+const COUNTERPARTY_ADDRESS = "0x0000000000000000000000000000000000000000000000000000000000000008";
+const TENANT_ID = "__TLSN_TENANT_ID_SENTINEL__";
 const HOST = "wise.com";
 const METHOD = "GET";
 const LANDING_URL = "https://wise.com/home";
+const TLSN_POLICY_VERSION = "v1.0.0";
 const CONTACTS_PATHNAME = "/gateway/v2/profiles/*/contacts";
 const TRANSFER_PATHNAME = "/gateway/v3/profiles/*/transfers/*";
 const ENDPOINT_CONTACTS = "contacts";
@@ -16,6 +20,7 @@ const ENDPOINT_TRANSFER = "transfer";
 const config = {
   name: "Wise Contacts + Transfer Prover",
   description: "Prove your Wise contacts and transfer responses.",
+  policyVersion: TLSN_POLICY_VERSION,
   requests: [
     {
       method: METHOD,
@@ -56,7 +61,7 @@ const CONTACTS_HANDLERS = [
   {
     type: "RECV",
     part: "ALL",
-    action: "PEDERSEN",
+    action: "REVEAL",
     params: {
       type: "regex",
       regex: '"title"\\s*:\\s*"[^"]*"',
@@ -66,7 +71,7 @@ const CONTACTS_HANDLERS = [
   {
     type: "RECV",
     part: "ALL",
-    action: "PEDERSEN",
+    action: "REVEAL",
     params: {
       type: "regex",
       regex: '"subtitle"\\s*:\\s*"[^"]*"',
@@ -81,25 +86,29 @@ const TRANSFER_HANDLERS = [
     type: "RECV",
     part: "BODY",
     action: "REVEAL",
-    params: { type: "json", path: "id" }
+    params: { type: "json", path: "id" },
+    label: "transaction.id"
   },
   {
     type: "RECV",
     part: "BODY",
     action: "REVEAL",
-    params: { type: "json", path: "state" }
+    params: { type: "json", path: "state" },
+    label: "transaction.status"
   },
   {
     type: "RECV",
     part: "BODY",
     action: "REVEAL",
-    params: { type: "json", path: "targetAmount" }
+    params: { type: "json", path: "targetAmount" },
+    label: "originator.amount"
   },
   {
     type: "RECV",
     part: "BODY",
     action: "REVEAL",
-    params: { type: "json", path: "targetCurrency" }
+    params: { type: "json", path: "targetCurrency" },
+    label: "originator.currency"
   },
   {
     type: "RECV",
@@ -109,7 +118,8 @@ const TRANSFER_HANDLERS = [
       type: "regex",
       regex: '(?<="state"\\s*:\\s*"OUTGOING_PAYMENT_SENT"\\s*,\\s*)"date"\\s*:\\s*(?:"[^"]*"|\\d+)',
       flags: "g"
-    }
+    },
+    label: "originator.timestamp"
   }
 ];
 function getHeaderValue(header, name) {
@@ -200,66 +210,78 @@ async function onClick() {
       setState("isRequestPending", false);
       return;
     }
-    const contactsProof = await prove(
-      {
-        url: contactsRequestUrl,
-        method: METHOD,
-        headers: buildHeadersForEndpoint(ENDPOINT_CONTACTS)
-      },
-      {
-        verifierUrl: VERIFIER_URL,
-        proxyUrl: PROXY_URL_BASE + HOST,
-        maxRecvData: 2e4,
-        maxSentData: 12e3,
-        transcriptCommitHashAlg: "Keccak256",
-        handlers: CONTACTS_HANDLERS,
-        sessionData: {
-          __tlsn_order_binding_hash: CONTACTS_ORDER_BINDING_HASH,
-          __tlsn_merchant_name_hash: MERCHANT_NAME_HASH,
-          __tlsn_merchant_id_hash: MERCHANT_ID_HASH,
-          __tlsn_payee_name_hash: PAYEE_NAME_HASH,
-          __tlsn_payee_id_hash: PAYEE_ID_HASH
+    const contactsHeaders = buildHeadersForEndpoint(ENDPOINT_CONTACTS);
+    const transferHeaders = buildHeadersForEndpoint(ENDPOINT_TRANSFER);
+    const [contactsProof, transferProof] = await Promise.all([
+      prove(
+        {
+          url: contactsRequestUrl,
+          method: METHOD,
+          headers: contactsHeaders
         },
-        accountCheckFields: [
-          // CONTACTS_HANDLERS[2] = title    → verify against payeeNameHash
-          { handlerIndex: 2, sessionDataKey: "__tlsn_payee_name_hash", valueMode: "json_value" },
-          // CONTACTS_HANDLERS[3] = subtitle → verify against payeeIdHash
-          { handlerIndex: 3, sessionDataKey: "__tlsn_payee_id_hash", valueMode: "json_value" }
-        ],
-        transcriptCommitDebug: {
-          exposeOpenings: true,
-          //includeVerifierTranscript: true,
-          runSelfCheck: true
+        {
+          verifierUrl: VERIFIER_URL,
+          proxyUrl: PROXY_URL_BASE + HOST,
+          maxRecvData: 3e3,
+          maxSentData: 4e3,
+          transcriptCommitHashAlg: "Keccak256",
+          handlers: CONTACTS_HANDLERS,
+          sessionData: {
+            __tlsn_order_binding_hash: CONTACTS_ORDER_BINDING_HASH,
+            __tlsn_merchant_name_hash: MERCHANT_NAME_HASH,
+            __tlsn_merchant_id_hash: MERCHANT_ID_HASH,
+            __tlsn_payee_name_hash: PAYEE_NAME_HASH,
+            __tlsn_payee_id_hash: PAYEE_ID_HASH,
+            __tlsn_owner_address: OWNER_ADDRESS,
+            __tlsn_counterparty_address: COUNTERPARTY_ADDRESS,
+            __tlsn_tenant_id: TENANT_ID
+          },
+          accountCheckFields: [
+            // CONTACTS_HANDLERS[2] = title    → verify against payeeNameHash
+            { handlerIndex: 2, sessionDataKey: "__tlsn_payee_name_hash", valueMode: "json_value" },
+            // CONTACTS_HANDLERS[3] = subtitle → verify against payeeIdHash
+            { handlerIndex: 3, sessionDataKey: "__tlsn_payee_id_hash", valueMode: "json_value" }
+          ],
+          transcriptCommitDebug: {
+            exposeOpenings: true,
+            //includeVerifierTranscript: true,
+            runSelfCheck: true
+          }
         }
-      }
-    );
-    const transferProof = await prove(
-      {
-        url: transferRequestUrl,
-        method: METHOD,
-        headers: buildHeadersForEndpoint(ENDPOINT_TRANSFER)
-      },
-      {
-        verifierUrl: VERIFIER_URL,
-        proxyUrl: PROXY_URL_BASE + HOST,
-        maxRecvData: 2e4,
-        maxSentData: 12e3,
-        transcriptCommitHashAlg: "Keccak256",
-        handlers: TRANSFER_HANDLERS,
-        sessionData: { __tlsn_order_binding_hash: TRANSFER_ORDER_BINDING_HASH },
-        transcriptCommitDebug: {
-          exposeOpenings: true,
-          //includeVerifierTranscript: true,
-          runSelfCheck: true
+      ),
+      prove(
+        {
+          url: transferRequestUrl,
+          method: METHOD,
+          headers: transferHeaders
+        },
+        {
+          verifierUrl: VERIFIER_URL,
+          proxyUrl: PROXY_URL_BASE + HOST,
+          maxRecvData: 3e3,
+          maxSentData: 4e3,
+          transcriptCommitHashAlg: "Keccak256",
+          handlers: TRANSFER_HANDLERS,
+          sessionData: {
+            __tlsn_order_binding_hash: TRANSFER_ORDER_BINDING_HASH,
+            __tlsn_owner_address: OWNER_ADDRESS,
+            __tlsn_counterparty_address: COUNTERPARTY_ADDRESS,
+            __tlsn_tenant_id: TENANT_ID
+          },
+          transcriptCommitDebug: {
+            exposeOpenings: true,
+            //includeVerifierTranscript: true,
+            runSelfCheck: true
+          }
         }
-      }
-    );
+      )
+    ]);
     console.log("[wise] prove ok for contacts + transfer");
     done(JSON.stringify({
       // 前端展示用（合并结果）
       displayResults: [
-        ...contactsProof?.results || [],
-        ...transferProof?.results || []
+        ...contactsProof?.displayResults || contactsProof?.results || [],
+        ...transferProof?.displayResults || transferProof?.results || []
       ],
       // 合约提交用（独立 proof，保留完整 ProveResponse）
       proofs: {

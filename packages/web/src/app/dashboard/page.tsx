@@ -1,114 +1,72 @@
 "use client";
 
-import { useMemo, useState } from 'react';
-import DashboardStats from '@/components/dashboard/DashboardStats';
-import DashboardOrdersTable from '@/components/dashboard/DashboardOrdersTable';
-import type { SortConfig } from '@/components/dashboard/types';
-import { useDashboardQuery } from '@/hooks/queries/useDashboardQuery';
-import { Badge } from '@/components/ui/Badge';
-import { Card } from '@/components/ui/Card';
-
-const FALLBACK_WALLET_ADDRESS = '0xAbCDeF1234567890fFaBbCcDdEeFf01234567890';
+import type { Address } from 'viem';
+import { Wallet, Star, ListChecks } from 'lucide-react';
+import { useReputation } from '@/hooks/useReputation';
+import { useWallet } from '@/hooks/useWallet';
+import UserWalletCard from '@/components/dashboard/UserWalletCard';
+import BalancesCard from '@/components/shared/BalancesCard';
+import ClaimableBondCard from '@/components/shared/ClaimableBondCard';
+import ReputationCard from '@/components/dashboard/ReputationCard';
+import ActiveOrdersList from '@/components/dashboard/ActiveOrdersList';
+import NotConnectedPlaceholder from '@/components/shared/NotConnectedPlaceholder';
 
 export default function DashboardPage() {
-    const [directionFilter, setDirectionFilter] = useState<0 | 1>(1);
-    const [sortConfig, setSortConfig] = useState<SortConfig>({ key: null, direction: 'desc' });
+    const wallet = useWallet();
+    const reputation = useReputation(wallet.address ?? undefined);
 
-    const dashboardQuery = useDashboardQuery(FALLBACK_WALLET_ADDRESS);
-    const userBuyOrder = useMemo(
-        () => (dashboardQuery.data ?? []).filter((item) => item.fiat_to_crypto === 1),
-        [dashboardQuery.data],
-    );
-    const userSellOrder = useMemo(
-        () => (dashboardQuery.data ?? []).filter((item) => item.fiat_to_crypto === 0),
-        [dashboardQuery.data],
-    );
+    if (!wallet.isConnected || !wallet.address) {
+        return (
+            <NotConnectedPlaceholder
+                title="Connect your wallet"
+                description="View balances, reputation, claimable bonds, and your active orders."
+                features={[
+                    { icon: Wallet, label: 'Wallet balances across chains' },
+                    { icon: Star, label: 'On-chain reputation score' },
+                    { icon: ListChecks, label: 'Active orders & bond claims' },
+                ]}
+            />
+        );
+    }
 
-    const sortedOrders = useMemo(() => {
-        const scopedOrders = directionFilter ? userBuyOrder : userSellOrder;
-        const ordersCopy = scopedOrders.slice();
-
-        if (sortConfig.key === 'order_create_time') {
-            ordersCopy.sort((a, b) => {
-                const dateA = new Date(a.order_create_time).getTime();
-                const dateB = new Date(b.order_create_time).getTime();
-                return sortConfig.direction === 'asc' ? dateA - dateB : dateB - dateA;
-            });
-        }
-
-        return ordersCopy;
-    }, [userBuyOrder, userSellOrder, sortConfig, directionFilter]);
-
-    const handleSort = (key: string) => {
-        let direction: 'asc' | 'desc' = 'asc';
-        if (sortConfig.key === key && sortConfig.direction === 'asc') {
-            direction = 'desc';
-        }
-        setSortConfig({ key, direction });
-    };
-
-    const allOrders = [...userBuyOrder, ...userSellOrder];
+    const address = wallet.address as Address;
 
     return (
-        <main className="flex min-h-[calc(100dvh-64px)] w-full justify-center px-4 py-6 sm:px-6">
-            <section className="flex w-full max-w-[1280px] flex-col">
-                <div style={{ marginBottom: 'var(--space-4)' }}>
-                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>Operations</p>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
-                        <div>
-                            <h1 style={{ fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>交易看板 Dashboard</h1>
-                            <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginTop: '4px' }}>追踪法币与加密资产订单流转，统一查看状态、时间和详情跳转。</p>
-                        </div>
-                        <Badge variant="info">Real-time View</Badge>
-                    </div>
+        <main className="ambient-page screen-fixed flex w-full justify-center px-4 py-4 sm:px-6">
+            <section className="flex h-full w-full max-w-[1440px] flex-col gap-3">
+                {/* ── Title row ─────────────────────────────────────────── */}
+                <div className="flex flex-shrink-0 items-baseline justify-between gap-3">
+                    <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>Dashboard</h1>
+                    <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>Your trades, bonds & reputation.</p>
                 </div>
 
-                <DashboardStats
-                    totalOrders={allOrders.length}
-                    verifiedBankAccounts={0}
-                    activeOrders={sortedOrders.length}
-                    profit={0}
-                />
+                {/* ── Wallet slim pill ──────────────────────────────────── */}
+                <div className="flex-shrink-0">
+                    <UserWalletCard address={address} />
+                </div>
 
-                <Card padding="none" className="mb-4 p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <button
-                            type="button"
-                            onClick={() => setDirectionFilter(1)}
-                            className={`h-10 rounded-lg border px-4 text-sm font-semibold transition-all duration-[var(--motion-fast)] ${
-                                directionFilter === 1
-                                    ? 'border-[color:rgb(240_185_11_/_55%)] bg-[color:rgb(240_185_11_/_12%)] text-white shadow-[inset_0_-2px_0_0_var(--accent-cta)]'
-                                    : 'border-[var(--line-soft)] bg-[var(--bg-surface-2)] text-[var(--text-secondary)] hover:border-[var(--line-strong)] hover:text-white'
-                            }`}
-                        >
-                            Fiat → Crypto
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setDirectionFilter(0)}
-                            className={`h-10 rounded-lg border px-4 text-sm font-semibold transition-all duration-[var(--motion-fast)] ${
-                                directionFilter === 0
-                                    ? 'border-[color:rgb(240_185_11_/_55%)] bg-[color:rgb(240_185_11_/_12%)] text-white shadow-[inset_0_-2px_0_0_var(--accent-cta)]'
-                                    : 'border-[var(--line-soft)] bg-[var(--bg-surface-2)] text-[var(--text-secondary)] hover:border-[var(--line-strong)] hover:text-white'
-                            }`}
-                        >
-                            Crypto → Fiat
-                        </button>
-                        <div className="ml-auto">
-                            <Badge variant={dashboardQuery.isFetching ? 'warning' : 'success'} dot>
-                                {dashboardQuery.isFetching ? 'Syncing' : 'Stable'}
-                            </Badge>
-                        </div>
+                {/* ── Balances strip ────────────────────────────────────── */}
+                <div className="flex-shrink-0">
+                    <BalancesCard address={address} title="Wallet balances" />
+                </div>
+
+                {/* ── Main 2-col split: LEFT (Reputation + Claim) / RIGHT (Active orders) ── */}
+                <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[360px_minmax(0,1fr)]">
+                    <aside className="flex min-h-0 flex-col gap-3 lg:overflow-y-auto">
+                        <ReputationCard
+                            data={reputation.data}
+                            loading={reputation.loading}
+                            error={reputation.error}
+                            refetch={reputation.refetch}
+                            compact
+                        />
+                        <ClaimableBondCard address={address} />
+                    </aside>
+
+                    <div className="flex min-h-0 flex-col">
+                        <ActiveOrdersList address={address} onOrderChange={reputation.refetch} />
                     </div>
-                </Card>
-
-                <DashboardOrdersTable
-                    isLoading={dashboardQuery.isLoading}
-                    orders={sortedOrders}
-                    sortConfig={sortConfig}
-                    onSort={handleSort}
-                    isError={dashboardQuery.isError}
-                />
+                </div>
             </section>
         </main>
     );

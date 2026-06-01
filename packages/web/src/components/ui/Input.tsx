@@ -39,8 +39,8 @@ export function Input({ label, suffix, prefix, error, hint, style, ...rest }: In
             ? 'var(--status-danger)'
             : 'var(--border-active)';
           (e.currentTarget as HTMLDivElement).style.boxShadow = error
-            ? '0 0 0 2px rgba(246,70,93,0.2)'
-            : '0 0 0 2px rgba(240,185,11,0.2)';
+            ? '0 0 0 2px rgba(237,112,136,0.25)'
+            : '0 0 0 2px rgba(80,210,193,0.25)';
         }}
         onBlurCapture={(e) => {
           (e.currentTarget as HTMLDivElement).style.borderColor = error

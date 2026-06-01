@@ -1,7 +1,6 @@
-import type { CryptoPair, MoneyPair } from './priceModel';
+import type { CryptoPair, MoneyPair } from './assetRegistry';
 
 export const queryKeys = {
-    dashboard: (walletAddress: string) => ['dashboard', walletAddress] as const,
     orderList: (params: {
         walletAddress: string;
         isBuy: boolean;

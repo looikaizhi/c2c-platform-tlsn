@@ -29,7 +29,7 @@ export function OrderTimeline({ steps }: OrderTimelineProps) {
               <div style={{
                 width: '12px', height: '12px', borderRadius: '50%', flexShrink: 0, marginTop: '3px',
                 background: dotColor,
-                boxShadow: step.status === 'active' ? `0 0 0 3px rgba(240,185,11,0.2)` : 'none',
+                boxShadow: step.status === 'active' ? `0 0 0 3px rgba(80,210,193,0.25)` : 'none',
                 border: step.status === 'pending' ? `2px solid var(--border-default)` : 'none',
               }} />
               {!isLast && (

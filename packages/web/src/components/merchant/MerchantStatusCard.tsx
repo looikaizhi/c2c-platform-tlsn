@@ -9,39 +9,56 @@ interface MerchantStatusCardProps {
 }
 
 function shortAddress(address: string | null) {
-    if (!address) return '-';
-    return `${address.slice(0, 6)}...${address.slice(-4)}`;
+    if (!address) return '—';
+    return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
-function MetricItem({ label, value, variant }: { label: string; value: string; variant: 'info' | 'warning' | 'success' | 'muted' }) {
-    return (
-        <div style={{ flex: 1, minWidth: '200px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 'var(--space-3)', background: 'var(--bg-base)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)' }}>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{label}</span>
-            <Badge variant={variant} size="sm">{value}</Badge>
-        </div>
-    );
-}
-
+/**
+ * Single-row status pill. Designed for ~48px height in the new compact
+ * merchant layout. Renders the previous large card only if not registered
+ * (so the user still sees a clear unregistered state).
+ */
 export default function MerchantStatusCard({ walletAddress, isMerchant, merchantInfo }: MerchantStatusCardProps) {
-    return (
-        <Card padding="none" className="p-5">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                    <h2 className="text-2xl font-semibold text-white">商家状态 Merchant Status</h2>
-                    <p className="mt-1 text-sm text-[var(--text-subtle)]">{shortAddress(walletAddress)}</p>
+    if (!isMerchant) {
+        return (
+            <Card padding="none" className="px-4 py-3">
+                <div className="flex flex-wrap items-center gap-3 text-sm">
+                    <Badge variant="danger" dot>Unregistered</Badge>
+                    <span className="font-mono text-[var(--text-secondary)]">{shortAddress(walletAddress)}</span>
+                    <span className="text-[var(--text-muted)]">— register below to start listing products.</span>
                 </div>
-                <Badge variant={isMerchant ? 'success' : 'danger'} dot>
-                    {isMerchant ? 'Registered' : 'Unregistered'}
-                </Badge>
-            </div>
+            </Card>
+        );
+    }
 
-            {isMerchant && merchantInfo && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)' }}>
-                    <MetricItem label="Crypto 产品" value={String(merchantInfo.sellCryptoAmount)} variant="info" />
-                    <MetricItem label="Fiat 产品" value={String(merchantInfo.sellFiatAmount)} variant="warning" />
-                    <MetricItem label="KYB" value={merchantInfo.kybVerified ? '已验证' : '未验证'} variant={merchantInfo.kybVerified ? 'success' : 'muted'} />
-                </div>
-            )}
+    return (
+        <Card padding="none" className="px-4 py-3">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                <Badge variant="success" dot>Active</Badge>
+                <span className="font-mono text-[var(--text-secondary)]">{shortAddress(walletAddress)}</span>
+                {merchantInfo && (
+                    <>
+                        <span className="text-[var(--text-muted)]">·</span>
+                        <Badge variant={merchantInfo.kybVerified ? 'success' : 'muted'} size="sm">
+                            {merchantInfo.kybVerified ? 'KYB ✓' : 'KYB —'}
+                        </Badge>
+                        <span className="text-[var(--text-muted)]">·</span>
+                        <span className="text-[var(--text-muted)]">
+                            <span className="font-mono text-[var(--text-primary)]">{String(merchantInfo.sellCryptoAmount)}</span> CRYPTO
+                            <span className="mx-1">/</span>
+                            <span className="font-mono text-[var(--text-primary)]">{String(merchantInfo.sellFiatAmount)}</span> FIAT products
+                        </span>
+                        {merchantInfo.registeredAt > 0n && (
+                            <>
+                                <span className="text-[var(--text-muted)]">·</span>
+                                <span className="text-[var(--text-muted)]">
+                                    Reg <span className="font-mono">{new Date(Number(merchantInfo.registeredAt) * 1000).toLocaleDateString()}</span>
+                                </span>
+                            </>
+                        )}
+                    </>
+                )}
+            </div>
         </Card>
     );
 }

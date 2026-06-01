@@ -1,35 +1,50 @@
-import { RowDataPacket } from 'mysql2/promise';
-import pool from '@/server/database';
-import type { SupportCryptoAsset, SyncCryptoRequest } from '@/server/db_types';
+import 'server-only';
+import { asc } from 'drizzle-orm';
+import { getDb } from '@/server/db/client';
+import { supportCryptoAssets, type SupportCryptoAsset } from '@/server/db/schema';
+import { listHandler, insertHandler } from '@/server/handlers/crudHandler';
+import type { SyncCryptoRequest } from '@/server/db_types';
 
-export const GET = async () => {
-    try {
-        const [rows] = await pool.query<SupportCryptoAsset[] & RowDataPacket[]>(
-            'SELECT * FROM support_crypto_assets ORDER BY crypto_id ASC',
-        );
-        return Response.json(rows, { status: 200 });
-    } catch (error) {
-        console.error('[admin/crypto GET]', error);
-        return Response.json({ error: 'Internal Server Error' }, { status: 500 });
-    }
-};
+export const GET = listHandler<SupportCryptoAsset, {
+    id:            number;
+    crypto_id:     number;
+    token_symbol:  string;
+    token_address: string;
+    is_active:     boolean;
+    edit_time:     string;
+    created_time:  string;
+}>({
+    fetch: () => getDb()
+        .select()
+        .from(supportCryptoAssets)
+        .orderBy(asc(supportCryptoAssets.cryptoId))
+        .all(),
+    map: (r) => ({
+        id:            r.id,
+        crypto_id:     r.cryptoId,
+        token_symbol:  r.tokenSymbol,
+        token_address: r.tokenAddress,
+        is_active:     r.isActive,
+        edit_time:     new Date(r.editTime * 1000).toISOString(),
+        created_time:  new Date(r.createdTime * 1000).toISOString(),
+    }),
+    tag: 'admin/crypto GET',
+});
 
-export const POST = async (req: Request) => {
-    const body = await req.json() as SyncCryptoRequest;
-    const { crypto_id, token_symbol, token_address, is_active } = body;
-
-    if (crypto_id === undefined || !token_symbol || !token_address) {
-        return Response.json({ error: 'Missing required fields' }, { status: 400 });
-    }
-
-    try {
-        await pool.execute(
-            'INSERT INTO support_crypto_assets (crypto_id, token_symbol, token_address, is_active) VALUES (?, ?, ?, ?)',
-            [crypto_id, token_symbol, token_address, is_active ? 1 : 0],
-        );
-        return Response.json({ ok: true }, { status: 201 });
-    } catch (error) {
-        console.error('[admin/crypto POST]', error);
-        return Response.json({ error: 'Internal Server Error' }, { status: 500 });
-    }
-};
+export const POST = insertHandler<SyncCryptoRequest>({
+    validate: (b) =>
+        (b.crypto_id === undefined || !b.token_symbol || !b.token_address)
+            ? 'Missing required fields' : null,
+    insert: (b) => {
+        const ts = Math.floor(Date.now() / 1000);
+        getDb().insert(supportCryptoAssets).values({
+            cryptoId:     b.crypto_id,
+            tokenSymbol:  b.token_symbol,
+            tokenAddress: b.token_address,
+            isActive:     !!b.is_active,
+            editTime:     ts,
+            createdTime:  ts,
+        }).run();
+    },
+    tag: 'admin/crypto POST',
+});

@@ -38,7 +38,7 @@ export function Select({ label, error, hint, children, style, ...rest }: SelectP
         }}
         onFocus={(e) => {
           e.currentTarget.style.borderColor = 'var(--border-active)';
-          e.currentTarget.style.boxShadow = '0 0 0 2px rgba(240,185,11,0.2)';
+          e.currentTarget.style.boxShadow = '0 0 0 2px rgba(80,210,193,0.25)';
         }}
         onBlur={(e) => {
           e.currentTarget.style.borderColor = error ? 'var(--status-danger)' : 'var(--border-default)';

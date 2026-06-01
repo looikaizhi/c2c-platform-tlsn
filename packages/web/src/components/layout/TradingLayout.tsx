@@ -45,6 +45,7 @@ export function TradingLayout({ activeTab, children }: TradingLayoutProps) {
         }}
       >
         <div
+          className="trading-tabbar-inner"
           style={{
             maxWidth: 'var(--content-max-w)',
             margin: '0 auto',
@@ -87,8 +88,8 @@ export function TradingLayout({ activeTab, children }: TradingLayoutProps) {
             })}
           </nav>
 
-          {/* Quick actions */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)' }}>
+          {/* Quick actions — hidden on mobile (reachable via header drawer) */}
+          <div className="trading-quick-actions" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)' }}>
             {quickLinks.map((link) => (
               <Link
                 key={link.href}
@@ -113,18 +114,27 @@ export function TradingLayout({ activeTab, children }: TradingLayoutProps) {
         </div>
       </div>
 
-      {/* Page content */}
+      {/* Page content — fills exactly one viewport on desktop */}
       <div
+        className="screen-fixed-tabbed"
         style={{
-          flex: 1,
           maxWidth: 'var(--content-max-w)',
           margin: '0 auto',
           width: '100%',
-          padding: 'var(--space-6)',
+          padding: 'var(--space-5) var(--space-6)',
+          display: 'flex',
+          flexDirection: 'column',
         }}
       >
         {children}
       </div>
+
+      <style>{`
+        @media (max-width: 767px) {
+          .trading-quick-actions { display: none !important; }
+          .trading-tabbar-inner { padding: 0 var(--space-4) !important; }
+        }
+      `}</style>
     </div>
   );
 }

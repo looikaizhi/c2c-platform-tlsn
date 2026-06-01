@@ -1,12 +1,10 @@
 "use client";
 import { useState } from 'react';
+import { Power } from 'lucide-react';
 import { useWallet } from '@/hooks/useWallet';
 import { Button } from './ui/Button';
 import { Badge } from './ui/Badge';
-
-function truncateAddr(addr: string) {
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
+import { truncateAddr } from '@/lib/formatters';
 
 export default function WalletConnect() {
   const { address, chainId, isConnected, wallets, isConnecting, error, connect, disconnect } =
@@ -107,7 +105,9 @@ export default function WalletConnect() {
                 (e.currentTarget as HTMLButtonElement).style.background = 'none';
               }}
             >
-              ⏻ Disconnect
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <Power size={13} strokeWidth={1.5} /> Disconnect
+              </span>
             </button>
           </div>
         )}
@@ -142,7 +142,7 @@ export default function WalletConnect() {
           variant="primary"
           size="sm"
           loading={isConnecting}
-          onClick={() => connect(wallets[0])}
+          onClick={() => connect(wallets[0].id)}
         >
           {isConnecting ? 'Connecting…' : 'Connect Wallet'}
         </Button>
@@ -194,8 +194,8 @@ export default function WalletConnect() {
           {wallets.map((w) => (
             <button
               type="button"
-              key={w.info.uuid}
-              onClick={() => { connect(w); setShowDropdown(false); }}
+              key={w.id}
+              onClick={() => { connect(w.id); setShowDropdown(false); }}
               style={{
                 width: '100%',
                 display: 'flex',
@@ -219,9 +219,11 @@ export default function WalletConnect() {
                 (e.currentTarget as HTMLButtonElement).style.background = 'none';
               }}
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={w.info.icon} alt={w.info.name} width={24} height={24} style={{ borderRadius: 'var(--radius-sm)' }} />
-              <span>{w.info.name}</span>
+              {w.icon && (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img src={w.icon} alt={w.name} width={24} height={24} style={{ borderRadius: 'var(--radius-sm)' }} />
+              )}
+              <span>{w.name}</span>
             </button>
           ))}
         </div>

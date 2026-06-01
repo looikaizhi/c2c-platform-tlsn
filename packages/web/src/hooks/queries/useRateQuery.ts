@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
-import { fetchRate } from '@/lib/apiClient';
+import { priceApi } from '@/api/resources/priceApi';
 import { queryKeys } from '@/lib/queryKeys';
-import type { CryptoPair, MoneyPair } from '@/lib/priceModel';
+import type { CryptoPair, MoneyPair } from '@/lib/assetRegistry';
 
 interface UseRateQueryParams {
     moneyPair: MoneyPair;
@@ -11,7 +11,8 @@ interface UseRateQueryParams {
 export function useRateQuery({ moneyPair, cryptoPair }: UseRateQueryParams) {
     return useQuery<number | null>({
         queryKey: queryKeys.rate(moneyPair, cryptoPair),
-        queryFn: () => fetchRate(moneyPair, cryptoPair),
+        queryFn: () => priceApi.fetchRate(moneyPair, cryptoPair),
+        enabled: moneyPair !== 'All',
         staleTime: 5 * 60 * 1000,
         refetchInterval: 10 * 60 * 1000,
     });

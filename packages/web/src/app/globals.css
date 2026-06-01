@@ -1,67 +1,68 @@
 @import "tailwindcss";
 
 :root {
-  /* Backgrounds */
-  --bg-base: #0B0E11;
-  --bg-surface: #1E2329;
-  --bg-elevated: #2B3139;
-  --bg-hover: #363D45;
+  /* Backgrounds — Hyperliquid green-tinted near-black */
+  --bg-base: #0A1311;
+  --bg-surface: #101A17;
+  --bg-elevated: #16221E;
+  --bg-hover: #1C2A25;
 
   /* Backward-compat aliases */
-  --bg-surface-1: #1E2329;
-  --bg-surface-2: #222a33;
-  --bg-surface-3: #2B3139;
-  --bg-surface-4: #363D45;
+  --bg-surface-1: #101A17;
+  --bg-surface-2: #13201C;
+  --bg-surface-3: #16221E;
+  --bg-surface-4: #1C2A25;
 
-  /* Brand */
-  --color-primary: #F0B90B;
-  --color-primary-hover: #D9A808;
-  --color-primary-text: #0B0E11;
+  /* Brand — mint teal */
+  --color-primary: #50D2C1;
+  --color-primary-hover: #3FBFAE;
+  --color-primary-strong: #98FCE4;
+  --color-primary-text: #06100D;
 
   /* Backward-compat aliases */
-  --accent-primary: #F0B90B;
-  --accent-cta: #F0B90B;
+  --accent-primary: #50D2C1;
+  --accent-cta: #50D2C1;
 
-  /* Trade colors */
-  --color-buy: #0ECB81;
-  --color-buy-bg: rgba(14, 203, 129, 0.1);
-  --color-sell: #F6465D;
-  --color-sell-bg: rgba(246, 70, 93, 0.1);
+  /* Trade colors — long bright green / short salmon red */
+  --color-buy: #1FD8A4;
+  --color-buy-bg: rgba(31, 216, 164, 0.10);
+  --color-sell: #ED7088;
+  --color-sell-bg: rgba(237, 112, 136, 0.10);
 
   /* Text */
-  --text-primary: #EAECEF;
-  --text-secondary: #848E9C;
-  --text-tertiary: #5E6673;
+  --text-primary: #E6F2EE;
+  --text-secondary: #7E938C;
+  --text-tertiary: #52635C;
 
   /* Backward-compat aliases */
-  --text-subtle: #848E9C;
-  --text-muted: #7d8794;
-  --text-inverse: #0B0E11;
-  --line-soft: #2B3139;
-  --line-strong: #4a535f;
+  --text-subtle: #7E938C;
+  --text-muted: #6C8079;
+  --text-inverse: #06100D;
+  --line-soft: rgba(255, 255, 255, 0.06);
+  --line-strong: rgba(255, 255, 255, 0.12);
 
   /* Borders */
-  --border-default: #2B3139;
-  --border-active: #F0B90B;
-  --border-subtle: #1E2329;
+  --border-default: rgba(255, 255, 255, 0.06);
+  --border-active: #50D2C1;
+  --border-subtle: rgba(255, 255, 255, 0.03);
 
   /* Status */
-  --status-success: #0ECB81;
-  --status-success-bg: rgba(14, 203, 129, 0.12);
-  --status-danger: #F6465D;
-  --status-danger-bg: rgba(246, 70, 93, 0.12);
-  --status-warning: #F0B90B;
-  --status-warning-bg: rgba(240, 185, 11, 0.12);
-  --status-info: #2196F3;
-  --status-info-bg: rgba(33, 150, 243, 0.12);
-  --status-muted: #848E9C;
-  --status-muted-bg: rgba(132, 142, 156, 0.12);
+  --status-success: #1FD8A4;
+  --status-success-bg: rgba(31, 216, 164, 0.12);
+  --status-danger: #ED7088;
+  --status-danger-bg: rgba(237, 112, 136, 0.12);
+  --status-warning: #E8B339;
+  --status-warning-bg: rgba(232, 179, 57, 0.12);
+  --status-info: #50D2C1;
+  --status-info-bg: rgba(80, 210, 193, 0.12);
+  --status-muted: #7E938C;
+  --status-muted-bg: rgba(126, 147, 140, 0.12);
 
   /* Backward-compat aliases */
-  --state-success: #0ECB81;
-  --state-warning: #F0B90B;
-  --state-danger: #F6465D;
-  --state-info: #2196F3;
+  --state-success: #1FD8A4;
+  --state-warning: #E8B339;
+  --state-danger: #ED7088;
+  --state-info: #50D2C1;
 
   /* Spacing (4px grid) */
   --space-1: 4px;
@@ -96,8 +97,12 @@
   /* Layout */
   --header-h: 56px;
   --tab-bar-h: 44px;
-  --content-max-w: 1440px;
+  --content-max-w: 1280px;
   --sidebar-w: 240px;
+
+  /* Content viewport heights (single-screen terminal model) */
+  --content-h: calc(100dvh - var(--header-h));
+  --content-h-tabbed: calc(100dvh - var(--header-h) - var(--tab-bar-h));
 }
 
 *,
@@ -110,7 +115,7 @@
 
 html,
 body {
-  min-height: 100dvh;
+  height: 100%;
   background: var(--bg-base);
   color: var(--text-primary);
   font-family: var(--font-ui);
@@ -118,6 +123,25 @@ body {
   line-height: 1.5;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Desktop (>=1024px): single-screen terminal — no page scroll */
+@media (min-width: 1024px) {
+  html,
+  body {
+    overflow: hidden;
+  }
+}
+
+/* Tablet / mobile (<=1023px): graceful degradation — vertical scroll
+   allowed, horizontal scroll never */
+@media (max-width: 1023px) {
+  html,
+  body {
+    height: auto;
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -165,7 +189,7 @@ a {
 .terminal-panel {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgb(34 42 51 / 96%) 0%, rgb(30 35 41 / 96%) 100%);
+  background: linear-gradient(180deg, rgb(22 34 30 / 96%) 0%, rgb(16 26 23 / 96%) 100%);
 }
 
 .terminal-input {
@@ -185,7 +209,7 @@ a {
 
 .terminal-input:focus-visible {
   border-color: var(--border-active);
-  box-shadow: 0 0 0 2px rgba(240, 185, 11, 0.2);
+  box-shadow: 0 0 0 2px rgba(80, 210, 193, 0.25);
   outline: none;
 }
 
@@ -203,7 +227,7 @@ a {
 
 .terminal-select:focus-within {
   border-color: var(--border-active);
-  box-shadow: 0 0 0 2px rgba(240, 185, 11, 0.2);
+  box-shadow: 0 0 0 2px rgba(80, 210, 193, 0.25);
 }
 
 /* ── Exchange layout helpers ───────────────────────────────── */
@@ -224,6 +248,35 @@ a {
   font-family: var(--font-mono);
 }
 
+/* ── Single-screen layout helpers ──────────────────────────── */
+
+/* Content region that fills exactly one viewport on desktop and
+   degrades to natural height (page scroll allowed) on small screens. */
+.screen-fixed {
+  height: var(--content-h);
+  overflow: hidden;
+}
+
+.screen-fixed-tabbed {
+  height: var(--content-h-tabbed);
+  overflow: hidden;
+}
+
+@media (max-width: 1023px) {
+  .screen-fixed,
+  .screen-fixed-tabbed {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+}
+
+/* Flex child that is allowed to shrink so an inner region can scroll. */
+.flex-scroll-host {
+  flex: 1;
+  min-height: 0;
+}
+
 .text-buy {
   color: var(--color-buy);
 }
@@ -234,6 +287,63 @@ a {
 
 .text-primary-color {
   color: var(--color-primary);
+}
+
+/* Tabular numerals — for prices/amounts/timestamps so digits don't shift */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle mint glow for hero CTAs / brand badges (respects reduced-motion) */
+.brand-glow {
+  box-shadow: 0 0 0 1px rgba(80, 210, 193, 0.18), 0 8px 24px -8px rgba(80, 210, 193, 0.28);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-glow {
+    box-shadow: 0 0 0 1px rgba(80, 210, 193, 0.18);
+  }
+}
+
+/* ── Card polish ─────────────────────────────────────────────
+   Subtle top highlight (1px inner) + hover ring. Inspired by
+   Linear / Vercel / Arc cards. Use `card-glow` on any <Card>. */
+.card-glow {
+  position: relative;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, transparent 24%);
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast),
+              transform var(--motion-fast);
+}
+
+.card-glow:hover {
+  border-color: rgba(80, 210, 193, 0.18);
+  box-shadow: 0 0 0 1px rgba(80, 210, 193, 0.05),
+              0 12px 32px -16px rgba(80, 210, 193, 0.12);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-glow {
+    transition: none;
+  }
+}
+
+/* ── Ambient page background ────────────────────────────────
+   A faint teal radial blob in the upper-right of any full-page
+   viewport — gives the page a soft "light source" feel without
+   competing with content. Use `ambient-page` on the outermost <main>. */
+.ambient-page {
+  position: relative;
+  isolation: isolate;
+}
+.ambient-page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 40% at 85% -10%, rgba(80, 210, 193, 0.07), transparent 60%),
+    radial-gradient(ellipse 40% 30% at 10% 110%, rgba(80, 210, 193, 0.04), transparent 60%);
 }
 
 /* ── Reduced motion ────────────────────────────────────────── */

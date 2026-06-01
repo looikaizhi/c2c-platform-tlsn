@@ -3,11 +3,11 @@
 import React, { useMemo, useReducer, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { RefreshCw } from 'lucide-react';
-import type { Address } from 'viem';
-import type * as dbTypes from '@/server/db_types';
-import { DEFAULT_CRYPTO, DEFAULT_MONEY, getDefaultOptions } from '@/lib/priceModel';
-import type { CryptoPair, MoneyPair } from '@/lib/priceModel';
-import { useOrderListQuery } from '@/hooks/queries/useOrderListQuery';
+import type { Address, Hex } from 'viem';
+import { platformDisplay } from '@/constants/platforms';
+import { moneyOptions as registryMoneyOptions, cryptoOptions as registryCryptoOptions } from '@/lib/assetRegistry';
+import type { CryptoPair, MoneyPair } from '@/lib/assetRegistry';
+import { useOrderListQuery, type P2PProduct } from '@/hooks/queries/useOrderListQuery';
 import { useRateQuery } from '@/hooks/queries/useRateQuery';
 import { useWallet } from '@/hooks/useWallet';
 import { AssetType } from '@/lib/orderHelpers';
@@ -21,32 +21,42 @@ import {
   initialOrderLifecycleState,
   orderLifecycleReducer,
 } from '@/components/p2p/orderLifecycle';
+import { truncateAddr, formatOnChainRate, formatAvailableAmount } from '@/lib/formatters';
 
 const PlaceOrderModal = dynamic(() => import('@/components/PlaceOrderModal'));
 const P2PPaymentModal = dynamic(() => import('@/components/p2p/P2PPaymentModal'));
 
-const moneyOptions = getDefaultOptions(DEFAULT_MONEY);
-const cryptoOptions = getDefaultOptions(DEFAULT_CRYPTO);
+const moneyOptions = [
+  { value: 'All', text: 'All' },
+  ...registryMoneyOptions(),
+];
+const cryptoOptions = registryCryptoOptions();
 const FALLBACK_WALLET = '0xAbCDeF1234567890fFaBbCcDdEeFf0123456789';
 
 const PAYMENT_METHODS = ['All', 'Wise', 'Alipay', 'Bank Transfer'];
 
-function truncateAddr(addr: string) {
-  if (!addr || addr.length < 10) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+// selectedInfo carries extra fields, used by PlaceOrderModal
+interface ExtendedSelectedOrderInfo extends SelectedOrderInfo {
+  bondTokenAddress: Address;
+  tokenDecimals: number;
+  onChainRate: number;
+  platformId: Hex;
 }
 
 export function P2PPage() {
   const [isBuy, setIsBuy] = useState(true);
   const [cryptoPair, setCryptoPair] = useState<CryptoPair>('USDT');
-  const [moneyPair, setMoneyPair] = useState<MoneyPair>('CNY');
+  const [moneyPair, setMoneyPair] = useState<MoneyPair>('All');
   const [payMethod, setPayMethod] = useState('All');
-  const [sortKey, setSortKey] = useState('price');
+  const [sortKey, setSortKey] = useState<'rate' | 'availableAmount' | 'merchant'>('rate');
 
   const [orderLifecycle, dispatchOrderLifecycle] = useReducer(
     orderLifecycleReducer,
     initialOrderLifecycleState,
   );
+
+  // Extended selectedInfo for passing bondTokenAddress to modals
+  const [extendedInfo, setExtendedInfo] = useState<ExtendedSelectedOrderInfo | null>(null);
 
   const wallet = useWallet();
   const walletAddress = wallet.address ?? FALLBACK_WALLET;
@@ -54,19 +64,54 @@ export function P2PPage() {
   const orderListQuery = useOrderListQuery({ walletAddress, isBuy, moneyPair, cryptoPair });
   const rateQuery = useRateQuery({ moneyPair, cryptoPair });
 
-  const orderList = orderListQuery.data ?? [];
+  const orderList = useMemo(() => {
+    const list = (orderListQuery.data ?? []).slice();
+    list.sort((a, b) => {
+      if (sortKey === 'rate') {
+        // For buy (fiat→crypto): lower rate is better. For sell: higher rate is better.
+        return isBuy ? Number(a.rate - b.rate) : Number(b.rate - a.rate);
+      }
+      if (sortKey === 'availableAmount') {
+        return Number(b.availableAmount - a.availableAmount);
+      }
+      return a.merchant.localeCompare(b.merchant);
+    });
+    return list;
+  }, [orderListQuery.data, sortKey, isBuy]);
   const rate = rateQuery.data ?? null;
-  const isLoading = orderListQuery.isLoading || rateQuery.isLoading;
-  const displayPrice = useMemo(() => rate?.toFixed(2) ?? '—', [rate]);
+  // Decoupled: orderbook never waits on the price oracle.
+  const isLoading = orderListQuery.isLoading;
+  const displayPrice = useMemo(() => {
+    if (rateQuery.isLoading) return '…';
+    if (rate == null)        return '—';
+    return rate.toFixed(2);
+  }, [rate, rateQuery.isLoading]);
 
-  const handleTradeClick = (item: dbTypes.OrderList) => {
+  const handleTradeClick = (item: P2PProduct) => {
+    // R4 defensive: contract reverts SelfTradeNotAllowed anyway, but skip the
+    // wallet/tx round-trip if the user clicked into their own listing somehow.
+    if (wallet.address && item.merchant.toLowerCase() === wallet.address.toLowerCase()) {
+      return;
+    }
+    const onChainRate = Number(item.rate) / 1e8;
+    const availableTokens = Number(item.availableAmount) / 10 ** item.tokenDecimals;
+    const maxFiat = availableTokens * onChainRate;
+
     const selectedInfo: SelectedOrderInfo = {
-      dbOrderId: item.order_id,
-      merchant: item.wallet_address as Address,
-      productId: 0n,
-      minAmount: item.min_order_amount,
-      maxAmount: item.max_order_amount,
+      dbOrderId: 0,
+      merchant: item.merchant,
+      productId: item.productId,
+      minAmount: 1,
+      maxAmount: Math.floor(maxFiat),
     };
+    const extended: ExtendedSelectedOrderInfo = {
+      ...selectedInfo,
+      bondTokenAddress: item.tokenAddress,
+      tokenDecimals: item.tokenDecimals,
+      onChainRate,
+      platformId: item.platformId as Hex,
+    };
+    setExtendedInfo(extended);
     dispatchOrderLifecycle({ type: 'ORDER_SELECTED', payload: selectedInfo });
   };
 
@@ -76,176 +121,226 @@ export function P2PPage() {
 
   const handleCloseAll = () => {
     dispatchOrderLifecycle({ type: 'FLOW_RESET' });
+    setExtendedInfo(null);
   };
 
   const assetType = isBuy ? AssetType.CRYPTO : AssetType.FIAT;
 
-  const columns: Column<dbTypes.OrderList>[] = [
+  const columns: Column<P2PProduct>[] = [
     {
-      key: 'wallet_address',
+      key: 'merchant',
       header: 'Merchant',
       render: (_val, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)' }}>
-              {truncateAddr(row.wallet_address)}
-            </span>
-            {row.user_level > 0 && (
-              <Badge variant="info" size="sm">L{row.user_level}</Badge>
-            )}
-          </div>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-primary)' }}>
+            {truncateAddr(row.merchant)}
+          </span>
           <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-            {row.trading_volume} trades · {row.success_rate}%
+            {row.cryptoSymbol} · {row.fiatName}
           </span>
         </div>
       ),
     },
     {
-      key: 'min_order_amount',
+      key: 'rate',
       header: `Price (${moneyPair})`,
       sortable: true,
       align: 'right',
-      render: () => (
+      render: (_val, row) => (
         <span style={{
           fontFamily: 'var(--font-mono)',
           fontSize: '15px',
           fontWeight: 600,
           color: isBuy ? 'var(--color-buy)' : 'var(--color-sell)',
         }}>
-          {displayPrice}
+          {formatOnChainRate(row.rate)}
         </span>
       ),
     },
     {
-      key: 'max_order_amount',
+      key: 'availableAmount',
       header: `Available (${cryptoPair})`,
       align: 'right',
       render: (_val, row) => (
         <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
-          {row.max_order_amount.toLocaleString()}
+          {formatAvailableAmount(row.availableAmount, row.tokenDecimals)}
         </span>
       ),
     },
     {
-      key: 'min_order_amount',
+      key: 'limits',
       header: 'Limits',
-      render: (_val, row) => (
-        <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
-          {row.min_order_amount.toLocaleString()} – {row.max_order_amount.toLocaleString()} {moneyPair}
-        </span>
-      ),
+      render: (_val, row) => {
+        const tokens = Number(row.availableAmount) / 10 ** row.tokenDecimals;
+        const maxFiat = (tokens * Number(row.rate) / 1e8).toFixed(0);
+        return (
+          <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+            1 – {Number(maxFiat).toLocaleString()} {moneyPair}
+          </span>
+        );
+      },
     },
     {
-      key: 'supported_methods',
+      key: 'payment',
       header: 'Payment',
-      render: (_val, row) => (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-          {row.supported_methods.split(', ').map((m) => (
-            <Badge key={m} variant="muted" size="sm">{m}</Badge>
-          ))}
-        </div>
-      ),
+      render: (_val, row) => {
+        const platform = platformDisplay(row.platformId);
+        if (!platform) {
+          return (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+              <Badge variant="muted" size="sm">Unknown</Badge>
+            </div>
+          );
+        }
+        return (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+            <span
+              className="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]"
+              style={{ color: platform.color, background: platform.bg }}
+            >
+              {platform.label}
+            </span>
+          </div>
+        );
+      },
     },
     {
-      key: 'order_id',
+      key: 'action',
       header: 'Action',
       align: 'center',
       width: '120px',
-      render: (_val, row) => (
-        <Button
-          variant={isBuy ? 'buy' : 'sell'}
-          size="sm"
-          onClick={(e) => { e.stopPropagation(); handleTradeClick(row); }}
-        >
-          {isBuy ? 'Buy' : 'Sell'} {cryptoPair}
-        </Button>
-      ),
+      render: (_val, row) => {
+        const isSelf =
+          !!wallet.address &&
+          row.merchant.toLowerCase() === wallet.address.toLowerCase();
+        if (isSelf) {
+          return (
+            <Badge variant="muted" size="sm">
+              Your listing
+            </Badge>
+          );
+        }
+        return (
+          <Button
+            variant={isBuy ? 'buy' : 'sell'}
+            size="sm"
+            onClick={(e) => { e.stopPropagation(); handleTradeClick(row); }}
+          >
+            {isBuy ? 'Buy' : 'Sell'} {cryptoPair}
+          </Button>
+        );
+      },
     },
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-4)',
+      }}
+    >
 
-      {/* ── Filter bar ──────────────────────────────────────────────── */}
+      {/* ── Filter bar (two rows; clear visual hierarchy) ────────────── */}
       <Card variant="default" padding="md">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--space-3)',
+          }}
+        >
 
-          {/* Buy / Sell toggle */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-            <div style={{
-              display: 'inline-flex',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border-default)',
-              overflow: 'hidden',
-            }}>
-              <button
-                type="button"
-                onClick={() => setIsBuy(true)}
-                style={{
-                  height: '36px',
-                  padding: '0 20px',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  border: 'none',
-                  cursor: 'pointer',
-                  transition: 'background var(--motion-fast), color var(--motion-fast)',
-                  background: isBuy ? 'var(--color-buy)' : 'transparent',
-                  color: isBuy ? '#0B0E11' : 'var(--text-secondary)',
-                }}
-              >
-                Buy
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsBuy(false)}
-                style={{
-                  height: '36px',
-                  padding: '0 20px',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  border: 'none',
-                  cursor: 'pointer',
-                  transition: 'background var(--motion-fast), color var(--motion-fast)',
-                  background: !isBuy ? 'var(--color-sell)' : 'transparent',
-                  color: !isBuy ? '#fff' : 'var(--text-secondary)',
-                }}
-              >
-                Sell
-              </button>
+          {/* Row 1 — Buy/Sell + Crypto asset chips */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-4)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+              <div style={{
+                display: 'inline-flex',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-default)',
+                overflow: 'hidden',
+              }}>
+                <button
+                  type="button"
+                  onClick={() => setIsBuy(true)}
+                  style={{
+                    height: '36px',
+                    padding: '0 20px',
+                    fontSize: '14px',
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                    transition: 'background var(--motion-fast), color var(--motion-fast)',
+                    background: isBuy ? 'var(--color-buy)' : 'transparent',
+                    color: isBuy ? 'var(--color-primary-text)' : 'var(--text-secondary)',
+                  }}
+                >
+                  Buy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsBuy(false)}
+                  style={{
+                    height: '36px',
+                    padding: '0 20px',
+                    fontSize: '14px',
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                    transition: 'background var(--motion-fast), color var(--motion-fast)',
+                    background: !isBuy ? 'var(--color-sell)' : 'transparent',
+                    color: !isBuy ? '#fff' : 'var(--text-secondary)',
+                  }}
+                >
+                  Sell
+                </button>
+              </div>
+
+              <Badge variant={isBuy ? 'buy' : 'sell'} dot>
+                {isBuy ? 'Buyer View' : 'Seller View'}
+              </Badge>
             </div>
 
-            <Badge variant={isBuy ? 'buy' : 'sell'} dot>
-              {isBuy ? 'Buyer View' : 'Seller View'}
-            </Badge>
+            {/* Crypto asset chips */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
+              {cryptoOptions.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setCryptoPair(opt.value as CryptoPair)}
+                  style={{
+                    height: '32px',
+                    padding: '0 14px',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    borderRadius: 'var(--radius-sm)',
+                    border: `1px solid ${cryptoPair === opt.value ? 'var(--color-primary)' : 'var(--border-default)'}`,
+                    background: cryptoPair === opt.value ? 'rgba(80,210,193,0.10)' : 'transparent',
+                    color: cryptoPair === opt.value ? 'var(--color-primary)' : 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    transition: 'all var(--motion-fast)',
+                  }}
+                >
+                  {opt.text}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* Crypto asset chips */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-            {cryptoOptions.map((opt) => (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => setCryptoPair(opt.value as CryptoPair)}
-                style={{
-                  height: '32px',
-                  padding: '0 14px',
-                  fontSize: '13px',
-                  fontWeight: 500,
-                  borderRadius: 'var(--radius-sm)',
-                  border: `1px solid ${cryptoPair === opt.value ? 'var(--color-primary)' : 'var(--border-default)'}`,
-                  background: cryptoPair === opt.value ? 'rgba(240,185,11,0.1)' : 'transparent',
-                  color: cryptoPair === opt.value ? 'var(--color-primary)' : 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  transition: 'all var(--motion-fast)',
-                }}
-              >
-                {opt.text}
-              </button>
-            ))}
-          </div>
-
-          {/* Row: fiat, payment, sort, refresh */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-2)' }}>
+          {/* Row 2 — Fiat / Payment / Sort / Refresh, separated by a thin divider */}
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              paddingTop: 'var(--space-3)',
+              borderTop: '1px solid var(--border-default)',
+            }}
+          >
             <FilterSelect
               label="Fiat"
               value={moneyPair}
@@ -261,17 +356,20 @@ export function P2PPage() {
             <FilterSelect
               label="Sort"
               value={sortKey}
-              onChange={setSortKey}
+              onChange={(v) => setSortKey(v as 'rate' | 'availableAmount' | 'merchant')}
               options={[
-                { value: 'price', label: 'Price' },
-                { value: 'volume', label: 'Volume' },
+                { value: 'rate',            label: 'Rate' },
+                { value: 'availableAmount', label: 'Available' },
+                { value: 'merchant',        label: 'Merchant' },
               ]}
             />
             <button
               type="button"
               onClick={() => { void orderListQuery.refetch(); void rateQuery.refetch(); }}
               title="Refresh"
+              aria-label="Refresh order list"
               style={{
+                marginLeft: 'auto',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -282,6 +380,7 @@ export function P2PPage() {
                 background: 'transparent',
                 color: 'var(--text-secondary)',
                 cursor: 'pointer',
+                transition: 'all var(--motion-fast)',
               }}
             >
               <RefreshCw size={15} />
@@ -290,14 +389,19 @@ export function P2PPage() {
         </div>
       </Card>
 
-      {/* ── Order table ─────────────────────────────────────────────── */}
-      <Card variant="default" padding="none">
+      {/* ── Order table (fills remaining height; body scrolls) ──────── */}
+      <Card
+        variant="default"
+        padding="none"
+        style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+      >
         <div style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: 'var(--space-3) var(--space-4)',
           borderBottom: '1px solid var(--border-default)',
+          flexShrink: 0,
         }}>
           <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
             P2P Orderbook
@@ -318,40 +422,53 @@ export function P2PPage() {
           data={orderList}
           loading={isLoading}
           emptyText="No orders available"
-          keyField="order_id"
+          keyField="productId"
           stickyHeader
+          fill
         />
       </Card>
 
       {/* ── Modals ──────────────────────────────────────────────────── */}
-      {orderLifecycle.phase === 'place-order' && orderLifecycle.selectedInfo && (
+      {orderLifecycle.phase === 'place-order' && orderLifecycle.selectedInfo && extendedInfo && (
         <PlaceOrderModal
           merchant={orderLifecycle.selectedInfo.merchant}
           productId={orderLifecycle.selectedInfo.productId}
           assetType={assetType}
-          displayRate={rate ?? 0}
+          displayRate={extendedInfo.onChainRate}
           fiatName={moneyPair}
           cryptoName={cryptoPair}
           minAmount={orderLifecycle.selectedInfo.minAmount}
           maxAmount={orderLifecycle.selectedInfo.maxAmount}
           onClose={handleCloseAll}
           onSuccess={handlePlaceOrderSuccess}
+          bondTokenAddress={extendedInfo.bondTokenAddress}
+          tokenDecimals={extendedInfo.tokenDecimals}
+          platformId={extendedInfo.platformId}
         />
       )}
 
-      {orderLifecycle.phase === 'payment' &&
+      {orderLifecycle.phase === 'awaiting-proof' &&
         orderLifecycle.selectedInfo &&
-        orderLifecycle.fiatAmount !== null && (
+        orderLifecycle.fiatAmount !== null &&
+        orderLifecycle.platformId !== null && (
           <P2PPaymentModal
             dbOrderId={orderLifecycle.selectedInfo.dbOrderId}
             merchant={orderLifecycle.selectedInfo.merchant}
             productId={orderLifecycle.selectedInfo.productId}
             onChainOrderId={orderLifecycle.onChainOrderId}
             isBuy={isBuy}
+            assetType={assetType}
             cryptoName={cryptoPair}
             fiatCurrency={moneyPair}
             fiatAmount={orderLifecycle.fiatAmount}
+            deadline={orderLifecycle.deadline}
+            platformId={orderLifecycle.platformId}
             onClose={handleCloseAll}
+            onCompleted={() => {
+              void orderListQuery.refetch();
+              handleCloseAll();
+            }}
+            bondTokenAddress={extendedInfo?.bondTokenAddress}
           />
         )}
     </div>

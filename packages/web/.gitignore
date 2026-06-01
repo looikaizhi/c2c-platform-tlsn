@@ -3,3 +3,13 @@ out/
 node_modules/
 .env*.local
 next-env.d.ts
+
+.playwright-cli/
+
+# SQLite 本地数据（schema 由 drizzle 迁移代码定义，不需要提交 db 文件）
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/backup/
+!data/.gitkeep

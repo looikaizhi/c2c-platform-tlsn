@@ -1,170 +1,167 @@
 "use client";
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import type { Hex, Address } from 'viem';
-import { createPublicClient, custom } from 'viem';
-import { submitMerchantAction, type MerchantAction } from '@/lib/contractSubmitter';
 import { C2C_ADMIN_ABI } from '@/lib/contractAbi';
-import { contractConfig, chain } from '@/lib/contractConfig';
-import { getProvider } from '@/lib/walletDiscovery';
+import { getPublicClient as chainGetPublicClient } from '@/chain/clients';
+import { useNetwork } from '@/contexts/NetworkContext';
+import { useImperativeTx } from '@/hooks/core/useImperativeTx';
+import * as escrow from '@/chain/writers/escrowWriter';
+import * as admin  from '@/chain/writers/adminWriter';
 
 export type ProductStatus = 'idle' | 'submitting' | 'success' | 'error';
 
 export interface SupportedCrypto {
-    id: bigint;
-    tokenSymbol: string;
+    id:           bigint;
+    tokenSymbol:  string;
     tokenAddress: Address;
-    isActive: boolean;
+    isActive:     boolean;
 }
 
 export interface SupportedFiat {
-    id: bigint;
+    id:       bigint;
     fiatName: string;
     isActive: boolean;
 }
 
 export interface MerchantInfo {
-    isActive: boolean;
-    kybVerified: boolean;
-    registeredAt: bigint;
+    isActive:         boolean;
+    kybVerified:      boolean;
+    registeredAt:     bigint;
     sellCryptoAmount: bigint;
-    sellFiatAmount: bigint;
+    sellFiatAmount:   bigint;
 }
 
 export interface UseProductsReturn {
     status: ProductStatus;
     txHash: Hex | null;
-    error: string | null;
-    listCryptoProduct: (cryptoId: bigint, fiatId: bigint, amount: bigint, isActive: boolean, provider?: any) => Promise<void>;
-    listFiatProduct: (fiatId: bigint, cryptoId: bigint, amount: bigint, isActive: boolean, provider?: any) => Promise<void>;
-    activateProduct: (id: bigint, assetType: number, provider?: any) => Promise<void>;
-    deactivateProduct: (id: bigint, assetType: number, provider?: any) => Promise<void>;
-    addCollateral: (id: bigint, assetType: number, amount: bigint, provider?: any) => Promise<void>;
-    withdrawCollateral: (id: bigint, assetType: number, amount: bigint, provider?: any) => Promise<void>;
-    setFiatAccount: (account: string, provider?: any) => Promise<void>;
-    fetchMerchantInfo: (address: Address, provider?: any) => Promise<MerchantInfo | null>;
-    fetchSupportedCryptos: (provider?: any) => Promise<SupportedCrypto[]>;
-    fetchSupportedFiats: (provider?: any) => Promise<SupportedFiat[]>;
-    reset: () => void;
+    error:  string | null;
+    listCryptoProduct: (cryptoId: bigint, fiatId: bigint, amount: bigint, isActive: boolean, platformId: Hex) => Promise<void>;
+    listFiatProduct:   (fiatId: bigint, cryptoId: bigint, amount: bigint, isActive: boolean, platformId: Hex) => Promise<void>;
+    activateProduct:   (id: bigint, assetType: number) => Promise<void>;
+    deactivateProduct: (id: bigint, assetType: number) => Promise<void>;
+    addCollateral:     (id: bigint, assetType: number, amount: bigint) => Promise<void>;
+    withdrawCollateral:(id: bigint, assetType: number, amount: bigint) => Promise<void>;
+    setFiatAccount:    (account: string) => Promise<void>;
+    publishRate:       (productId: bigint, assetType: number, rate: bigint, expiresAt: bigint) => Promise<void>;
+    setBusinessHours:  (productId: bigint, assetType: number, openSecond: number, closeSecond: number, activeDays: number) => Promise<void>;
+    openNow:           (productId: bigint, assetType: number) => Promise<void>;
+    closeNow:          (productId: bigint, assetType: number) => Promise<void>;
+    clearManualOverride:        (productId: bigint, assetType: number) => Promise<void>;
+    setPaymentInfoForPlatform:  (platformId: Hex, nameHash: Hex, idHash: Hex) => Promise<void>;
+    fetchMerchantInfo:     (address: Address) => Promise<MerchantInfo | null>;
+    fetchSupportedCryptos: () => Promise<SupportedCrypto[]>;
+    fetchSupportedFiats:   () => Promise<SupportedFiat[]>;
+    reset:                 () => void;
 }
 
 export function useProducts(): UseProductsReturn {
-    const [status, setStatus] = useState<ProductStatus>('idle');
-    const [txHash, setTxHash] = useState<Hex | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const { network } = useNetwork();
+    const tx = useImperativeTx();
 
-    const reset = useCallback(() => {
-        setStatus('idle');
-        setTxHash(null);
-        setError(null);
-    }, []);
+    const status: ProductStatus =
+        tx.status === 'pending' ? 'submitting' : tx.status;
 
-    const exec = useCallback(async (action: MerchantAction, provider?: any) => {
+    const runTx = useCallback(async (fn: () => Promise<{ hash: Hex }>) => {
+        await tx.run(async () => {
+            const { hash } = await fn();
+            tx.setHash(hash);
+        });
+    }, [tx]);
+
+    const listCryptoProduct = useCallback(
+        async (cryptoId: bigint, fiatId: bigint, amount: bigint, isActive: boolean, platformId: Hex) => {
+            await runTx(() => escrow.listCryptoProduct(network.chainId, { cryptoId, fiatId, amount, isActive, platformId }));
+        },
+    [network.chainId, runTx]);
+
+    const listFiatProduct = useCallback(
+        async (fiatId: bigint, cryptoId: bigint, amount: bigint, isActive: boolean, platformId: Hex) => {
+            await runTx(() => escrow.listFiatProduct(network.chainId, { fiatId, cryptoId, amount, isActive, platformId }));
+        },
+    [network.chainId, runTx]);
+
+    const activateProduct    = useCallback(async (id: bigint, t: number) => { await runTx(() => escrow.activeProduct(network.chainId, id, t)); },   [network.chainId, runTx]);
+    const deactivateProduct  = useCallback(async (id: bigint, t: number) => { await runTx(() => escrow.inactiveProduct(network.chainId, id, t)); }, [network.chainId, runTx]);
+    const addCollateral      = useCallback(async (id: bigint, t: number, amount: bigint) => { await runTx(() => escrow.addAmount(network.chainId, id, t, amount)); },  [network.chainId, runTx]);
+    const withdrawCollateral = useCallback(async (id: bigint, t: number, amount: bigint) => { await runTx(() => escrow.takeAmount(network.chainId, id, t, amount)); }, [network.chainId, runTx]);
+
+    const setFiatAccount     = useCallback(async (account: string) => { await runTx(() => admin.setMerchantFiatAccount(network.chainId, account)); }, [network.chainId, runTx]);
+    const publishRate        = useCallback(
+        async (pid: bigint, t: number, rate: bigint, exp: bigint) => { await runTx(() => admin.publishRate(network.chainId, pid, t, rate, exp)); },
+    [network.chainId, runTx]);
+    const setBusinessHours   = useCallback(
+        async (pid: bigint, t: number, o: number, c: number, days: number) => {
+            await runTx(() => admin.setBusinessHours(network.chainId, pid, t, o, c, days));
+        },
+    [network.chainId, runTx]);
+    const openNow              = useCallback(async (pid: bigint, t: number) => { await runTx(() => admin.openNow(network.chainId, pid, t)); },  [network.chainId, runTx]);
+    const closeNow             = useCallback(async (pid: bigint, t: number) => { await runTx(() => admin.closeNow(network.chainId, pid, t)); }, [network.chainId, runTx]);
+    const clearManualOverride  = useCallback(async (pid: bigint, t: number) => { await runTx(() => admin.clearManualOverride(network.chainId, pid, t)); }, [network.chainId, runTx]);
+    const setPaymentInfoForPlatform = useCallback(
+        async (platformId: Hex, nameHash: Hex, idHash: Hex) => {
+            await runTx(() => admin.setPlatformBinding(network.chainId, platformId, nameHash, idHash));
+        },
+    [network.chainId, runTx]);
+
+    // ── Read paths (no tx state) ──────────────────────────────────────────
+    const fetchMerchantInfo = useCallback(async (address: Address, _p?: any): Promise<MerchantInfo | null> => {
         try {
-            setError(null);
-            setStatus('submitting');
-            const { hash } = await submitMerchantAction(action, provider);
-            setTxHash(hash);
-            setStatus('success');
-        } catch (err: any) {
-            setError(err.shortMessage || err.message || String(err));
-            setStatus('error');
-        }
-    }, []);
-
-    const getPublicClient = useCallback((provider?: any) => {
-        const ethereum = provider ?? getProvider();
-        return createPublicClient({ chain, transport: custom(ethereum) });
-    }, []);
-
-    const listCryptoProduct = useCallback(async (
-        cryptoId: bigint, fiatId: bigint, amount: bigint, isActive: boolean, provider?: any,
-    ) => {
-        await exec({ type: 'listCryptoProduct', cryptoId, fiatId, amount, isActive }, provider);
-    }, [exec]);
-
-    const listFiatProduct = useCallback(async (
-        fiatId: bigint, cryptoId: bigint, amount: bigint, isActive: boolean, provider?: any,
-    ) => {
-        await exec({ type: 'listFiatProduct', fiatId, cryptoId, amount, isActive }, provider);
-    }, [exec]);
-
-    const activateProduct = useCallback(async (id: bigint, assetType: number, provider?: any) => {
-        await exec({ type: 'activeProduct', id, assetType }, provider);
-    }, [exec]);
-
-    const deactivateProduct = useCallback(async (id: bigint, assetType: number, provider?: any) => {
-        await exec({ type: 'inactiveProduct', id, assetType }, provider);
-    }, [exec]);
-
-    const addCollateral = useCallback(async (id: bigint, assetType: number, amount: bigint, provider?: any) => {
-        await exec({ type: 'addAmount', id, assetType, amount }, provider);
-    }, [exec]);
-
-    const withdrawCollateral = useCallback(async (id: bigint, assetType: number, amount: bigint, provider?: any) => {
-        await exec({ type: 'takeAmount', id, assetType, amount }, provider);
-    }, [exec]);
-
-    const setFiatAccount = useCallback(async (account: string, provider?: any) => {
-        await exec({ type: 'setMerchantFiatAccount', account }, provider);
-    }, [exec]);
-
-    const fetchMerchantInfo = useCallback(async (address: Address, provider?: any): Promise<MerchantInfo | null> => {
-        try {
-            const client = getPublicClient(provider);
+            const client = chainGetPublicClient(network.chainId);
             const result = await client.readContract({
-                address: contractConfig.c2cAdmin,
-                abi: C2C_ADMIN_ABI,
+                address:      network.contracts.c2cAdmin,
+                abi:          C2C_ADMIN_ABI,
                 functionName: 'merchants',
-                args: [address],
+                args:         [address],
             });
-            const [isActive, kybVerified, registeredAt, sellCryptoAmount, sellFiatAmount] = result as [boolean, boolean, bigint, bigint, bigint];
+            const [isActive, kybVerified, registeredAt, sellCryptoAmount, sellFiatAmount] =
+                result as [boolean, boolean, bigint, bigint, bigint];
             return { isActive, kybVerified, registeredAt, sellCryptoAmount, sellFiatAmount };
         } catch {
             return null;
         }
-    }, [getPublicClient]);
+    }, [network]);
 
-    const fetchSupportedCryptos = useCallback(async (provider?: any): Promise<SupportedCrypto[]> => {
+    const fetchSupportedCryptos = useCallback(async (_p?: any): Promise<SupportedCrypto[]> => {
         try {
-            const client = getPublicClient(provider);
+            const client = chainGetPublicClient(network.chainId);
             const result = await client.readContract({
-                address: contractConfig.c2cAdmin,
-                abi: C2C_ADMIN_ABI,
+                address:      network.contracts.c2cAdmin,
+                abi:          C2C_ADMIN_ABI,
                 functionName: 'getSupportCryptoList',
             });
             return (result as any[]).map((c: any) => ({
-                id: c.id,
-                tokenSymbol: c.tokenSymbol,
+                id:           c.id,
+                tokenSymbol:  c.tokenSymbol,
                 tokenAddress: c.tokenAddress,
-                isActive: c.isActive,
+                isActive:     c.isActive,
             }));
         } catch {
             return [];
         }
-    }, [getPublicClient]);
+    }, [network]);
 
-    const fetchSupportedFiats = useCallback(async (provider?: any): Promise<SupportedFiat[]> => {
+    const fetchSupportedFiats = useCallback(async (_p?: any): Promise<SupportedFiat[]> => {
         try {
-            const client = getPublicClient(provider);
+            const client = chainGetPublicClient(network.chainId);
             const result = await client.readContract({
-                address: contractConfig.c2cAdmin,
-                abi: C2C_ADMIN_ABI,
+                address:      network.contracts.c2cAdmin,
+                abi:          C2C_ADMIN_ABI,
                 functionName: 'getSupportFiatList',
             });
             return (result as any[]).map((f: any) => ({
-                id: f.id,
+                id:       f.id,
                 fiatName: f.fiatName,
                 isActive: f.isActive,
             }));
         } catch {
             return [];
         }
-    }, [getPublicClient]);
+    }, [network]);
 
     return {
         status,
-        txHash,
-        error,
+        txHash: tx.txHash,
+        error:  tx.error,
         listCryptoProduct,
         listFiatProduct,
         activateProduct,
@@ -172,9 +169,15 @@ export function useProducts(): UseProductsReturn {
         addCollateral,
         withdrawCollateral,
         setFiatAccount,
+        publishRate,
+        setBusinessHours,
+        openNow,
+        closeNow,
+        clearManualOverride,
+        setPaymentInfoForPlatform,
         fetchMerchantInfo,
         fetchSupportedCryptos,
         fetchSupportedFiats,
-        reset,
+        reset: tx.reset,
     };
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRateQuery } from '@/hooks/queries/useRateQuery';
-import type { CryptoPair, MoneyPair } from '@/lib/priceModel';
+import type { CryptoPair, MoneyPair } from '@/lib/assetRegistry';
 
 interface UseTradeQuoteParams {
     isBuy: boolean;
@@ -38,7 +38,7 @@ export function useTradeQuote({ isBuy, moneyPair, cryptoPair }: UseTradeQuotePar
     }, [amountRecv]);
 
     const syncByCurrentRate = useCallback((currentRate: number | null, buyMode: boolean) => {
-        if (currentRate === null) {
+        if (currentRate === null || currentRate === 0) {
             if (buyMode) {
                 setAmountRecv('');
             } else {
@@ -70,7 +70,7 @@ export function useTradeQuote({ isBuy, moneyPair, cryptoPair }: UseTradeQuotePar
         amountPayRef.current = value;
 
         const pay = parseNumberValue(value);
-        if (pay === null || rate === null) {
+        if (pay === null || rate === null || rate === 0) {
             setAmountRecv('');
             amountRecvRef.current = '';
             return;

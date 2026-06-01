@@ -5,10 +5,14 @@ const MERCHANT_NAME_HASH = "0x00000000000000000000000000000000000000000000000000
 const MERCHANT_ID_HASH = "0x0000000000000000000000000000000000000000000000000000000000000003";
 const PAYEE_NAME_HASH = "0x0000000000000000000000000000000000000000000000000000000000000004";
 const PAYEE_ID_HASH = "0x0000000000000000000000000000000000000000000000000000000000000005";
+const OWNER_ADDRESS = "0x0000000000000000000000000000000000000000000000000000000000000007";
+const COUNTERPARTY_ADDRESS = "0x0000000000000000000000000000000000000000000000000000000000000008";
+const TENANT_ID = "__TLSN_TENANT_ID_SENTINEL__";
 const HOST = "mbillexprod.alipay.com";
 const PATH = "/enterprise/fundReportDetailQuery.json";
 const LANDING_URL = "https://b.alipay.com/page/mbillexprod/fund/business/operate/detail";
 const METHOD = "POST";
+const TLSN_POLICY_VERSION = "v1.0.0";
 function getJsonBody(request) {
   if (!request.requestBody?.raw?.[0]?.bytes) return null;
   const bytes = request.requestBody.raw[0].bytes;
@@ -26,6 +30,7 @@ function getFormBody(request) {
 const config = {
   name: "Alipay Payment Detail",
   description: "Verify Alipay payment transaction details: payer, payee, amount, status, and timestamp (selective disclosure of bizInfo fields).",
+  policyVersion: TLSN_POLICY_VERSION,
   requests: [
     {
       method: METHOD,
@@ -107,27 +112,30 @@ async function onClick() {
       {
         verifierUrl: VERIFIER_URL,
         proxyUrl: PROXY_URL_BASE + HOST,
-        maxRecvData: 2e4,
-        maxSentData: 1e4,
+        maxRecvData: 3e3,
+        maxSentData: 3e3,
         transcriptCommitHashAlg: "Keccak256",
         sessionData: {
           __tlsn_order_binding_hash: ORDER_BINDING_HASH,
           __tlsn_merchant_name_hash: MERCHANT_NAME_HASH,
           __tlsn_merchant_id_hash: MERCHANT_ID_HASH,
           __tlsn_payee_name_hash: PAYEE_NAME_HASH,
-          __tlsn_payee_id_hash: PAYEE_ID_HASH
+          __tlsn_payee_id_hash: PAYEE_ID_HASH,
+          __tlsn_owner_address: OWNER_ADDRESS,
+          __tlsn_counterparty_address: COUNTERPARTY_ADDRESS,
+          __tlsn_tenant_id: TENANT_ID
         },
         accountCheckFields: [
-          // handlers[4] = payeeName       → verify against payeeNameHash
+          // handlers[4] = payeeName       → verify against payeeNameHash (demo placeholder)
           { handlerIndex: 4, sessionDataKey: "__tlsn_payee_name_hash", valueMode: "json_value" },
-          // handlers[5] = payeeLoginEmail → verify against payeeIdHash
+          // handlers[5] = payeeLoginEmail → verify against payeeIdHash (demo placeholder)
           { handlerIndex: 5, sessionDataKey: "__tlsn_payee_id_hash", valueMode: "json_value" }
         ],
         handlers: [
           // Reveal the URL
-          { type: "SENT", part: "START_LINE", action: "PEDERSEN" },
+          { type: "SENT", part: "START_LINE", action: "REVEAL" },
           // Reveal response status start line
-          { type: "RECV", part: "START_LINE", action: "PEDERSEN", hideKey: true },
+          { type: "RECV", part: "START_LINE", action: "REVEAL" },
           // Selectively reveal key bizInfo fields from result.bizInfo.*
           // (Note: Parser only supports top-level JSON paths; nested paths not yet supported,
           //  so we use regex patterns to match specific fields within the JSON body.)
@@ -145,44 +153,51 @@ async function onClick() {
           {
             type: "RECV",
             part: "ALL",
-            action: "PEDERSEN",
-            params: { type: "regex", regex: '"orderId"\\s*:\\s*"[^"]*"' }
+            action: "REVEAL",
+            params: { type: "regex", regex: '"orderId"\\s*:\\s*"[^"]*"' },
+            label: "transaction.id"
           },
           {
             type: "RECV",
             part: "ALL",
-            action: "PEDERSEN",
-            params: { type: "regex", regex: '"gmtSuccess"\\s*:\\s*"[^"]*"' }
+            action: "REVEAL",
+            params: { type: "regex", regex: '"gmtSuccess"\\s*:\\s*"[^"]*"' },
+            label: "originator.timestamp"
           },
           {
             type: "RECV",
             part: "ALL",
-            action: "PEDERSEN",
-            params: { type: "regex", regex: '"payeeName"\\s*:\\s*"[^"]*"' }
+            action: "REVEAL",
+            params: { type: "regex", regex: '"payeeName"\\s*:\\s*"[^"]*"' },
+            label: "beneficiary.name"
           },
           {
             type: "RECV",
             part: "ALL",
-            action: "PEDERSEN",
-            params: { type: "regex", regex: '"payeeLoginEmail"\\s*:\\s*"[^"]*"' }
+            action: "REVEAL",
+            params: { type: "regex", regex: '"payeeLoginEmail"\\s*:\\s*"[^"]*"' },
+            label: "beneficiary.accountId"
           },
           {
             type: "RECV",
             part: "ALL",
-            action: "PEDERSEN",
-            params: { type: "regex", regex: '"payAmount"\\s*:\\s*"[^"]*"' }
+            action: "REVEAL",
+            params: { type: "regex", regex: '"payAmount"\\s*:\\s*"[^"]*"' },
+            label: "originator.amount"
           },
           {
             type: "RECV",
             part: "ALL",
-            action: "PEDERSEN",
-            params: { type: "regex", regex: '"bizType"\\s*:\\s*"[^"]*"' }
+            action: "REVEAL",
+            params: { type: "regex", regex: '"bizType"\\s*:\\s*"[^"]*"' },
+            label: "transaction.type"
           },
           {
             type: "RECV",
             part: "ALL",
-            action: "PEDERSEN",
-            params: { type: "regex", regex: '"status"\\s*:\\s*"[A-Z_]+"' }
+            action: "REVEAL",
+            params: { type: "regex", regex: '"status"\\s*:\\s*"[A-Z_]+"' },
+            label: "transaction.status"
           }
         ],
         transcriptCommitDebug: {
@@ -193,7 +208,10 @@ async function onClick() {
       }
     );
     console.log("[alipay] prove ok");
-    done(JSON.stringify(resp));
+    done(JSON.stringify({
+      displayResults: resp.displayResults || resp.results || [],
+      ...resp
+    }));
   } catch (err) {
     console.error("[alipay] onClick error", err);
     setState("isRequestPending", false);
@@ -322,7 +340,7 @@ function main() {
         const formBody = getFormBody(request);
         console.log("[alipay] getJsonBody result:", JSON.stringify(jsonBody));
         console.log("[alipay] getFormBody result:", JSON.stringify(formBody));
-        const requestBody = jsonBody ? typeof jsonBody === "string" ? jsonBody : JSON.stringify(jsonBody) : formBody ? new URLSearchParams(formBody).toString().replaceAll("%20", "+") : null;
+        const requestBody = jsonBody ? typeof jsonBody === "string" ? jsonBody : JSON.stringify(jsonBody) : formBody ? new URLSearchParams(formBody).toString().split("%20").join("+") : null;
         if (request.url && !cachedRequestUrl) {
           setState("requestUrl", request.url);
           console.log("[alipay] request URL found: ", request.url);
