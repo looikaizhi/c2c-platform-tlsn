@@ -2,13 +2,32 @@
 
 # TLSN Extension Monorepo
 
+**English** | [中文](docs/README.zh-CN.md)
+
 A Chrome Extension for TLSNotary with plugin SDK and verifier server.
 
 > [!IMPORTANT]
 > When running the extension against a notary server, please ensure that the server's version is the same as the version of this extension.
 
+## About This Project
+
+This repository extends the open-source [TLSNotary Extension](https://github.com/tlsnotary/tlsn-extension) into a **C2C (consumer-to-consumer) crypto–fiat payment platform**. The TLSNotary extension and plugin SDK — built by the TLSNotary / PSE team — provide the browser-based TLS proof-generation foundation. On top of that foundation, this project adds the **C2C protocol layer**:
+
+- `packages/contracts` — C2C escrow / bond-vault / risk-manager smart contracts
+- `packages/web` — the C2C trading dApp
+- `packages/keeper` — on-chain settlement keeper
+- C2C-specific extensions to `packages/verifier` and `packages/demo`
+
+The TLSNotary protocol layer is the work of its original authors; the C2C protocol layer is my contribution. The full split is preserved in the Git history and the GitHub Contributors graph. See [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md).
+
+## Acknowledgements
+
+Built on top of [tlsnotary/tlsn-extension](https://github.com/tlsnotary/tlsn-extension) by the TLSNotary / PSE team. Huge thanks to the original authors (@0xtsukino, @hendrikeeckhaut, @mhchia, and the other TLSNotary contributors) whose work made it possible for me to focus on the C2C protocol design.
+
 ## Table of Contents
 
+- [About This Project](#about-this-project)
+- [Acknowledgements](#acknowledgements)
 - [Monorepo Structure](#monorepo-structure)
 - [Architecture Overview](#architecture-overview)
 - [Getting Started](#getting-started)
