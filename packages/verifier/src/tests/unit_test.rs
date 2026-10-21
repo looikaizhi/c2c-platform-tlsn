@@ -1006,7 +1006,6 @@ mod stage5 {
 // ============================================================================
 
 mod stage6 {
-    use super::*;
     use crate::auth::api_key::{resolve_principal, KeyScope, Principal};
     use crate::auth::siwe::{issue_nonce, mint_token, verify_token, NonceStore};
 

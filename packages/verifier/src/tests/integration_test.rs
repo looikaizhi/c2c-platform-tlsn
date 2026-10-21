@@ -837,7 +837,7 @@ async fn test_webhook_integration_with_github() {
 
     // 7. If commitments were empty, wait for the prover to finish so we have transcript sizes,
     //    then fill in the fallback reveal_config ranges.
-    let (sent_transcript, recv_transcript) = if sent_ranges.is_empty() && recv_ranges.is_empty() {
+    let (_sent_transcript, recv_transcript) = if sent_ranges.is_empty() && recv_ranges.is_empty() {
         // Fallback: prover must complete before we can build reveal_config
         let prover_result = tokio::time::timeout(Duration::from_secs(30), prover_handle)
             .await
