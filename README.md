@@ -20,6 +20,9 @@ This repository extends the open-source [TLSNotary Extension](https://github.com
 
 The TLSNotary protocol layer is the work of its original authors; the C2C protocol layer is my contribution. The full split is preserved in the Git history and the GitHub Contributors graph. See [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md).
 
+> [!TIP]
+> Protocol documentation, thesis and experiment data live in **[looikaizhi/zktls-c2c-exchange](https://github.com/looikaizhi/zktls-c2c-exchange)** (中文 / English), which links back to this repository line by line.
+
 ## Acknowledgements
 
 Built on top of [tlsnotary/tlsn-extension](https://github.com/tlsnotary/tlsn-extension) by the TLSNotary / PSE team. Huge thanks to the original authors (@0xtsukino, @hendrikeeckhaut, @mhchia, and the other TLSNotary contributors) whose work made it possible for me to focus on the C2C protocol design.
